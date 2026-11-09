@@ -11,6 +11,7 @@ import.rite_types;
 import.state_pool;
 import.value_arena;
 import.vm_core;
+import.vm_ops_collections;
 
 // Runs the root IREP once per loaded program. The root defines classes and
 // methods, so every host entry calls this before looking anything up.
@@ -166,6 +167,12 @@ fn vm_exec_step(
     }
     if op == OP_GETIV || op == OP_SETIV {
         return vm_op_ivar(machine, frame, record, iseq, pc, op);
+    }
+    if op == OP_GETIDX || op == OP_SETIDX {
+        return vm_op_index(machine, frame, record, iseq, pc, op);
+    }
+    if op == OP_HASH {
+        return vm_op_hash(machine, frame, record, iseq, pc);
     }
     if op == OP_ADDI || op == OP_SUBI {
         return vm_op_arith(machine, frame, record, iseq, pc, op);

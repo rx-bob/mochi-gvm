@@ -12,6 +12,7 @@ import.value_arena;
 let MAX_STATE_CLASSES = 256;
 let MAX_STATE_OBJECTS = 4096;
 let MAX_STATE_IVARS = 8192;
+let MAX_STATE_SLOTS = 16384;
 let MAX_STATE_BYTES = 1048576;
 let MAX_STATE_COMPONENTS = 256;
 let MAX_PROMOTION_DEPTH = 32;
@@ -30,6 +31,7 @@ root struct StatePool {
     classes: ClassDef[>..] = [],
     objects: ArenaObject[>..] = [],
     ivars: IvarSlot[>..] = [],
+    slots: ArenaSlot[>..] = [],
     components: u32[>..] = [],
     blob: u8[>..] = [],
 }
@@ -44,6 +46,10 @@ fn state_bytes_used(pool: StatePool&) -> i64 {
 
 fn state_ivar_count(pool: StatePool&) -> i64 {
     return pool.ivars.len;
+}
+
+fn state_slot_count(pool: StatePool&) -> i64 {
+    return pool.slots.len;
 }
 
 fn state_class_count(pool: StatePool&) -> i64 {
@@ -94,6 +100,9 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
             text_length_bytes: text.len,
             class_index: 0,
             ivar_head_index: -1,
+            items_first_index: -1,
+            items_last_index: -1,
+            item_count: 0,
         });
     return mrb_arena_value(MRB_ARENA_STATE, index as u32);
 }
@@ -108,8 +117,199 @@ fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
             text_length_bytes: 0,
             class_index: class_id,
             ivar_head_index: -1,
+            items_first_index: -1,
+            items_last_index: -1,
+            item_count: 0,
         });
     return mrb_arena_value(MRB_ARENA_STATE, index as u32);
+}
+
+fn state_alloc_array(pool: StatePool&) -> MrbValue {
+    return state_alloc_collection(pool, ArenaObjectKind.Array);
+}
+
+fn state_alloc_hash(pool: StatePool&) -> MrbValue {
+    return state_alloc_collection(pool, ArenaObjectKind.Hash);
+}
+
+fn state_alloc_collection(pool: StatePool&, kind: ArenaObjectKind) -> MrbValue {
+    assert(pool.objects.len < MAX_STATE_OBJECTS);
+    let index = pool.objects.len;
+    pool.objects.push(ArenaObject {
+            kind: kind,
+            text_offset_bytes: 0,
+            text_length_bytes: 0,
+            class_index: 0,
+            ivar_head_index: -1,
+            items_first_index: -1,
+            items_last_index: -1,
+            item_count: 0,
+        });
+    return mrb_arena_value(MRB_ARENA_STATE, index as u32);
+}
+
+fn state_is_array(pool: StatePool&, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, value);
+    return ok && object.kind == ArenaObjectKind.Array;
+}
+
+fn state_is_hash(pool: StatePool&, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, value);
+    return ok && object.kind == ArenaObjectKind.Hash;
+}
+
+// Appends one slot to `object_index`'s linked list. Values must already be
+// promoted; callers that accept scratch values use `state_set_ivar` or the
+// high-level builtins, which promote before reaching this helper.
+fn state_append_slot(pool: StatePool&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
+    assert(object_index >= 0);
+    assert(object_index < pool.objects.len);
+    assert(pool.slots.len < MAX_STATE_SLOTS);
+    let slot_index = pool.slots.len;
+    let previous = pool.objects[object_index].items_last_index;
+    pool.slots.push(ArenaSlot {
+            key: key,
+            value: value,
+            previous_index: previous,
+            next_index: -1,
+        });
+    if previous >= 0 {
+        pool.slots[previous].next_index = slot_index;
+    } else {
+        pool.objects[object_index].items_first_index = slot_index;
+    }
+    pool.objects[object_index].items_last_index = slot_index;
+    pool.objects[object_index].item_count += 1;
+    return true;
+}
+
+fn state_slot_index_at(pool: StatePool&, object_index: i64, position: i64) -> i64 {
+    if position < 0 {
+        return -1;
+    }
+    var slot_index = pool.objects[object_index].items_first_index;
+    var remaining = position;
+    while slot_index >= 0 && remaining > 0 {
+        slot_index = pool.slots[slot_index].next_index;
+        remaining -= 1;
+    }
+    return slot_index;
+}
+
+fn state_array_push(pool: StatePool&, array: MrbValue, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return false;
+    }
+    return state_append_slot(pool, mrb_arena_index(array), mrb_nil(), value);
+}
+
+fn state_array_pop(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array || object.item_count == 0 {
+        return mrb_nil(), false;
+    }
+    let object_index = mrb_arena_index(array)as i64;
+    let tail = object.items_last_index;
+    let value = pool.slots[tail].value;
+    let previous = pool.slots[tail].previous_index;
+    if previous >= 0 {
+        pool.slots[previous].next_index = -1;
+    } else {
+        pool.objects[object_index].items_first_index = -1;
+    }
+    pool.objects[object_index].items_last_index = previous;
+    pool.objects[object_index].item_count -= 1;
+    if tail == pool.slots.len - 1 {
+        pool.slots.pop();
+    }
+    return value, true;
+}
+
+fn state_array_get(pool: StatePool&, array: MrbValue, position: i64) -> MrbValue, bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return mrb_nil(), false;
+    }
+    if position < 0 || position >= object.item_count {
+        return mrb_nil(), false;
+    }
+    let slot_index = state_slot_index_at(pool, mrb_arena_index(array), position);
+    if slot_index < 0 {
+        return mrb_nil(), false;
+    }
+    return pool.slots[slot_index].value, true;
+}
+
+fn state_array_set(pool: StatePool&, array: MrbValue, position: i64, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return false;
+    }
+    if position < 0 || position >= object.item_count {
+        return false;
+    }
+    let slot_index = state_slot_index_at(pool, mrb_arena_index(array), position);
+    if slot_index < 0 {
+        return false;
+    }
+    pool.slots[slot_index].value = value;
+    return true;
+}
+
+fn state_array_last(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array || object.item_count == 0 {
+        return mrb_nil(), false;
+    }
+    return pool.slots[object.items_last_index].value, true;
+}
+
+fn state_array_length(pool: StatePool&, array: MrbValue) -> i64 {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return 0;
+    }
+    return object.item_count;
+}
+
+fn state_hash_set(pool: StatePool&, hash: MrbValue, key: MrbValue, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, hash);
+    if !ok || object.kind != ArenaObjectKind.Hash {
+        return false;
+    }
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        if mrb_value_identical(pool.slots[slot_index].key, key) {
+            pool.slots[slot_index].value = value;
+            return true;
+        }
+        slot_index = pool.slots[slot_index].next_index;
+    }
+    return state_append_slot(pool, mrb_arena_index(hash), key, value);
+}
+
+fn state_hash_get(pool: StatePool&, hash: MrbValue, key: MrbValue) -> MrbValue, bool {
+    let object, ok = state_object(pool, hash);
+    if !ok || object.kind != ArenaObjectKind.Hash {
+        return mrb_nil(), false;
+    }
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        if mrb_value_identical(pool.slots[slot_index].key, key) {
+            return pool.slots[slot_index].value, true;
+        }
+        slot_index = pool.slots[slot_index].next_index;
+    }
+    return mrb_nil(), false;
+}
+
+fn state_hash_length(pool: StatePool&, hash: MrbValue) -> i64 {
+    let object, ok = state_object(pool, hash);
+    if !ok || object.kind != ArenaObjectKind.Hash {
+        return 0;
+    }
+    return object.item_count;
 }
 
 fn state_object(pool: StatePool&, value: MrbValue) -> ArenaObject, bool {
@@ -214,10 +414,11 @@ fn promote_to_state(pool: StatePool&, scratch: ScratchArena&, value: MrbValue) -
     return promote_to_state_at(pool, scratch, value, 0);
 }
 
-// Recursive core of `promote_to_state`: strings copy their bytes, and
-// instances copy their linked ivar list after promoting every value. Each
-// scratch occurrence becomes its own state object, and a cyclic or overly deep
-// graph trips the depth assert rather than recursing without a bound.
+// Recursive core of `promote_to_state`: strings copy their bytes, instances
+// copy their ivar list, and arrays/hashes copy every element while promoting
+// nested values. Each scratch occurrence becomes its own state object, and a
+// cyclic or overly deep graph trips the depth assert rather than recursing
+// without a bound.
 recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value: MrbValue, depth: i64) -> MrbValue {
     if !mrb_is_arena(value) {
         return value;
@@ -242,6 +443,29 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
                 let slot = scratch.ivars[slot_index];
                 let stored = promote_to_state_at(pool, scratch, slot.value, depth + 1);
                 state_store_ivar_raw(pool, index, slot.key, stored);
+                slot_index = slot.next_index;
+            }
+            return promoted;
+        },
+        Array => {
+            let promoted = state_alloc_array(pool);
+            var slot_index = object.items_first_index;
+            while slot_index >= 0 {
+                let slot = scratch.slots[slot_index];
+                let stored = promote_to_state_at(pool, scratch, slot.value, depth + 1);
+                state_array_push(pool, promoted, stored);
+                slot_index = slot.next_index;
+            }
+            return promoted;
+        },
+        Hash => {
+            let promoted = state_alloc_hash(pool);
+            var slot_index = object.items_first_index;
+            while slot_index >= 0 {
+                let slot = scratch.slots[slot_index];
+                let stored_key = promote_to_state_at(pool, scratch, slot.key, depth + 1);
+                let stored_value = promote_to_state_at(pool, scratch, slot.value, depth + 1);
+                state_hash_set(pool, promoted, stored_key, stored_value);
                 slot_index = slot.next_index;
             }
             return promoted;

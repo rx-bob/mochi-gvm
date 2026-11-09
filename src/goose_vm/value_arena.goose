@@ -37,24 +37,32 @@ let MRB_FIXNUM_MAX: i64 = 2147483647;
 let SCRATCH_CAPACITY_BYTES = 16384;
 let SCRATCH_CAPACITY_OBJECTS = 1024;
 let SCRATCH_CAPACITY_IVARS = 1024;
+let SCRATCH_CAPACITY_SLOTS = 2048;
 
 type MrbValue = u64;
 
 // The kinds the arena can own. Strings live in the zone byte blob; instances
-// own a linked list of ivar slots and point at a state-pool class.
+// own a linked list of ivar slots; arrays and hashes own a linked list of
+// `ArenaSlot` nodes in the zone slot table.
 enum ArenaObjectKind {
     String,
     Instance,
+    Array,
+    Hash,
 }
 
 // One object header. `text_offset_bytes` and `text_length_bytes` view the
 // zone blob for strings. `ivar_head_index` is -1 or the first `IvarSlot`.
+// Arrays and hashes use the item fields to bracket their linked slot list.
 struct ArenaObject {
     kind: ArenaObjectKind,
     text_offset_bytes: i64,
     text_length_bytes: i64,
     class_index: u32,
     ivar_head_index: i64,
+    items_first_index: i64,
+    items_last_index: i64,
+    item_count: i64,
 }
 
 // One instance variable. Slots form a per-object singly linked list, so
@@ -65,13 +73,23 @@ struct IvarSlot {
     next_index: i64,
 }
 
-// Tick-scoped allocations. The three arrays are inline limited arrays, so the
-// arena has a fixed size and `scratch_reset` only rewinds their lengths. The
-// VM owns exactly one instance for its lifetime; do not construct one per tick.
+// One array element or hash key-value pair. Slots form a doubly linked list so
+// `push` is O(1), `pop` can unlink the tail, and hashes keep insertion order.
+struct ArenaSlot {
+    key: MrbValue,
+    value: MrbValue,
+    previous_index: i64,
+    next_index: i64,
+}
+
+// Tick-scoped allocations. The arrays are inline limited arrays, so the arena
+// has a fixed size and `scratch_reset` only rewinds their lengths. The VM owns
+// exactly one instance for its lifetime; do not construct one per tick.
 struct ScratchArena {
     blob: u8[..SCRATCH_CAPACITY_BYTES] = [],
     objects: ArenaObject[..SCRATCH_CAPACITY_OBJECTS] = [],
     ivars: IvarSlot[..SCRATCH_CAPACITY_IVARS] = [],
+    slots: ArenaSlot[..SCRATCH_CAPACITY_SLOTS] = [],
     allocated_objects_total: i64 = 0,
     allocated_bytes_total: i64 = 0,
     reset_count: i64 = 0,
@@ -117,6 +135,30 @@ fn mrb_fixnum_value(value: MrbValue) -> i64 {
         return (payload | 0xFFFFFFFF00000000)as!i64;
     }
     return payload as!i64;
+}
+
+// Appends the decimal form of `number`. Integers render without touching an
+// arena, which keeps `to_s` and `Array#join` allocation-free for scalars.
+fn mrb_format_fixnum(out: u8[>..]&, number: i64) {
+    var magnitude = number;
+    if magnitude < 0 {
+        out.push(45);
+        magnitude = -magnitude;
+    }
+    if magnitude == 0 {
+        out.push(48);
+        return;
+    }
+    var digits: u8[>..] = [];
+    while magnitude > 0 {
+        digits.push((48 + magnitude % 10)as u8);
+        magnitude /= 10;
+    }
+    var index = digits.len - 1;
+    while index >= 0 {
+        out.push(digits[index]);
+        index -= 1;
+    }
 }
 
 fn mrb_symbol(symbol_id: u32) -> MrbValue {
@@ -243,6 +285,9 @@ fn empty_arena_object(kind: ArenaObjectKind) -> ArenaObject {
         text_length_bytes: 0,
         class_index: 0,
         ivar_head_index: -1,
+        items_first_index: -1,
+        items_last_index: -1,
+        item_count: 0,
     };
 }
 
@@ -264,6 +309,7 @@ fn scratch_reset(arena: ScratchArena&) {
     arena.blob.clear();
     arena.objects.clear();
     arena.ivars.clear();
+    arena.slots.clear();
     arena.reset_count += 1;
 }
 
@@ -294,6 +340,9 @@ fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
             text_length_bytes: text.len,
             class_index: 0,
             ivar_head_index: -1,
+            items_first_index: -1,
+            items_last_index: -1,
+            item_count: 0,
         });
     arena.allocated_objects_total += 1;
     arena.allocated_bytes_total += text.len;
@@ -310,6 +359,9 @@ fn scratch_alloc_instance(arena: ScratchArena&, class_id: u32) -> MrbValue {
             text_length_bytes: 0,
             class_index: class_id,
             ivar_head_index: -1,
+            items_first_index: -1,
+            items_last_index: -1,
+            item_count: 0,
         });
     arena.allocated_objects_total += 1;
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);

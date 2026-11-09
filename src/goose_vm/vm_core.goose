@@ -33,6 +33,8 @@ let OP_LOADTRUE: u8 = 19;
 let OP_LOADFALSE: u8 = 20;
 let OP_GETIV: u8 = 25;
 let OP_SETIV: u8 = 26;
+let OP_GETIDX: u8 = 35;
+let OP_SETIDX: u8 = 37;
 let OP_ENTER: u8 = 57;
 let OP_RETURN: u8 = 61;
 let OP_RETNIL: u8 = 64;
@@ -40,6 +42,7 @@ let OP_ADDI: u8 = 70;
 let OP_SUBI: u8 = 72;
 let OP_STRING: u8 = 92;
 let OP_STRCAT: u8 = 93;
+let OP_HASH: u8 = 94;
 let OP_CLASS: u8 = 103;
 let OP_EXEC: u8 = 105;
 let OP_TDEF: u8 = 107;
@@ -234,7 +237,7 @@ fn vm_append_value_text(machine: Vm&, out: u8[>..]&, value: MrbValue) {
         return;
     }
     if mrb_is_fixnum(value) {
-        vm_format_fixnum(out, mrb_fixnum_value(value));
+        mrb_format_fixnum(out, mrb_fixnum_value(value));
         return;
     }
     if mrb_is_true(value) {
@@ -243,28 +246,6 @@ fn vm_append_value_text(machine: Vm&, out: u8[>..]&, value: MrbValue) {
     }
     if mrb_is_false(value) {
         out.append("false");
-    }
-}
-
-fn vm_format_fixnum(out: u8[>..]&, number: i64) {
-    var magnitude = number;
-    if magnitude < 0 {
-        out.push(45);
-        magnitude = -magnitude;
-    }
-    if magnitude == 0 {
-        out.push(48);
-        return;
-    }
-    var digits: u8[>..] = [];
-    while magnitude > 0 {
-        digits.push((48 + magnitude % 10)as u8);
-        magnitude /= 10;
-    }
-    var index = digits.len - 1;
-    while index >= 0 {
-        out.push(digits[index]);
-        index -= 1;
     }
 }
 
