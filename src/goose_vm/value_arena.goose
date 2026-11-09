@@ -22,6 +22,7 @@ let MRB_TAG_FIXNUM: u64 = 3;
 let MRB_TAG_SYMBOL: u64 = 4;
 let MRB_TAG_CLASS: u64 = 5;
 let MRB_TAG_ARENA: u64 = 6;
+let MRB_TAG_BLOCK: u64 = 7;
 
 let MRB_ARENA_TAG_SHIFT: u64 = 31;
 let MRB_ARENA_INDEX_MASK: u64 = 0x7FFFFFFF;
@@ -179,6 +180,19 @@ fn mrb_class_id(value: MrbValue) -> u32 {
     return (value & MRB_PAYLOAD_MASK)as u32;
 }
 
+// Packs an absolute child-IREP index as a block closure handle. The fixtures
+// only need the block body, so the closure carries no captured environment.
+fn mrb_block(record_index: i64) -> MrbValue {
+    assert(record_index >= 0);
+    assert(record_index <= MRB_PAYLOAD_MASK as i64);
+    return (MRB_TAG_BLOCK << MRB_TAG_SHIFT) | (record_index as!u64);
+}
+
+fn mrb_block_record_index(value: MrbValue) -> i64 {
+    assert(mrb_is_block(value));
+    return (value & MRB_PAYLOAD_MASK)as i64;
+}
+
 // Packs a zone tag and an object-table index into one arena handle.
 fn mrb_arena_value(arena_tag: u8, index: u32) -> MrbValue {
     assert(index <= MRB_ARENA_INDEX_MASK);
@@ -225,6 +239,10 @@ fn mrb_is_class(value: MrbValue) -> bool {
     return mrb_value_tag(value) == MRB_TAG_CLASS;
 }
 
+fn mrb_is_block(value: MrbValue) -> bool {
+    return mrb_value_tag(value) == MRB_TAG_BLOCK;
+}
+
 fn mrb_is_arena(value: MrbValue) -> bool {
     return mrb_value_tag(value) == MRB_TAG_ARENA;
 }
@@ -268,6 +286,9 @@ fn mrb_value_kind_name(value: MrbValue) -> u8[:] {
     }
     if tag == MRB_TAG_CLASS {
         return "class";
+    }
+    if tag == MRB_TAG_BLOCK {
+        return "block";
     }
     if tag == MRB_TAG_ARENA {
         if ((value >> MRB_ARENA_TAG_SHIFT) & 1) != 0 {

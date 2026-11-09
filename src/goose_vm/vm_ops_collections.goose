@@ -16,23 +16,23 @@ fn vm_op_index(
     let container, container_ok = vm_read_register(machine, record, frame.base, ops.a);
     let key, key_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
     if !container_ok || !key_ok {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
     }
     if op == OP_GETIDX {
         let value = builtin_get_index(machine.pool, machine.scratch, container, key);
         if !vm_write_register(machine, record, frame.base, ops.a, value) {
-            return vm_fail(machine, VmError.BadOperand, pc + 2);
+            return vm_fail(machine, VmError.BadOperand, pc + 1);
         }
-        return vm_step_continue(pc + 2);
+        return vm_step_continue(pc + 1);
     }
     let value, value_ok = vm_read_register(machine, record, frame.base, ops.a + 2);
     if !value_ok {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
     }
     if !builtin_set_index(machine.pool, machine.scratch, container, key, value) {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+        return vm_fail(machine, VmError.TypeMismatch, pc + 1);
     }
-    return vm_step_continue(pc + 2);
+    return vm_step_continue(pc + 1);
 }
 
 // HASH a,b: build a hash from b key-value pairs starting at R[a]. The first

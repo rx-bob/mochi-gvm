@@ -114,6 +114,7 @@ fn test_getidx_and_setidx_on_hash_and_array(t: goosetest::Test&) {
     let get_bytes: u8[1] = [1];
     let got = vm::vm_op_index(machine, frame, record, get_bytes[..], 0, vm::OP_GETIDX);
     t.assert_eq(vm::StepKind.Continue, got.kind);
+    t.assert_eq(1, got.pc);
     t.assert_eq(10, vm::mrb_fixnum_value(machine.regs[1]));
 
     machine.regs[1] = hash;
@@ -122,6 +123,7 @@ fn test_getidx_and_setidx_on_hash_and_array(t: goosetest::Test&) {
     let set_bytes: u8[1] = [1];
     let set = vm::vm_op_index(machine, frame, record, set_bytes[..], 0, vm::OP_SETIDX);
     t.assert_eq(vm::StepKind.Continue, set.kind);
+    t.assert_eq(1, set.pc);
     t.assert_eq(11, vm::mrb_fixnum_value(vm::builtin_hash_get(
         machine.pool, machine.scratch, hash, key)));
 

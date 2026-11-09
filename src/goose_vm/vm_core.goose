@@ -15,6 +15,7 @@ import.value_arena;
 let MAX_VM_REGS = 512;
 let MAX_VM_CALL_DEPTH = 32;
 let MAX_VM_METHODS = 256;
+let MAX_VM_ARGS = 8;
 
 // Opcode bytes from mruby 4.0 `include/mruby/ops.h`. Only the subset emitted by
 // the scalar component slice is decoded; anything else stops the VM with
@@ -33,16 +34,32 @@ let OP_LOADTRUE: u8 = 19;
 let OP_LOADFALSE: u8 = 20;
 let OP_GETIV: u8 = 25;
 let OP_SETIV: u8 = 26;
+let OP_GETCONST: u8 = 29;
 let OP_GETIDX: u8 = 35;
 let OP_SETIDX: u8 = 37;
+let OP_JMP: u8 = 38;
+let OP_JMPIF: u8 = 39;
+let OP_JMPNOT: u8 = 40;
+let OP_JMPUW: u8 = 42;
+let OP_SSEND: u8 = 47;
+let OP_SSEND0: u8 = 48;
+let OP_SEND: u8 = 50;
+let OP_SEND0: u8 = 51;
+let OP_SENDB: u8 = 52;
 let OP_ENTER: u8 = 57;
 let OP_RETURN: u8 = 61;
 let OP_RETNIL: u8 = 64;
+let OP_ADD: u8 = 69;
 let OP_ADDI: u8 = 70;
+let OP_SUB: u8 = 71;
 let OP_SUBI: u8 = 72;
+let OP_EQ: u8 = 77;
+let OP_LT: u8 = 78;
+let OP_ARRAY: u8 = 82;
 let OP_STRING: u8 = 92;
 let OP_STRCAT: u8 = 93;
 let OP_HASH: u8 = 94;
+let OP_BLOCK: u8 = 98;
 let OP_CLASS: u8 = 103;
 let OP_EXEC: u8 = 105;
 let OP_TDEF: u8 = 107;
@@ -58,6 +75,7 @@ enum VmError {
     NoClass,
     NoMethod,
     TypeMismatch,
+    WrongArity,
     Registers,
     CallDepth,
 }
@@ -127,6 +145,7 @@ fn vm_error_name(err: VmError) -> u8[:] {
         NoClass => "unknown class",
         NoMethod => "unknown method",
         TypeMismatch => "type mismatch",
+        WrongArity => "wrong number of arguments",
         Registers => "register overflow",
         CallDepth => "call depth exceeded",
     };
@@ -369,6 +388,43 @@ fn vm_write_register(machine: Vm&, record: IrepRecord, base: i64, a: i64, value:
 
 fn vm_operands_available(iseq: u8[:], pc: i64, count: i64) -> bool {
     return count >= 0 && pc >= 0 && pc + count <= iseq.len;
+}
+
+// Returns the required positional arity declared by a leading ENTER instruction.
+// `has_enter` is false for root and class-body IREPs, which take no arguments.
+fn vm_required_args(iseq: u8[:]) -> i64, bool {
+    if iseq.len == 0 || iseq[0] != OP_ENTER {
+        return 0, false;
+    }
+    let ops = vm_read_operands(iseq, 1, 3);
+    if !ops.valid {
+        return 0, false;
+    }
+    let aspec = (ops.a << 16) | (ops.b << 8) | ops.c;
+    return (aspec >> 18) & 0x1f, true;
+}
+
+// Rejects a call whose positional argument count disagrees with a leading ENTER.
+fn vm_entry_arity_ok(machine: Vm&, iseq: u8[:], args: MrbValue[:]) -> bool {
+    let required, has_enter = vm_required_args(iseq);
+    if has_enter && args.len != required {
+        machine.error = VmError.WrongArity;
+        return false;
+    }
+    return true;
+}
+
+// Decodes the signed big-endian 16-bit jump displacement at `pc`.
+fn vm_read_signed16(iseq: u8[:], pc: i64) -> i64, bool {
+    if !vm_operands_available(iseq, pc, 2) {
+        return 0, false;
+    }
+    let raw = ((iseq[pc]as u16) << 8) | iseq[pc + 1];
+    let value: i64 = raw;
+    if value >= 32768 {
+        return value - 65536, true;
+    }
+    return value, true;
 }
 
 // Decodes up to three unsigned operand bytes, reporting a short instruction.

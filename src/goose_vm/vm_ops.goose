@@ -11,6 +11,7 @@ import.rite_types;
 import.state_pool;
 import.value_arena;
 import.vm_core;
+import.vm_dispatch;
 import.vm_ops_collections;
 
 // Runs the root IREP once per loaded program. The root defines classes and
@@ -29,65 +30,19 @@ fn vm_ensure_booted(machine: Vm&) {
     }
 }
 
-// Creates a state instance of `class_sym` and runs its `initialize` method with
-// no arguments. The returned instance is durable state, so the tick arena is
-// released before returning.
-fn vm_instantiate(machine: Vm&, class_sym: u32) -> MrbValue {
-    vm_begin_entry(machine);
-    vm_ensure_booted(machine);
-    if machine.error != VmError.Ok {
-        vm_end_entry(machine);
-        return mrb_nil();
-    }
-    let class_id, found = vm_find_class(machine.pool, class_sym);
-    if !found {
-        machine.error = VmError.NoClass;
-        vm_end_entry(machine);
-        return mrb_nil();
-    }
-    let instance = state_alloc_instance(machine.pool, class_id);
-    assert(state_register_component(machine.pool, instance));
-    let irep, has_initialize = vm_lookup_method(machine, class_id, intern_symbol("initialize"));
-    if has_initialize {
-        vm_exec(machine, irep, instance, -1);
-    }
-    vm_end_entry(machine);
-    if machine.error != VmError.Ok {
-        return mrb_nil();
-    }
-    return instance;
-}
-
-// Calls a no-argument method on a state instance. The result may be a scratch
-// string, so it stays valid until the host calls `vm_end_entry` after copying
-// the bytes out; the next top-level entry clears the arena before it starts.
-fn vm_call0(machine: Vm&, receiver: MrbValue, method_sym: u32) -> MrbValue {
-    vm_begin_entry(machine);
-    vm_ensure_booted(machine);
-    if machine.error != VmError.Ok {
-        vm_end_entry(machine);
-        return mrb_nil();
-    }
-    let class_id, is_instance = vm_receiver_class_id(machine, receiver);
-    if !is_instance {
-        machine.error = VmError.BadReceiver;
-        vm_end_entry(machine);
-        return mrb_nil();
-    }
-    let irep, found = vm_lookup_method(machine, class_id, method_sym);
-    if !found {
-        machine.error = VmError.NoMethod;
-        vm_end_entry(machine);
-        return mrb_nil();
-    }
-    return vm_exec(machine, irep, receiver, -1);
-}
-
 // Executes one IREP frame. `dst_register` is an absolute register index in the
 // caller's window, or -1 for a host entry call. Recursion is bounded by the
 // frame-stack capacity and by `MAX_VM_CALL_DEPTH`.
 recursive fn vm_exec(
     machine: Vm&, record_index: i64, self_value: MrbValue, dst_register: i64
+) -> MrbValue {
+    let no_args: MrbValue[1] = [mrb_nil()];
+    return vm_exec_with_args(machine, record_index, self_value, dst_register, no_args[..0]);
+}
+
+// Executes one IREP frame with positional arguments copied into R1..Rn.
+recursive fn vm_exec_with_args(
+    machine: Vm&, record_index: i64, self_value: MrbValue, dst_register: i64, args: MrbValue[:]
 ) -> MrbValue {
     if machine.frames.len >= MAX_VM_CALL_DEPTH {
         machine.error = VmError.CallDepth;
@@ -96,6 +51,10 @@ recursive fn vm_exec(
     assert(record_index >= 0);
     assert(record_index < machine.file.records.len);
     let record = machine.file.records[record_index];
+    let iseq = record_iseq(machine.file, record);
+    if !vm_entry_arity_ok(machine, iseq, args) {
+        return mrb_nil();
+    }
     let base = machine.regs.len;
     if base + record.nregs > MAX_VM_REGS {
         machine.error = VmError.Registers;
@@ -105,6 +64,11 @@ recursive fn vm_exec(
         machine.regs.push(mrb_nil());
     }
     machine.regs[base] = self_value;
+    var argument = 0;
+    while argument < args.len && argument + 1 < record.nregs {
+        machine.regs[base + 1 + argument] = args[argument];
+        argument += 1;
+    }
     let frame = CallFrame {
         record_index: record_index,
         base: base,
@@ -113,7 +77,6 @@ recursive fn vm_exec(
     };
     machine.frames.push(frame);
     let frame_index = machine.frames.len - 1;
-    let iseq = record_iseq(machine.file, record);
     var pc = 0;
     var running = true;
     var result = mrb_nil();
@@ -125,6 +88,9 @@ recursive fn vm_exec(
         machine.frames[frame_index].pc = pc;
         if step.kind == StepKind.Execute {
             vm_exec(machine, step.child_index, step.value, step.dst_register);
+            if machine.error != VmError.Ok {
+                running = false;
+            }
         } else if step.kind == StepKind.Return {
             result = step.value;
             running = false;
@@ -151,6 +117,10 @@ recursive fn vm_exec(
 fn vm_exec_step(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
+    let dispatched, handled = vm_dispatch_step(machine, frame, record, iseq, pc, op);
+    if handled {
+        return dispatched;
+    }
     if op == OP_NOP {
         return vm_step_continue(pc);
     }
@@ -434,8 +404,13 @@ fn vm_op_control(
         if !ops.valid {
             return vm_fail(machine, VmError.BadOperand, pc);
         }
-        let flags = (ops.a << 16) | (ops.b << 8) | ops.c;
-        if flags != 0 {
+        let aspec = (ops.a << 16) | (ops.b << 8) | ops.c;
+        let optional = (aspec >> 13) & 0x1f;
+        let rest = (aspec >> 12) & 1;
+        let post = (aspec >> 7) & 0x1f;
+        let key = (aspec >> 2) & 0x1f;
+        let kdict = (aspec >> 1) & 1;
+        if optional != 0 || rest != 0 || post != 0 || key != 0 || kdict != 0 {
             return vm_fail(machine, VmError.BadOperand, pc + 3);
         }
         return vm_step_continue(pc + 3);

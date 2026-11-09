@@ -15,6 +15,7 @@ fn test_error_names_cover_vm_failures(t: goosetest::Test&) {
     t.assert_true(vm::vm_error_name(vm::VmError.NoClass) == "unknown class");
     t.assert_true(vm::vm_error_name(vm::VmError.NoMethod) == "unknown method");
     t.assert_true(vm::vm_error_name(vm::VmError.TypeMismatch) == "type mismatch");
+    t.assert_true(vm::vm_error_name(vm::VmError.WrongArity) == "wrong number of arguments");
     t.assert_true(vm::vm_error_name(vm::VmError.CallDepth) == "call depth exceeded");
 }
 

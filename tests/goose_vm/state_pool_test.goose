@@ -34,6 +34,25 @@ fn test_state_classes_and_component_registration(t: goosetest::Test&) {
     t.assert_eq(instance, vm::state_component_at(pool, 0));
 }
 
+fn test_state_hash_updates_existing_symbol_key(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    let hash = vm::state_alloc_hash(pool);
+    let id_key = vm::mrb_symbol(8);
+    let text_key = vm::mrb_symbol(9);
+    let done_key = vm::mrb_symbol(10);
+    t.assert_true(vm::state_hash_set(pool, hash, id_key, vm::mrb_fixnum(1)));
+    t.assert_true(vm::state_hash_set(pool, hash, text_key, vm::mrb_fixnum(2)));
+    t.assert_true(vm::state_hash_set(pool, hash, done_key, vm::mrb_false()));
+    t.assert_eq(3, vm::state_hash_length(pool, hash));
+    t.assert_true(vm::state_hash_set(pool, hash, done_key, vm::mrb_true()));
+    t.assert_eq(3, vm::state_hash_length(pool, hash));
+    let value, found = vm::state_hash_get(pool, hash, done_key);
+    t.assert_true(found);
+    t.assert_true(vm::mrb_is_true(value));
+}
+
 fn test_state_ivar_assignment_updates_existing_key(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..
