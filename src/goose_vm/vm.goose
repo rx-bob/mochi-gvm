@@ -7,3 +7,5 @@ import.rite_pool;
 import.rite_types;
 import.state_pool;
 import.value_arena;
+import.vm_core;
+import.vm_ops;
