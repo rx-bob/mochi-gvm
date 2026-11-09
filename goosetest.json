@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "targets": [{
+    "name": "core",
+    "entry": "goosetest_core.goose",
+    "tests": [{"path": "tests", "kind": "unit"}],
+    "exclude": ["tests/fixtures/"],
+    "mirror": {
+      "policy": "strict",
+      "pairs": [{"source": "src", "tests": "tests"}]
+    }
+  }]
+}

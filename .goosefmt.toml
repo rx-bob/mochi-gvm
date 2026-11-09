@@ -1,0 +1,17 @@
+[format]
+indent_width = 4
+final_newline = true
+
+[lint]
+max_line_length = 120
+max_file_lines = 500
+max_function_parameters = 6
+max_function_returns = 3
+indentation = true
+spacing = true
+one_statement_per_line = true
+line_length = true
+final_newline = true
+naming = true
+signature_size = true
+file_length = true
