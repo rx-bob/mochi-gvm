@@ -40,7 +40,9 @@ static const char EXPECTED_HTML[] =
     "<button data-action='increment'>+</button>"
     "<button data-action='reset'>Reset</button></div></div>";
 static const char EXPECTED_GEM_HTML[] = "<span>42</span>";
-static const char FETCH_LINE[] = "1|counter|handler|https://example.test/data\n";
+static const char FETCH_LINE[] =
+    "{\"id\":1,\"instance\":\"counter\",\"url\":\"https://example.test/data\","
+    "\"callback\":\"handler\",\"options\":{}}\n";
 
 static void fail(const char *what, int got) {
   fprintf(stderr, "FAIL %s: %d\n", what, got);

@@ -30,7 +30,6 @@
  * model; a native host test for these must run in a 32-bit process. */
 #define MOCHI_PATCH_CAPACITY (64 * 1024)
 #define MOCHI_FETCH_CAPACITY (64 * 1024)
-#define MOCHI_FETCH_LINE_CAPACITY 2048
 #define MOCHI_EMIT_CAPACITY (16 * 1024)
 #define MOCHI_EVENT_ARGS_CAPACITY 8192
 #define MOCHI_ERROR_CAPACITY 256
@@ -68,6 +67,13 @@ extern uint8_t goose_vm_is_class(uint64_t value);
 extern uint8_t goose_vm_is_hash(uint64_t value);
 extern uint64_t goose_vm_hash_get_symbol(uint64_t hash, uint32_t key_symbol);
 extern const uint8_t *goose_vm_value_json(uint64_t value, int64_t *out_len);
+extern uint64_t goose_vm_make_scratch_string(goose_u8_slice bytes);
+extern uint64_t goose_vm_current_self(void);
+extern const uint8_t *goose_vm_fetch_request_json(
+    int64_t fetch_id, uint64_t instance, uint64_t url, uint64_t callback,
+    uint64_t options, int64_t *out_len);
+extern int64_t goose_vm_deliver_fetch(uint64_t instance, uint32_t callback_symbol,
+                                      goose_u8_slice envelope);
 
 static mrb_state *g_mrb = NULL;
 static uint8_t g_patch_buffer[MOCHI_PATCH_CAPACITY];
@@ -132,27 +138,64 @@ static void capture_vm_error(void) {
   g_error_len = (int32_t)length;
 }
 
-/* Ruby-callable: Mochi.fetch(component_id, url, callback).
- * Appends "fetch_id|component_id|url|callback\n" to the outbox. The loader
- * performs the request and hands the body back through the inbox. */
+/* Ruby-callable: Mochi.fetch(url, callback, options = {}).
+ * Legacy form: Mochi.fetch(component_id, url, callback).
+ * Appends one JSON request line to the outbox. New-form requests resolve the
+ * component instance from the active VM frame, so user code never passes its
+ * own component handle. */
 static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
-  const char *component = "";
-  const char *url = "";
-  const char *callback = "";
-  char line[MOCHI_FETCH_LINE_CAPACITY];
-  int written;
+  mrb_value first = mrb_nil_value();
+  mrb_value second = mrb_nil_value();
+  mrb_value third = mrb_nil_value();
+  mrb_value instance_value;
+  mrb_value url_value;
+  mrb_value callback_value;
+  mrb_value options_value;
+  mrb_int argc;
+  uint64_t instance_handle;
+  const uint8_t *line;
+  int64_t line_len = 0;
+  int instance_len;
+  char instance_text[32];
   int fetch_id;
   (void)self;
-  mrb_get_args(mrb, "zzz", &component, &url, &callback);
+
+  argc = mrb_get_args(mrb, "ooo", &first, &second, &third);
+  if (argc < 2) return mrb_fixnum_value(-1);
+
+  if (argc >= 3 && mrb_string_p(third)) {
+    if (!mrb_string_p(first) || !mrb_string_p(second)) return mrb_fixnum_value(-1);
+    instance_value = first;
+    url_value = second;
+    callback_value = third;
+    options_value = mrb_nil_value();
+  } else {
+    if (!mrb_string_p(first)) return mrb_fixnum_value(-1);
+    instance_handle = goose_vm_current_self();
+    if (instance_handle == 0) return mrb_fixnum_value(-1);
+    instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
+                            (unsigned long long)instance_handle);
+    if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
+      return mrb_fixnum_value(-1);
+    }
+    instance_value = goose_vm_make_scratch_string(
+        slice_of(instance_text, (size_t)instance_len));
+    if (instance_value == 0) return mrb_fixnum_value(-1);
+    url_value = first;
+    callback_value = second;
+    options_value = argc >= 3 ? third : mrb_nil_value();
+  }
+
   fetch_id = g_fetch_next_id;
-  written = snprintf(line, sizeof(line), "%d|%s|%s|%s\n", fetch_id, component,
-                     url, callback);
-  if (written <= 0 || written >= (int)sizeof(line)) return mrb_fixnum_value(-1);
-  if (g_fetch_outbox_len + written > MOCHI_FETCH_CAPACITY) {
+  line = goose_vm_fetch_request_json(fetch_id, instance_value, url_value,
+                                     callback_value, options_value, &line_len);
+  if (!line || line_len <= 0) return mrb_fixnum_value(-1);
+  if (g_fetch_outbox_len + (int32_t)line_len >= MOCHI_FETCH_CAPACITY) {
     return mrb_fixnum_value(-1);
   }
-  memcpy(g_fetch_outbox + g_fetch_outbox_len, line, (size_t)written);
-  g_fetch_outbox_len += written;
+  memcpy(g_fetch_outbox + g_fetch_outbox_len, line, (size_t)line_len);
+  g_fetch_outbox_len += (int32_t)line_len;
+  g_fetch_outbox[g_fetch_outbox_len] = '\0';
   g_fetch_next_id += 1;
   return mrb_fixnum_value(fetch_id);
 }
@@ -163,7 +206,7 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
  *   {"action":"...","target":...,"payload":...}\n
  * The loader filters by target tag and passes payload to one-argument action
  * handlers. A plain action line is still emitted with null target and payload. */
-static int append_emit_piece(
+static int append_text_piece(
     char *buffer, size_t capacity, size_t *at, const void *data, size_t length
 ) {
   if (*at > capacity || length > capacity - *at) return 0;
@@ -202,13 +245,13 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
 
   action_json = goose_vm_value_json(action_value, &action_len);
   if (!action_json || action_len <= 0) return mrb_fixnum_value(-1);
-  if (!append_emit_piece(line, sizeof(line), &at, PREFIX, sizeof(PREFIX) - 1)) {
+  if (!append_text_piece(line, sizeof(line), &at, PREFIX, sizeof(PREFIX) - 1)) {
     return mrb_fixnum_value(-1);
   }
-  if (!append_emit_piece(line, sizeof(line), &at, action_json, (size_t)action_len)) {
+  if (!append_text_piece(line, sizeof(line), &at, action_json, (size_t)action_len)) {
     return mrb_fixnum_value(-1);
   }
-  if (!append_emit_piece(line, sizeof(line), &at, TARGET_KEY,
+  if (!append_text_piece(line, sizeof(line), &at, TARGET_KEY,
                          sizeof(TARGET_KEY) - 1)) {
     return mrb_fixnum_value(-1);
   }
@@ -219,10 +262,10 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   }
   target_json = goose_vm_value_json(target, &target_len);
   if (!target_json || target_len <= 0) return mrb_fixnum_value(-1);
-  if (!append_emit_piece(line, sizeof(line), &at, target_json, (size_t)target_len)) {
+  if (!append_text_piece(line, sizeof(line), &at, target_json, (size_t)target_len)) {
     return mrb_fixnum_value(-1);
   }
-  if (!append_emit_piece(line, sizeof(line), &at, PAYLOAD_KEY,
+  if (!append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY,
                          sizeof(PAYLOAD_KEY) - 1)) {
     return mrb_fixnum_value(-1);
   }
@@ -230,15 +273,15 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   if (argc >= 2) {
     payload_json = goose_vm_value_json(payload, &payload_len);
     if (!payload_json || payload_len <= 0) return mrb_fixnum_value(-1);
-    if (!append_emit_piece(line, sizeof(line), &at, payload_json, (size_t)payload_len)) {
+    if (!append_text_piece(line, sizeof(line), &at, payload_json, (size_t)payload_len)) {
       return mrb_fixnum_value(-1);
     }
-  } else if (!append_emit_piece(line, sizeof(line), &at, JSON_NULL,
+  } else if (!append_text_piece(line, sizeof(line), &at, JSON_NULL,
                                 sizeof(JSON_NULL) - 1)) {
     return mrb_fixnum_value(-1);
   }
 
-  if (!append_emit_piece(line, sizeof(line), &at, SUFFIX, sizeof(SUFFIX) - 1)) {
+  if (!append_text_piece(line, sizeof(line), &at, SUFFIX, sizeof(SUFFIX) - 1)) {
     return mrb_fixnum_value(-1);
   }
   if (g_emit_outbox_len + (int32_t)at >= MOCHI_EMIT_CAPACITY) {
@@ -263,7 +306,7 @@ int32_t mochi_init_runtime(void) {
   }
   mochi = mrb_define_module(g_mrb, "Mochi");
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
-                             MRB_ARGS_REQ(3));
+                             MRB_ARGS_REQ(2) | MRB_ARGS_OPT(1));
   mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   if (g_mrb->exc) {
@@ -456,16 +499,15 @@ int32_t mochi_emit_outbox_clear(void) {
 }
 
 /* deliver_fetch(instance, callback_name, callback_len, response_len): the
- * loader has written the response body to the inbox and calls the component's
- * callback with it. */
+ * loader has written the JSON response envelope to the inbox. Goose parses the
+ * envelope into an indifferent Hash and invokes the callback with that Hash. */
 MOCHI_EXPORT
 int32_t mochi_deliver_fetch(uint64_t instance, const uint8_t *callback,
                             int32_t callback_len, int32_t response_len) {
   char name[MOCHI_CALLBACK_CAPACITY];
   mrb_sym symbol;
-  mrb_value response;
-  mrb_value ignored;
-  if (!g_mrb || !callback || callback_len <= 0 || response_len < 0 ||
+  int64_t result;
+  if (!g_mrb || !callback || callback_len <= 0 || response_len <= 0 ||
       response_len > MOCHI_FETCH_CAPACITY) {
     set_error_text("bad fetch delivery");
     return -1;
@@ -477,18 +519,16 @@ int32_t mochi_deliver_fetch(uint64_t instance, const uint8_t *callback,
   memcpy(name, callback, (size_t)callback_len);
   name[callback_len] = '\0';
   clear_error();
-  response = mrb_str_new(g_mrb, (const char *)g_fetch_inbox, response_len);
-  if (g_mrb->exc) {
-    g_mrb->exc = NULL;
-    set_error_text("fetch response allocation failed");
+  symbol = mrb_intern_cstr(g_mrb, name);
+  if (symbol == 0) {
+    set_error_text("fetch callback name invalid");
     return -1;
   }
-  symbol = mrb_intern_cstr(g_mrb, name);
-  ignored = mrb_funcall_argv(g_mrb, instance, symbol, 1, &response);
-  (void)ignored;
-  if (g_mrb->exc) {
-    g_mrb->exc = NULL;
+  result = goose_vm_deliver_fetch(instance, symbol,
+                                  slice_of(g_fetch_inbox, (size_t)response_len));
+  if (result != 0 || goose_vm_has_error()) {
     capture_vm_error();
+    if (g_error_len == 0) set_error_text("fetch callback failed");
     return -1;
   }
   return 0;

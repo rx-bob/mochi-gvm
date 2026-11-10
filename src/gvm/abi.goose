@@ -45,6 +45,7 @@ var g_abi_error: bool = false;
 var g_abi_error_text: u8[>..] = [];
 var g_abi_patch_bytes: u8[>..] = [];
 var g_abi_json: u8[>..] = [];
+var g_abi_fetch_json: u8[>..] = [];
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -121,6 +122,7 @@ fn abi_reset() {
     g_abi_call_args.clear();
     g_abi_patch_bytes.clear();
     g_abi_json.clear();
+    g_abi_fetch_json.clear();
     abi_clear_error();
 }
 
@@ -377,6 +379,12 @@ fn abi_make_string(bytes: const u8[:]) -> u64 {
     return state_alloc_string(g_abi_pool, bytes);
 }
 
+// Temporary strings for native calls live in the tick arena. They survive only
+// until the next entry, which is enough for one fetch request to be serialized.
+fn abi_make_scratch_string(bytes: const u8[:]) -> u64 {
+    return scratch_alloc_string(g_abi_scratch, bytes);
+}
+
 fn abi_string_bytes(value: u64) -> const u8[:] {
     if mrb_is_scratch(value) {
         return scratch_string_bytes(g_abi_scratch, value);
@@ -419,6 +427,105 @@ fn abi_value_json(value: u64) -> const u8[:] {
     g_abi_json.clear();
     binding_json_append_value(g_abi_machine, g_abi_json, value, 0);
     return g_abi_json[..];
+}
+
+// Returns the receiver of the current VM frame. Native module calls use this
+// to resolve the component that invoked `Mochi.fetch`.
+fn abi_current_self() -> u64 {
+    if g_abi_machine.frames.len == 0 {
+        return 0;
+    }
+    return g_abi_machine.frames[g_abi_machine.frames.len - 1].self_value;
+}
+
+fn abi_fetch_callback_ok(callback: u64) -> bool {
+    return mrb_is_symbol(callback) || vm_is_string_value(g_abi_machine, callback);
+}
+
+// Builds one fetch request line. `instance` is a String for both the automatic
+// component handle and the legacy component-id argument.
+fn abi_fetch_request_json(
+    fetch_id: i64, instance: u64, url: u64, callback: u64, options: u64
+) -> const u8[:] {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    g_abi_fetch_json.clear();
+    if !vm_is_string_value(g_abi_machine, instance)
+        || !vm_is_string_value(g_abi_machine, url)
+        || !abi_fetch_callback_ok(callback)
+        || (!mrb_is_nil(options) && !vm_is_hash_value(g_abi_machine, options)) {
+        abi_fail("bad fetch request");
+        return "";
+    }
+    g_abi_fetch_json.append("{\"id\":");
+    mrb_format_fixnum(g_abi_fetch_json, fetch_id);
+    g_abi_fetch_json.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, g_abi_fetch_json, instance, 0);
+    g_abi_fetch_json.append(",\"url\":");
+    binding_json_append_value(g_abi_machine, g_abi_fetch_json, url, 0);
+    g_abi_fetch_json.append(",\"callback\":");
+    binding_json_append_key(g_abi_machine, g_abi_fetch_json, callback);
+    g_abi_fetch_json.append(",\"options\":");
+    if mrb_is_nil(options) {
+        g_abi_fetch_json.append("{}");
+    } else {
+        binding_json_append_value(g_abi_machine, g_abi_fetch_json, options, 0);
+    }
+    g_abi_fetch_json.append("}\n");
+    return g_abi_fetch_json[..];
+}
+
+// Parses the loader's response envelope and fills in the stable response keys.
+fn abi_fetch_response(envelope: const u8[:]) -> u64 {
+    let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
+    if !parsed || !vm_is_hash_value(g_abi_machine, value) {
+        abi_fail("bad fetch response");
+        return mrb_nil();
+    }
+    let status_key = mrb_symbol(intern_symbol("status"));
+    let ok_key = mrb_symbol(intern_symbol("ok"));
+    let body_key = mrb_symbol(intern_symbol("body"));
+    let data_key = mrb_symbol(intern_symbol("data"));
+    let error_key = mrb_symbol(intern_symbol("error"));
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, status_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, status_key, mrb_fixnum(0));
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, ok_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, ok_key, mrb_false());
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, body_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, body_key,
+            scratch_alloc_string(g_abi_scratch, ""));
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, data_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, data_key, mrb_nil());
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, error_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, error_key, mrb_nil());
+    }
+    return value;
+}
+
+fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:]) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    vm_begin_entry(g_abi_machine);
+    let response = abi_fetch_response(envelope);
+    if g_abi_machine.error != VmError.Ok || abi_has_error() {
+        vm_end_entry(g_abi_machine);
+        return -1;
+    }
+    let args: MrbValue[1] = [response];
+    vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
+    if is_instance {
+        vm_set_error_context(g_abi_machine, class_id, callback_symbol, -1);
+    }
+    abi_record_vm_error(g_abi_machine);
+    if g_abi_machine.error != VmError.Ok {
+        return -1;
+    }
+    return 0;
 }
 
 export fn goose_vm_open() -> i64 {
@@ -501,6 +608,10 @@ export fn goose_vm_make_string(bytes: const u8[:]) -> u64 {
     return abi_make_string(bytes);
 }
 
+export fn goose_vm_make_scratch_string(bytes: const u8[:]) -> u64 {
+    return abi_make_scratch_string(bytes);
+}
+
 export fn goose_vm_string_bytes(value: u64) -> const u8[:] {
     return abi_string_bytes(value);
 }
@@ -523,4 +634,20 @@ export fn goose_vm_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
 
 export fn goose_vm_value_json(value: u64) -> const u8[:] {
     return abi_value_json(value);
+}
+
+export fn goose_vm_current_self() -> u64 {
+    return abi_current_self();
+}
+
+export fn goose_vm_fetch_request_json(
+    fetch_id: i64, instance: u64, url: u64, callback: u64, options: u64
+) -> const u8[:] {
+    return abi_fetch_request_json(fetch_id, instance, url, callback, options);
+}
+
+export fn goose_vm_deliver_fetch(
+    instance: u64, callback_symbol: u32, envelope: const u8[:]
+) -> i64 {
+    return abi_deliver_fetch(instance, callback_symbol, envelope);
 }

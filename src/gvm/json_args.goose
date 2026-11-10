@@ -339,6 +339,20 @@ recursive fn json_parse_array(
     return mrb_nil();
 }
 
+// Decodes one complete JSON document. Response envelopes use this entry so a
+// top-level Hash or Array is accepted, not only the event argument list shape.
+fn json_parse_document(
+    pool: StatePool&, scratch: ScratchArena&, data: const u8[:]
+) -> MrbValue, bool {
+    var cursor = JsonCursor {
+        at: 0,
+        failed: false,
+    };
+    let value = json_parse_value(pool, scratch, data, cursor, 0);
+    json_skip_whitespace(data, cursor);
+    return value, !cursor.failed && cursor.at == data.len;
+}
+
 // Decodes a top-level JSON array into `args`. The caller owns `args` and must
 // provide enough room for the ABI's fixed call window.
 fn json_parse_args(
