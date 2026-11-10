@@ -2,4 +2,5 @@ c_include = ["src/gvm/include"];
 c_sources = [
     "src/gvm/mrb_abi_shim.c",
     "src/gvm/mrbgem_loader.c",
+    "src/gvm/mochi_gvm_bridge.c",
 ];

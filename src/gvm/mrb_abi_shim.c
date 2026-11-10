@@ -81,6 +81,10 @@ extern uint64_t goose_vm_const_get(uint32_t name);
 extern uint64_t goose_vm_obj_new(uint32_t class_id);
 extern void goose_vm_set_arg(int64_t index, uint64_t value);
 extern uint64_t goose_vm_call(uint64_t receiver, uint32_t method, int64_t argc);
+extern int64_t goose_vm_register_binding(uint64_t instance, uint32_t binding_id,
+                                         uint32_t getter_symbol);
+extern int64_t goose_vm_flush_patches(uint64_t instance);
+extern const uint8_t *goose_vm_patch_bytes(int64_t *out_len);
 extern uint64_t goose_vm_make_string(goose_u8_slice bytes);
 extern const uint8_t *goose_vm_string_bytes(uint64_t value, int64_t *out_len);
 extern uint8_t goose_vm_is_string(uint64_t value);
