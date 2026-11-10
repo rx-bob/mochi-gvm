@@ -1,4 +1,4 @@
-// Tests for u64 bitmask signals on component instance variables.
+// Tests for 256-bit mask signals on component instance variables.
 //
 // The tests cover the two directions of the mask: reads of the tracked
 // instance OR slot bits into `active_read_mask`, stores OR changed bits into
@@ -50,18 +50,18 @@ fn test_tracked_reads_set_active_bits(t: goosetest::Test&) {
     t.assert_true(vm::state_tracking_begin(pool, instance));
     t.assert_eq(5, read_count_and_label(pool, instance));
     let mask = vm::state_tracking_end(pool);
-    t.assert_eq(vm::state_ivar_bit(0), mask & vm::state_ivar_bit(0));
-    t.assert_eq(vm::state_ivar_bit(1), mask & vm::state_ivar_bit(1));
-    t.assert_eq(0, mask & vm::state_ivar_bit(2));
-    t.assert_eq(3, mask);
+    t.assert_true(vm::mask_intersects(mask, vm::state_ivar_bit(0)));
+    t.assert_true(vm::mask_intersects(mask, vm::state_ivar_bit(1)));
+    t.assert_false(vm::mask_intersects(mask, vm::state_ivar_bit(2)));
+    t.assert_eq(3, mask.w0);
 
     t.assert_true(vm::state_tracking_begin(pool, instance));
     let foreign, foreign_found = vm::state_get_ivar(pool, other, COUNT_KEY);
     t.assert_true(foreign_found);
     t.assert_eq(9, vm::mrb_fixnum_value(foreign));
-    t.assert_eq(0, vm::state_tracking_end(pool));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
-    t.assert_eq(0, vm::state_tracked_read_mask(pool));
+    t.assert_true(vm::mask_is_empty(vm::state_tracking_end(pool)));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
+    t.assert_true(vm::mask_is_empty(vm::state_tracked_read_mask(pool)));
     t.assert_false(vm::state_tracking_begin(pool, vm::mrb_nil()));
 }
 
@@ -80,10 +80,10 @@ fn test_noop_assignment_keeps_dirty_mask_empty(t: goosetest::Test&) {
     let current, found = vm::state_get_ivar(pool, instance, COUNT_KEY);
     t.assert_true(found);
     t.assert_true(vm::state_set_ivar(pool, scratch, instance, COUNT_KEY, current));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_set_ivar(pool, scratch, instance, COUNT_KEY, vm::mrb_fixnum(1)));
-    t.assert_eq(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance)));
 }
 
 fn test_string_assignments_compare_state_bytes(t: goosetest::Test&) {
@@ -102,11 +102,11 @@ fn test_string_assignments_compare_state_bytes(t: goosetest::Test&) {
 
     t.assert_true(vm::state_set_ivar(pool, scratch, instance,
         LABEL_KEY, vm::state_alloc_string(pool, "same")));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_set_ivar(pool, scratch, instance,
         LABEL_KEY, vm::state_alloc_string(pool, "different")));
-    t.assert_eq(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance)));
 }
 
 fn test_uninitialized_ivar_read_is_tracked(t: goosetest::Test&) {
@@ -120,9 +120,9 @@ fn test_uninitialized_ivar_read_is_tracked(t: goosetest::Test&) {
     let value, found = vm::state_get_ivar(pool, instance, MISSING_KEY);
     t.assert_false(found);
     t.assert_true(vm::mrb_is_nil(value));
-    t.assert_eq(vm::state_ivar_bit(0), vm::state_tracked_read_mask(pool));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_tracked_read_mask(pool)));
     t.assert_eq(0, vm::state_ivar_bit_index(pool, instance, MISSING_KEY));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
     t.assert_eq(1, vm::state_ivar_count(pool));
     vm::state_tracking_end(pool);
 
@@ -148,33 +148,33 @@ fn test_nested_hash_mutation_dirties_owner(t: goosetest::Test&) {
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
 
     t.assert_true(vm::state_array_push(pool, items, vm::mrb_fixnum(1)));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 
     let entry = vm::state_alloc_hash(pool);
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::state_array_push(pool, items, entry));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::state_hash_set(pool, entry, DONE_KEY, vm::mrb_false()));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::state_hash_set(pool, entry, DONE_KEY, vm::mrb_false()));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
     t.assert_true(vm::state_hash_set(pool, entry, DONE_KEY, vm::mrb_true()));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::state_array_set(pool, items, 1, entry));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
     t.assert_true(vm::state_array_set(pool, items, 0, vm::mrb_fixnum(2)));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     let popped, pop_ok = vm::state_array_pop(pool, items);
     t.assert_true(pop_ok);
     t.assert_true(vm::mrb_value_identical(popped, entry));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 }
 
 fn test_collection_mutation_outside_component(t: goosetest::Test&) {
@@ -193,14 +193,14 @@ fn test_collection_mutation_outside_component(t: goosetest::Test&) {
 
     let orphan = vm::state_alloc_array(pool);
     t.assert_true(vm::state_array_push(pool, orphan, vm::mrb_fixnum(1)));
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_array_push(pool, owned, orphan));
-    t.assert_eq(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::state_array_push(pool, orphan, vm::mrb_fixnum(2)));
-    t.assert_eq(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance)));
 }
 
 // Exercises the builtin helpers that the OP_SETIDX and Array#<< handlers call.
@@ -222,11 +222,11 @@ fn test_builtin_set_index_dirties_owner(t: goosetest::Test&) {
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
 
     t.assert_true(vm::builtin_set_index(pool, scratch, entry, DONE_KEY, vm::mrb_true()));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 
     t.assert_true(vm::state_clear_dirty_mask(pool, instance));
     t.assert_true(vm::builtin_array_push(pool, scratch, items, vm::mrb_fixnum(7)));
-    t.assert_eq(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(items_bit), vm::state_dirty_mask(pool, instance)));
 }
 
 // Builds a flat IREP record over caller-owned instruction bytes. The test suite
@@ -361,9 +361,9 @@ fn test_flush_only_reevaluates_dirty_binding(t: goosetest::Test&) {
     t.assert_eq(0, patches[8]);
     t.assert_eq(1, patches[9]);
     t.assert_eq(0x34, patches[13]);
-    t.assert_eq(vm::state_ivar_bit(0), pool.bindings[0].dep_mask);
-    t.assert_eq(vm::state_ivar_bit(1), pool.bindings[1].dep_mask);
-    t.assert_eq(0, vm::state_dirty_mask(pool, instance));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), pool.bindings[0].dep_mask));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(1), pool.bindings[1].dep_mask));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
 
     // A no-op flush emits nothing; incrementing @count re-evaluates binding 0
     // only and emits one framed record.
@@ -380,7 +380,7 @@ fn test_flush_only_reevaluates_dirty_binding(t: goosetest::Test&) {
     t.assert_eq(0, patches[4]);
     t.assert_eq(0, patches[5]);
     t.assert_eq(0x35, patches[6]);
-    t.assert_eq(vm::state_ivar_bit(1), pool.bindings[1].dep_mask);
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(1), pool.bindings[1].dep_mask));
 }
 
 fn test_binding_text_serializes_collections_as_json(t: goosetest::Test&) {
@@ -451,7 +451,7 @@ fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
     var patches: u8[>..] = [];
     t.assert_eq(1, vm::vm_flush_dirty_bindings(machine, instance, patches));
     t.assert_eq(6, patches.len);
-    t.assert_eq(show_bit, pool.bindings[0].dep_mask);
+    t.assert_true(vm::mask_equal(show_bit, pool.bindings[0].dep_mask));
     t.assert_true(pool.bindings[0].initialized);
 
     // Hidden branch does not subscribe to @detail: mutating it emits nothing.
@@ -459,7 +459,7 @@ fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
     t.assert_true(vm::state_set_ivar(pool, scratch, instance, detail_symbol, vm::mrb_fixnum(8)));
     t.assert_eq(0, vm::vm_flush_dirty_bindings(machine, instance, patches));
     t.assert_eq(0, patches.len);
-    t.assert_eq(show_bit, pool.bindings[0].dep_mask);
+    t.assert_true(vm::mask_equal(show_bit, pool.bindings[0].dep_mask));
 
     // Showing the branch re-evaluates and now subscribes to both ivars.
     patches.clear();
@@ -467,7 +467,7 @@ fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
     t.assert_eq(1, vm::vm_flush_dirty_bindings(machine, instance, patches));
     t.assert_eq(7, patches.len);
     t.assert_eq(0x38, patches[6]);
-    t.assert_eq(show_bit | detail_bit, pool.bindings[0].dep_mask);
+    t.assert_true(vm::mask_equal(vm::mask_or(show_bit, detail_bit), pool.bindings[0].dep_mask));
 
     patches.clear();
     t.assert_true(vm::state_set_ivar(pool, scratch, instance, detail_symbol, vm::mrb_fixnum(9)));

@@ -6,6 +6,7 @@
 // for small symbol-keyed records.
 namespace vm;
 
+import.ivar_mask;
 import.value_arena;
 
 fn scratch_slot_count(arena: ScratchArena&) -> i64 {
@@ -30,7 +31,7 @@ fn scratch_alloc_collection(arena: ScratchArena&, kind: ArenaObjectKind) -> MrbV
             class_index: 0,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,

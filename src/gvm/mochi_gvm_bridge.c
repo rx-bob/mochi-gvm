@@ -31,6 +31,7 @@
 #define MOCHI_PATCH_CAPACITY (64 * 1024)
 #define MOCHI_FETCH_CAPACITY (64 * 1024)
 #define MOCHI_FETCH_LINE_CAPACITY 2048
+#define MOCHI_EMIT_CAPACITY (16 * 1024)
 #define MOCHI_ERROR_CAPACITY 256
 #define MOCHI_CALLBACK_CAPACITY 128
 
@@ -54,6 +55,7 @@ extern uint8_t goose_vm_has_error(void);
 extern uint32_t goose_vm_intern(goose_u8_slice name);
 extern uint64_t goose_vm_const_get(uint32_t name);
 extern uint64_t goose_vm_call(uint64_t receiver, uint32_t method, int64_t argc);
+extern uint8_t goose_vm_has_method(uint64_t receiver, uint32_t method);
 extern int64_t goose_vm_register_binding(uint64_t instance, uint32_t binding_id,
                                          uint32_t getter_symbol);
 extern int64_t goose_vm_flush_patches(uint64_t instance);
@@ -67,6 +69,8 @@ static uint8_t g_fetch_outbox[MOCHI_FETCH_CAPACITY];
 static int32_t g_fetch_outbox_len = 0;
 static uint8_t g_fetch_inbox[MOCHI_FETCH_CAPACITY];
 static int32_t g_fetch_next_id = 1;
+static uint8_t g_emit_outbox[MOCHI_EMIT_CAPACITY];
+static int32_t g_emit_outbox_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
 static int32_t g_error_len = 0;
 
@@ -146,6 +150,27 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
   return mrb_fixnum_value(fetch_id);
 }
 
+/* Ruby-callable: Mochi.emit("show_canvas"). Appends one action name per line
+ * to the emit outbox. The loader drains it after every dispatch and publishes
+ * a document-level `mochi:action` event so sibling components can participate
+ * without sharing a Ruby object graph. */
+static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
+  const char *action = "";
+  size_t length;
+  (void)self;
+  mrb_get_args(mrb, "z", &action);
+  length = strlen(action);
+  if (length == 0) return mrb_fixnum_value(-1);
+  if (g_emit_outbox_len + (int32_t)length + 1 > MOCHI_EMIT_CAPACITY) {
+    return mrb_fixnum_value(-1);
+  }
+  memcpy(g_emit_outbox + g_emit_outbox_len, action, length);
+  g_emit_outbox_len += (int32_t)length;
+  g_emit_outbox[g_emit_outbox_len] = '\n';
+  g_emit_outbox_len += 1;
+  return mrb_fixnum_value(0);
+}
+
 MOCHI_EXPORT
 int32_t mochi_init_runtime(void) {
   struct RClass *mochi;
@@ -159,8 +184,10 @@ int32_t mochi_init_runtime(void) {
   mochi = mrb_define_module(g_mrb, "Mochi");
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
                              MRB_ARGS_REQ(3));
+  mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
+                             MRB_ARGS_REQ(1));
   if (g_mrb->exc) {
-    set_error_text("Mochi.fetch registration failed");
+    set_error_text("Mochi module registration failed");
     return -1;
   }
   return 0;
@@ -241,6 +268,17 @@ int32_t mochi_dispatch_event(uint64_t instance, uint32_t method_symbol) {
   return 1;
 }
 
+/* has_method(instance, name_ptr, name_len): lets the loader decide whether a
+ * document-level action belongs to this component before dispatching it. */
+MOCHI_EXPORT
+int32_t mochi_has_method(uint64_t instance, const uint8_t *name, int32_t length) {
+  uint32_t symbol;
+  if (!g_mrb || !name || length <= 0) return 0;
+  symbol = goose_vm_intern(slice_of(name, (size_t)length));
+  if (symbol == 0 || goose_vm_has_error()) return 0;
+  return goose_vm_has_method(instance, symbol) == 1 ? 1 : 0;
+}
+
 /* flush_patches(instance) -> patch count, or -1 on failure. The bytes land in
  * the module-owned buffer read through the offset/length pair below. */
 MOCHI_EXPORT
@@ -301,6 +339,21 @@ int32_t mochi_fetch_inbox_offset(void) {
 
 MOCHI_EXPORT
 int32_t mochi_fetch_inbox_capacity(void) { return MOCHI_FETCH_CAPACITY; }
+
+MOCHI_EXPORT
+int32_t mochi_emit_outbox_offset(void) {
+  return (int32_t)(intptr_t)g_emit_outbox;
+}
+
+MOCHI_EXPORT
+int32_t mochi_emit_outbox_len(void) { return g_emit_outbox_len; }
+
+MOCHI_EXPORT
+int32_t mochi_emit_outbox_clear(void) {
+  g_emit_outbox_len = 0;
+  g_emit_outbox[0] = '\0';
+  return 0;
+}
 
 /* deliver_fetch(instance, callback_name, callback_len, response_len): the
  * loader has written the response body to the inbox and calls the component's

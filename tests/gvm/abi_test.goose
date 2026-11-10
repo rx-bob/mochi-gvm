@@ -84,6 +84,50 @@ fn test_abi_module_and_string_values(t: goosetest::Test&) {
     vm::abi_close();
 }
 
+fn test_abi_failed_call_does_not_stick(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_eq(0, vm::abi_register_binding(counter, 5, vm::intern_symbol("html")));
+
+    vm::abi_call(counter, vm::intern_symbol("missing_handler"), 0);
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("Counter#missing_handler: unknown method", vm::abi_last_error());
+
+    t.assert_eq(1, vm::abi_flush_patches(counter));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(0, vm::abi_flush_patches(counter));
+    t.assert_false(vm::abi_has_error());
+    vm::abi_close();
+}
+
+fn test_abi_formats_ivar_capacity_error(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    vm::g_abi_machine.error = vm::VmError.IvarCapacity;
+    vm::vm_set_error_context(vm::g_abi_machine, vm::mrb_class_id(counter_class),
+        vm::intern_symbol("html"), -1);
+    vm::abi_record_vm_error(vm::g_abi_machine);
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("Counter#html: ivar capacity exceeded", vm::abi_last_error());
+    vm::abi_close();
+}
+
+fn test_abi_binding_errors_include_context(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_eq(0, vm::abi_register_binding(counter, 7, vm::intern_symbol("missing_getter")));
+
+    t.assert_eq(-1, vm::abi_flush_patches(counter));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("Counter#missing_getter (binding 7): unknown method", vm::abi_last_error());
+    vm::abi_close();
+}
+
 fn test_abi_reports_parse_errors(t: goosetest::Test&) {
     vm::abi_open();
     var bad: u8[>..] = [];

@@ -44,11 +44,15 @@ fn compile_bridge() {
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
     command.append("\"_mochi_mount_component\",\"_mochi_intern\",");
     command.append("\"_mochi_register_binding\",\"_mochi_dispatch_event\",");
-    command.append("\"_mochi_flush_patches\",\"_mochi_patch_buffer_offset\",");
+    command.append("\"_mochi_has_method\",\"_goose_vm_has_method\",");
+    command.append("\"_mochi_flush_patches\",");
+    command.append("\"_mochi_patch_buffer_offset\",");
     command.append("\"_mochi_patch_buffer_len\",\"_mochi_last_error_offset\",");
     command.append("\"_mochi_last_error_len\",");
     command.append("\"_mochi_fetch_outbox_offset\",");
     command.append("\"_mochi_fetch_outbox_len\",\"_mochi_fetch_outbox_clear\",");
+    command.append("\"_mochi_emit_outbox_offset\",");
+    command.append("\"_mochi_emit_outbox_len\",\"_mochi_emit_outbox_clear\",");
     command.append("\"_mochi_fetch_inbox_offset\",");
     command.append("\"_mochi_fetch_inbox_capacity\",");
     command.append("\"_mochi_deliver_fetch\",\"_malloc\",\"_free\"]' ");

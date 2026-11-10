@@ -6,6 +6,7 @@
 // component, look up a class or method, or run one host call.
 namespace vm;
 
+import.ivar_mask;
 import.rite_types;
 import.state_pool;
 import.value_arena;
@@ -52,9 +53,29 @@ fn abi_fail(text: u8[:]) {
     g_abi_error_text.append(text);
 }
 
+// Appends the class, method and binding named by the VM's error context, when
+// the context refers to a real component class.
+fn abi_format_error_context() -> u8[>..] {
+    var text: u8[>..] = [];
+    let class_id = g_abi_machine.error_context.class_id;
+    if class_id < state_class_count(g_abi_pool)as u32 {
+        text.append(symbol_name(state_class_name_symbol(g_abi_pool, class_id)));
+        text.append("#");
+        text.append(symbol_name(g_abi_machine.error_context.method_symbol));
+        if g_abi_machine.error_context.binding_id >= 0 {
+            text.append(" (binding ");
+            mrb_format_fixnum(text, g_abi_machine.error_context.binding_id);
+            text.append(")");
+        }
+        text.append(": ");
+    }
+    text.append(vm_error_name(g_abi_machine.error));
+    return text;
+}
+
 fn abi_record_vm_error(machine: Vm&) {
     if machine.error != VmError.Ok {
-        abi_fail(vm_error_name(machine.error));
+        abi_fail(abi_format_error_context());
     }
 }
 
@@ -76,8 +97,9 @@ fn abi_reset() {
     g_abi_pool.components.clear();
     g_abi_pool.bindings.clear();
     g_abi_pool.blob.clear();
-    g_abi_pool.active_read_mask = 0;
+    g_abi_pool.active_read_mask = mask_clear();
     g_abi_pool.tracking_instance_index = -1;
+    g_abi_pool.error = VmError.Ok;
 
     scratch_reset(g_abi_scratch);
     g_abi_scratch.allocated_objects_total = 0;
@@ -90,6 +112,7 @@ fn abi_reset() {
     g_abi_machine.frames.clear();
     g_abi_machine.booted_roots = 0;
     g_abi_machine.error = VmError.Ok;
+    vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
 
     g_abi_call_args.clear();
     g_abi_patch_bytes.clear();
@@ -241,17 +264,40 @@ fn abi_set_arg(index: i64, value: u64) {
 
 fn abi_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
     if argc < 0 || argc > ABI_MAX_CALL_ARGS {
         abi_fail("bad argument count");
         return mrb_nil();
     }
     let result = vm_call_args(g_abi_machine, receiver, method_symbol, g_abi_call_args[..argc]);
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
+    if is_instance {
+        vm_set_error_context(g_abi_machine, class_id, method_symbol, -1);
+    }
     abi_record_vm_error(g_abi_machine);
     return result;
 }
 
+// Checks whether a receiver implements a method without invoking it. The host
+// uses this to route document-level actions to only the components that opt in.
+fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
+    if !is_instance {
+        return false;
+    }
+    let _, found = vm_lookup_method(g_abi_machine, class_id, method_symbol);
+    if found {
+        return true;
+    }
+    let _, native_found = vm_lookup_native_method(g_abi_machine, class_id, method_symbol);
+    return native_found;
+}
+
 fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {
     abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
     let result = binding_register(g_abi_pool, instance, binding_id, getter_symbol);
     if result != 0 {
         abi_fail("bad binding registration");
@@ -263,6 +309,7 @@ fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i
 // is rebuilt for every call so the host always reads a complete patch frame.
 fn abi_flush_patches(instance: u64) -> i64 {
     abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
     g_abi_patch_bytes.clear();
     let count = vm_flush_dirty_bindings(g_abi_machine, instance, g_abi_patch_bytes);
     abi_record_vm_error(g_abi_machine);
@@ -351,6 +398,10 @@ export fn goose_vm_set_arg(index: i64, value: u64) {
 
 export fn goose_vm_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     return abi_call(receiver, method_symbol, argc);
+}
+
+export fn goose_vm_has_method(receiver: u64, method_symbol: u32) -> bool {
+    return abi_has_method(receiver, method_symbol);
 }
 
 export fn goose_vm_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {

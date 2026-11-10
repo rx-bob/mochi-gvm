@@ -13,6 +13,8 @@
 // nested instances so they survive the next tick reset.
 namespace vm;
 
+import.ivar_mask;
+
 let MRB_TAG_SHIFT: u64 = 32;
 let MRB_PAYLOAD_MASK: u64 = 0xFFFFFFFF;
 let MRB_TAG_NIL: u64 = 0;
@@ -65,8 +67,8 @@ struct ArenaObject {
     text_length_bytes: i64,
     class_index: u32,
     ivar_head_index: i64,
-    ivar_count: u8,
-    dirty_ivars: u64,
+    ivar_count: u16,
+    dirty_ivars: IvarMask,
     items_first_index: i64,
     items_last_index: i64,
     item_count: i64,
@@ -74,7 +76,7 @@ struct ArenaObject {
 
 // One instance variable. Slots form a per-object singly linked list, so
 // assigning unrelated objects never has to move or compact earlier slots.
-// `bit_index` is the slot's stable position in the instance's u64 masks.
+// `bit_index` is the slot's stable position in the instance's 256-bit mask.
 struct IvarSlot {
     key: u32,
     bit_index: u8,
@@ -315,7 +317,7 @@ fn empty_arena_object(kind: ArenaObjectKind) -> ArenaObject {
         class_index: 0,
         ivar_head_index: -1,
         ivar_count: 0,
-        dirty_ivars: 0,
+        dirty_ivars: mask_clear(),
         items_first_index: -1,
         items_last_index: -1,
         item_count: 0,
@@ -372,7 +374,7 @@ fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
             class_index: 0,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -393,7 +395,7 @@ fn scratch_alloc_instance(arena: ScratchArena&, class_id: u32) -> MrbValue {
             class_index: class_id,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,

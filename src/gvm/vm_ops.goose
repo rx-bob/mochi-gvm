@@ -261,15 +261,26 @@ fn vm_op_ivar(
     }
     if op == OP_GETIV {
         let value, _ = state_get_ivar(machine.pool, machine.regs[frame.base], symbol);
+        if machine.pool.error != VmError.Ok {
+            return vm_fail(machine, machine.pool.error, pc + 2);
+        }
         if !vm_write_register(machine, record, frame.base, ops.a, value) {
             return vm_fail(machine, VmError.BadOperand, pc + 2);
         }
         return vm_step_continue(pc + 2);
     }
     let value, value_ok = vm_read_register(machine, record, frame.base, ops.a);
-    if !value_ok || !state_set_ivar(machine.pool, machine.scratch,
-        machine.regs[frame.base], symbol, value) {
+    if !value_ok {
+        return vm_fail(machine, VmError.BadOperand, pc + 2);
+    }
+    if !state_set_ivar(machine.pool, machine.scratch, machine.regs[frame.base], symbol, value) {
+        if machine.pool.error != VmError.Ok {
+            return vm_fail(machine, machine.pool.error, pc + 2);
+        }
         return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+    }
+    if machine.pool.error != VmError.Ok {
+        return vm_fail(machine, machine.pool.error, pc + 2);
     }
     return vm_step_continue(pc + 2);
 }

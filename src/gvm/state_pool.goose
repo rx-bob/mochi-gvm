@@ -6,8 +6,10 @@
 // are addressed through the same 31-bit state handles used by `MrbValue`.
 namespace vm;
 
+import.ivar_mask;
 import.signals;
 import.value_arena;
+import.vm_core;
 
 // The state pool is long-lived, so its limits are larger but still enforced.
 let MAX_STATE_CLASSES = 256;
@@ -37,10 +39,18 @@ root struct StatePool {
     bindings: BindingEntry[>..] = [],
     blob: u8[>..] = [],
     // Signal tracking is global because at most one binding getter runs at a
-    // time: reads of the tracked instance OR their bits into `active_read_mask`
-    // and writes OR changed bits into the instance's `dirty_ivars`.
-    active_read_mask: u64 = 0,
+    // time: reads of the tracked instance set their bits in `active_read_mask`
+    // and writes set changed bits in the instance's `dirty_ivars`.
+    active_read_mask: IvarMask = IvarMask {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+    },
     tracking_instance_index: i64 = -1,
+    // Capacity failures are reported here because the state layer has no `Vm`
+    // handle. `vm_begin_entry` clears it before every host call.
+    error: VmError = VmError.Ok,
 }
 
 fn state_object_count(pool: StatePool&) -> i64 {
@@ -108,7 +118,7 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
             class_index: 0,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -119,6 +129,7 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
 fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
     assert(class_id < pool.classes.len);
     assert(pool.objects.len < MAX_STATE_OBJECTS);
+    pool.error = VmError.Ok;
     let index = pool.objects.len;
     pool.objects.push(ArenaObject {
             kind: ArenaObjectKind.Instance,
@@ -127,7 +138,7 @@ fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
             class_index: class_id,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -153,7 +164,7 @@ fn state_alloc_collection(pool: StatePool&, kind: ArenaObjectKind) -> MrbValue {
             class_index: 0,
             ivar_head_index: -1,
             ivar_count: 0,
-            dirty_ivars: 0,
+            dirty_ivars: mask_clear(),
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,

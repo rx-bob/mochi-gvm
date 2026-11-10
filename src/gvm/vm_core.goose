@@ -11,6 +11,7 @@ import.rite_parser;
 import.rite_types;
 import.state_pool;
 import.value_arena;
+import.vm_errors;
 
 let MAX_VM_REGS = 512;
 let MAX_VM_CALL_DEPTH = 32;
@@ -84,6 +85,7 @@ enum VmError {
     NativeError,
     Registers,
     CallDepth,
+    IvarCapacity,
 }
 
 // What the interpreter loop should do after one decoded instruction.
@@ -149,6 +151,11 @@ root struct Vm {
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],
     booted_roots: i64 = 0,
     error: VmError = VmError.Ok,
+    error_context: ErrorContext = ErrorContext {
+        class_id: NULL_CLASS_ID,
+        method_symbol: NULL_SYMBOL,
+        binding_id: -1,
+    },
 }
 
 fn vm_error_name(err: VmError) -> u8[:] {
@@ -164,6 +171,7 @@ fn vm_error_name(err: VmError) -> u8[:] {
         NativeError => "native method failed",
         Registers => "register overflow",
         CallDepth => "call depth exceeded",
+        IvarCapacity => "ivar capacity exceeded",
     };
 }
 
@@ -239,6 +247,8 @@ fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError
 // result is dead once the host has read it, so the arena rewinds here.
 fn vm_begin_entry(machine: Vm&) {
     machine.error = VmError.Ok;
+    vm_set_error_context(machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
+    machine.pool.error = VmError.Ok;
     machine.regs.clear();
     machine.frames.clear();
     scratch_reset(machine.scratch);
