@@ -40,42 +40,68 @@ fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
     file.records.clear();
     file.pools.clear();
     file.syms.clear();
+    file.roots.clear();
     file.error = ParseError.Ok;
     file.binary_size_bytes = 0;
     file.irep_section_offset_bytes = 0;
     file.irep_section_size_bytes = 0;
+    return parse_rite_window(data, file, 0, true);
+}
 
-    if data.len < RITE_HEADER_BYTES {
+// Appends one RITE program to a file whose record, pool and symbol arrays are
+// already populated. `data_base` is the program's byte offset in `file.data`.
+fn parse_rite_append(data: u8[:], file: RiteFile&, data_base: i64) -> ParseError {
+    file.data = data;
+    file.error = ParseError.Ok;
+    return parse_rite_window(data, file, data_base, false);
+}
+
+fn parse_rite_window(
+    data: u8[:], file: RiteFile&, data_base: i64, reset_size: bool
+) -> ParseError {
+    if data_base < 0 || data_base + RITE_HEADER_BYTES > data.len {
         return parse_rite_fail(file, ParseError.Truncated);
     }
-    if !bytes_equal(data, 0, RITE_MAGIC) {
+    if !bytes_equal(data, data_base, RITE_MAGIC) {
         return parse_rite_fail(file, ParseError.BadMagic);
     }
-    if !bytes_equal(data, 4, RITE_MAJOR_VERSION) || !bytes_equal(data, 6, RITE_MINOR_VERSION) {
+    if !bytes_equal(data, data_base + 4, RITE_MAJOR_VERSION) ||
+    !bytes_equal(data, data_base + 6, RITE_MINOR_VERSION) {
         return parse_rite_fail(file, ParseError.BadVersion);
     }
 
-    let binary_size_raw, size_ok = read_u32(data, 8);
+    let binary_size_raw, size_ok = read_u32(data, data_base + 8);
     if !size_ok {
         return parse_rite_fail(file, ParseError.Truncated);
     }
     let binary_size: i64 = binary_size_raw;
-    if binary_size < MIN_RITE_BYTES || binary_size != data.len {
+    if binary_size < MIN_RITE_BYTES || data_base + binary_size > data.len {
         return parse_rite_fail(file, ParseError.BadBinarySize);
     }
-    file.binary_size_bytes = binary_size_raw;
+    if reset_size && binary_size != data.len {
+        return parse_rite_fail(file, ParseError.BadBinarySize);
+    }
 
-    let err = parse_rite_sections(data, binary_size, file);
+    let root_index = file.records.len;
+    let err = parse_rite_sections(data, data_base, data_base + binary_size, file);
     if err != ParseError.Ok {
         return parse_rite_fail(file, err);
     }
+    if reset_size {
+        file.binary_size_bytes = binary_size_raw;
+    } else {
+        file.binary_size_bytes += binary_size_raw;
+    }
+    file.roots.push(root_index);
     return ParseError.Ok;
 }
 
 // Walks the top-level sections. Exactly one IREP section must come first,
 // followed by optional DBG and LVAR sections, and terminated by END.
-fn parse_rite_sections(data: u8[:], binary_size: i64, file: RiteFile&) -> ParseError {
-    var at = RITE_HEADER_BYTES;
+fn parse_rite_sections(
+    data: u8[:], start: i64, limit: i64, file: RiteFile&
+) -> ParseError {
+    var at = start + RITE_HEADER_BYTES;
     var state = SectionState {
         found_irep: false,
         found_dbg: false,
@@ -83,8 +109,8 @@ fn parse_rite_sections(data: u8[:], binary_size: i64, file: RiteFile&) -> ParseE
         saw_end: false,
     };
 
-    while at < binary_size {
-        if at + RITE_SECTION_HEADER_BYTES > binary_size {
+    while at < limit {
+        if at + RITE_SECTION_HEADER_BYTES > limit {
             return ParseError.Truncated;
         }
         let section_size_raw, size_ok = read_u32(data, at + 4);
@@ -92,7 +118,7 @@ fn parse_rite_sections(data: u8[:], binary_size: i64, file: RiteFile&) -> ParseE
             return ParseError.Truncated;
         }
         let section_size: i64 = section_size_raw;
-        if section_size < RITE_SECTION_HEADER_BYTES || at + section_size > binary_size {
+        if section_size < RITE_SECTION_HEADER_BYTES || at + section_size > limit {
             return ParseError.BadSection;
         }
         let section_end = at + section_size;
@@ -103,7 +129,7 @@ fn parse_rite_sections(data: u8[:], binary_size: i64, file: RiteFile&) -> ParseE
                 return err;
             }
         } else if bytes_equal(data, at, END_SECTION_IDENT) {
-            if section_size != RITE_SECTION_HEADER_BYTES || section_end != binary_size {
+            if section_size != RITE_SECTION_HEADER_BYTES || section_end != limit {
                 return ParseError.BadSection;
             }
             state.saw_end = true;
@@ -136,7 +162,11 @@ fn parse_rite_sections(data: u8[:], binary_size: i64, file: RiteFile&) -> ParseE
 
 // Validates and parses the only IREP section.
 fn parse_rite_irep(
-    data: u8[:], at: i64, section_size_raw: u32, state: SectionState&, file: RiteFile&
+    data: u8[:],
+    at: i64,
+    section_size_raw: u32,
+    state: SectionState&,
+    file: RiteFile&,
 ) -> ParseError {
     if state.found_irep || state.found_dbg || state.found_lvar {
         return ParseError.BadSection;

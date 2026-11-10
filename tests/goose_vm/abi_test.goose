@@ -7,14 +7,24 @@ import goosetest;
 import vm;
 
 let COUNTER_CHI: const u8[:] = embed_file("../fixtures/counter.chi");
+let TODO_CHI: const u8[:] = embed_file("../fixtures/todo.chi");
 let COUNTER_HTML: const u8[:] = "<div class='counter'><h2>Click me</h2><span class='count'>1</span><div class='buttons'><button data-action='decrement'>-</button><button data-action='increment'>+</button><button data-action='reset'>Reset</button></div></div>";
+let TODO_HTML_EMPTY: const u8[:] = "<div class='todo'><h2>Todo List (0 items)</h2><ul></ul><div class='buttons'><button data-action='add_item'>Add</button><button data-action='toggle_last'>Toggle Last</button><button data-action='remove_last'>Remove Last</button></div></div>";
 var g_counter_rite: u8[>..] = [];
+var g_todo_rite: u8[>..] = [];
 
 fn counter_rite() -> u8[:] {
     if g_counter_rite.len == 0 {
         vm::vm_restore_rite_header(COUNTER_CHI, g_counter_rite);
     }
     return g_counter_rite[..];
+}
+
+fn todo_rite() -> u8[:] {
+    if g_todo_rite.len == 0 {
+        vm::vm_restore_rite_header(TODO_CHI, g_todo_rite);
+    }
+    return g_todo_rite[..];
 }
 
 fn test_abi_loads_and_calls_counter(t: goosetest::Test&) {
@@ -32,6 +42,29 @@ fn test_abi_loads_and_calls_counter(t: goosetest::Test&) {
     let html = vm::abi_call(counter, vm::intern_symbol("html"), 0);
     t.assert_false(vm::abi_has_error());
     t.assert_true(vm::abi_string_bytes(html) == COUNTER_HTML);
+    vm::abi_close();
+}
+
+fn test_abi_appends_programs_and_keeps_methods(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    vm::abi_call(counter, vm::intern_symbol("increment"), 0);
+    let first_html = vm::abi_call(counter, vm::intern_symbol("html"), 0);
+    t.assert_eq(COUNTER_HTML, vm::abi_string_bytes(first_html), "first counter html");
+
+    t.assert_eq(0, vm::abi_load_irep(todo_rite()));
+    let kept_html = vm::abi_call(counter, vm::intern_symbol("html"), 0);
+    t.assert_true(vm::abi_string_bytes(kept_html) == COUNTER_HTML);
+    vm::abi_call(counter, vm::intern_symbol("increment"), 0);
+    t.assert_false(vm::abi_has_error());
+
+    let todo_class = vm::abi_const_get(vm::intern_symbol("TodoList"));
+    t.assert_true(vm::abi_is_class(todo_class));
+    let todo = vm::abi_obj_new(vm::mrb_class_id(todo_class));
+    let todo_html = vm::abi_call(todo, vm::intern_symbol("html"), 0);
+    t.assert_true(vm::abi_string_bytes(todo_html) == TODO_HTML_EMPTY);
     vm::abi_close();
 }
 

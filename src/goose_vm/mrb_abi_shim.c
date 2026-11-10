@@ -82,6 +82,9 @@ extern uint8_t goose_vm_is_class(uint64_t value);
 void goose_abi_native_set_arg(int64_t index, uint64_t value);
 uint64_t goose_abi_native_call(uint32_t native_id, uint64_t self, int64_t argc);
 
+/* Loads compile-time registered mrbgems after the VM is open. */
+void mochi_mrbgem_load_all(mrb_state *mrb);
+
 static mrb_state *g_mrb = NULL;
 
 static mrb_shim *shim_of(mrb_state *mrb) {
@@ -184,6 +187,7 @@ mrb_state *mrb_open(void) {
   g_mrb = mrb;
   mrb->object_class = class_for_id(mrb, SHIM_OBJECT_CLASS_ID);
   clear_exc(mrb);
+  mochi_mrbgem_load_all(mrb);
   return mrb;
 }
 
@@ -474,6 +478,33 @@ mrb_value mrb_funcall(mrb_state *mrb, mrb_value self, const char *name,
   }
   va_end(args);
   return mrb_funcall_argv(mrb, self, mrb_intern_cstr(mrb, name), argc, argv);
+}
+
+mrb_value mrb_load_irep(mrb_state *mrb, const uint8_t *irep) {
+  uint32_t size;
+  int64_t result;
+
+  if (!mrb || !irep) {
+    set_exc(mrb, "missing irep bytes");
+    return mrb_nil_value();
+  }
+  if (memcmp(irep, "RITE", 4) != 0) {
+    set_exc(mrb, "bad irep header");
+    return mrb_nil_value();
+  }
+  size = ((uint32_t)irep[8] << 24) | ((uint32_t)irep[9] << 16) |
+         ((uint32_t)irep[10] << 8) | (uint32_t)irep[11];
+  if (size < 12) {
+    set_exc(mrb, "bad irep size");
+    return mrb_nil_value();
+  }
+  result = goose_vm_load_irep(slice_of(irep, (size_t)size));
+  if (result != 0) {
+    set_exc(mrb, "irep load failed");
+    return mrb_nil_value();
+  }
+  clear_exc(mrb);
+  return mrb_nil_value();
 }
 
 mrb_value mrb_load_irep_buf(mrb_state *mrb, const void *bytes, size_t length) {

@@ -3,6 +3,7 @@
 
 #include "mruby.h"
 
+MRB_API mrb_value mrb_load_irep(mrb_state *mrb, const uint8_t *irep);
 MRB_API mrb_value mrb_load_irep_buf(mrb_state *mrb, const void *bytes,
                                     size_t length);
 

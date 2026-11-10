@@ -7,8 +7,10 @@
  *   goose --standalone --header abi.h -o abi.c <entry importing src/goose_vm>
  *
  * Then compile this file with `mrb_abi_shim.c` (and
- * `-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE`), the generated `abi.c`, and
- * `poc_yiseq/mochi_bridge.c` (with `-Dmain=mochi_bridge_sidecar_main`).
+ * `-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE`), `mrbgem_loader.c` and
+ * `tests/fixtures/sample_mrbgem.c` (both with `-DMOCHI_ABI_SAMPLE_GEM`), the
+ * generated `abi.c`, and `poc_yiseq/mochi_bridge.c` (with
+ * `-Dmain=mochi_bridge_sidecar_main`).
  */
 #include "abi.h"
 
@@ -37,6 +39,7 @@ static const char EXPECTED_HTML[] =
     "<div class='buttons'><button data-action='decrement'>-</button>"
     "<button data-action='increment'>+</button>"
     "<button data-action='reset'>Reset</button></div></div>";
+static const char EXPECTED_GEM_HTML[] = "<span>42</span>";
 static const char FETCH_LINE[] = "1|counter|handler|https://example.test/data\n";
 
 static void fail(const char *what, int got) {
@@ -67,7 +70,9 @@ static unsigned char *read_file(const char *path, long *size) {
 
 int main(void) {
   long size = 0;
+  long gem_size = 0;
   unsigned char *chi = read_file("counter.chi", &size);
+  unsigned char *gem_chi = read_file("gem_user.chi", &gem_size);
   int slot;
   int rendered;
   int events;
@@ -102,7 +107,13 @@ int main(void) {
   if (mochi_load_iseq((int)(intptr_t)chi, (int)size) != 0) fail("mochi_load_iseq", -1);
   slot = mochi_hydrate_component((int)(intptr_t)"counter",
                                  (int)(intptr_t)"Counter", 0);
-  if (slot != 0) fail("mochi_hydrate_component", slot);
+  if (slot != 0) {
+    int64_t error_len = 0;
+    const uint8_t *error = goose_vm_last_error(&error_len);
+    fprintf(stderr, "counter hydrate error: %.*s\n", (int)error_len,
+            (const char *)error);
+    fail("mochi_hydrate_component", slot);
+  }
   events = mochi_write_event((int)(intptr_t)"counter|click|increment");
   if (events != (int)strlen("counter|click|increment")) fail("write event", events);
   if (mochi_process_events() != 1) fail("process events", -1);
@@ -110,6 +121,19 @@ int main(void) {
   if (rendered != (int)strlen(EXPECTED_HTML)) fail("render length", rendered);
   html = (const char *)(intptr_t)mochi_render_buffer_offset();
   if (memcmp(html, EXPECTED_HTML, strlen(EXPECTED_HTML)) != 0) fail("render html", -1);
+
+  if (mochi_load_iseq((int)(intptr_t)gem_chi, (int)gem_size) != 0) {
+    fail("load gem user", -1);
+  }
+  slot = mochi_hydrate_component((int)(intptr_t)"gem_user",
+                                 (int)(intptr_t)"GemUser", 0);
+  if (slot < 0) fail("hydrate gem user", slot);
+  rendered = mochi_render((int)(intptr_t)"gem_user");
+  if (rendered != (int)strlen(EXPECTED_GEM_HTML)) fail("gem render length", rendered);
+  html = (const char *)(intptr_t)mochi_render_buffer_offset();
+  if (memcmp(html, EXPECTED_GEM_HTML, strlen(EXPECTED_GEM_HTML)) != 0) {
+    fail("gem render html", -1);
+  }
 
   host_class = mrb_define_class(mrb, "HostBase", mrb->object_class);
   if (!host_class) fail("mrb_define_class", -1);
@@ -123,7 +147,8 @@ int main(void) {
   mrb_close(mrb);
   goose_exit();
   free(chi);
-  printf("abi bridge ok: fetch, load, hydrate, render, host class/method (%d bytes)\n",
+  free(gem_chi);
+  printf("abi bridge ok: fetch, load, render, gem mrblib, host class/method (%d bytes)\n",
          rendered);
   return 0;
 }

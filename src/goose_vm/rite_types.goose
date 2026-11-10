@@ -100,14 +100,16 @@ root struct SymbolTable {
     entries: SymbolEntry[>..] = [],
 }
 
-// The result of parsing one RITE buffer. `records` is in pre-order: a parent
-// precedes every descendant, and `first_child_index` / `next_sibling_index`
-// link the children without any pointers.
+// The result of parsing one or more RITE buffers. `records` is in pre-order: a
+// parent precedes every descendant, and `first_child_index` /
+// `next_sibling_index` link the children without any pointers. `roots` holds
+// the absolute record index of each loaded program's root.
 root struct RiteFile {
     data: const u8[:] = "",
     records: IrepRecord[>..] = [],
     pools: PoolEntry[>..] = [],
     syms: SymbolId[>..] = [],
+    roots: i64[>..] = [],
     error: ParseError = ParseError.Ok,
     binary_size_bytes: u32 = 0,
     irep_section_offset_bytes: i64 = 0,

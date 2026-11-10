@@ -17,16 +17,17 @@ import.vm_ops_collections;
 // Runs the root IREP once per loaded program. The root defines classes and
 // methods, so every host entry calls this before looking anything up.
 fn vm_ensure_booted(machine: Vm&) {
-    if machine.booted {
-        return;
-    }
     if machine.file.records.len == 0 {
         machine.error = VmError.BadOpcode;
         return;
     }
-    vm_exec(machine, 0, mrb_nil(), -1);
-    if machine.error == VmError.Ok {
-        machine.booted = true;
+    while machine.booted_roots < machine.file.roots.len {
+        let root = machine.file.roots[machine.booted_roots];
+        vm_exec(machine, root, mrb_nil(), -1);
+        if machine.error != VmError.Ok {
+            return;
+        }
+        machine.booted_roots += 1;
     }
 }
 
@@ -150,14 +151,14 @@ fn vm_exec_step(
     if op == OP_STRING || op == OP_STRCAT {
         return vm_op_string(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_CLASS {
-        return vm_op_class(machine, frame, record, iseq, pc);
+    if op == OP_CLASS || op == OP_MODULE {
+        return vm_op_class(machine, frame, record, iseq, pc, op);
     }
     if op == OP_EXEC {
         return vm_op_exec(machine, frame, record, iseq, pc);
     }
-    if op == OP_TDEF {
-        return vm_op_tdef(machine, frame, record, iseq, pc);
+    if op == OP_TDEF || op == OP_SDEF {
+        return vm_op_tdef(machine, frame, record, iseq, pc, op);
     }
     if op == OP_ENTER || op == OP_RETURN || op == OP_RETNIL || op == OP_STOP {
         return vm_op_control(machine, frame, record, iseq, pc, op);
@@ -331,23 +332,28 @@ fn vm_op_string(
 }
 
 fn vm_op_class(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
     let ops = vm_read_operands(iseq, pc, 2);
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
     }
     let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
-    let superclass, superclass_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
-    if !symbol_ok || !superclass_ok {
+    if !symbol_ok {
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }
     var superclass_id = NULL_CLASS_ID;
-    if !mrb_is_nil(superclass) {
-        if !mrb_is_class(superclass) {
-            return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+    if op == OP_CLASS {
+        let superclass, superclass_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
+        if !superclass_ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
         }
-        superclass_id = mrb_class_id(superclass);
+        if !mrb_is_nil(superclass) {
+            if !mrb_is_class(superclass) {
+                return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+            }
+            superclass_id = mrb_class_id(superclass);
+        }
     }
     let class_id, found = vm_find_class(machine.pool, symbol);
     let defined = if found {
@@ -377,7 +383,7 @@ fn vm_op_exec(
 }
 
 fn vm_op_tdef(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
     let ops = vm_read_operands(iseq, pc, 3);
     if !ops.valid {
@@ -385,7 +391,14 @@ fn vm_op_tdef(
     }
     let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
     let child = vm_child_record(machine.file, frame.record_index, ops.c);
-    let target = machine.regs[frame.base];
+    var target = machine.regs[frame.base];
+    if op == OP_SDEF {
+        let explicit, explicit_ok = vm_read_register(machine, record, frame.base, ops.a);
+        if !explicit_ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        target = explicit;
+    }
     if !symbol_ok || child < 0 || !mrb_is_class(target) {
         return vm_fail(machine, VmError.TypeMismatch, pc + 3);
     }

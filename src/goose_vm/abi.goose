@@ -62,6 +62,7 @@ fn abi_reset() {
     g_abi_file.records.clear();
     g_abi_file.pools.clear();
     g_abi_file.syms.clear();
+    g_abi_file.roots.clear();
     g_abi_file.error = ParseError.Ok;
     g_abi_file.binary_size_bytes = 0;
     g_abi_file.irep_section_offset_bytes = 0;
@@ -83,7 +84,7 @@ fn abi_reset() {
     g_abi_machine.native_methods.clear();
     g_abi_machine.regs.clear();
     g_abi_machine.frames.clear();
-    g_abi_machine.booted = false;
+    g_abi_machine.booted_roots = 0;
     g_abi_machine.error = VmError.Ok;
 
     g_abi_call_args.clear();
@@ -134,10 +135,8 @@ fn abi_load_irep(bytes: const u8[:]) -> i64 {
         return 1;
     }
     g_abi_bytecode.append(bytes);
-    g_abi_file.data = g_abi_bytecode[offset..];
-    let err = vm_load_irep(g_abi_file, g_abi_bytecode[offset..]);
-    g_abi_machine.methods.clear();
-    g_abi_machine.booted = false;
+    g_abi_file.data = g_abi_bytecode[..];
+    let err = vm_append_irep(g_abi_file, g_abi_bytecode[..], offset);
     g_abi_machine.error = VmError.Ok;
     if err != ParseError.Ok {
         abi_fail(parse_error_name(err));

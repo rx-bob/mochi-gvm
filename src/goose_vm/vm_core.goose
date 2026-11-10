@@ -61,8 +61,10 @@ let OP_STRCAT: u8 = 93;
 let OP_HASH: u8 = 94;
 let OP_BLOCK: u8 = 98;
 let OP_CLASS: u8 = 103;
+let OP_MODULE: u8 = 104;
 let OP_EXEC: u8 = 105;
 let OP_TDEF: u8 = 107;
+let OP_SDEF: u8 = 108;
 let OP_STOP: u8 = 118;
 
 // A VM rejection reason. Bytecode from an untrusted component must never abort
@@ -142,7 +144,7 @@ root struct Vm {
     native_methods: NativeMethod[>..] = [],
     regs: MrbValue[..MAX_VM_REGS] = [],
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],
-    booted: bool = false,
+    booted_roots: i64 = 0,
     error: VmError = VmError.Ok,
 }
 
@@ -222,6 +224,12 @@ fn vm_restore_rite_header(stripped: u8[:], out: u8[>..]&) {
 // the VM borrows the file, and loading shrinks its record and pool arrays.
 fn vm_load_irep(file: RiteFile&, bytes: u8[:]) -> ParseError {
     return parse_rite(bytes, file);
+}
+
+// Appends one complete RITE buffer to an already loaded file. Record, pool and
+// symbol indices stay absolute, so earlier programs remain executable.
+fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError {
+    return parse_rite_append(bytes, file, byte_offset);
 }
 
 // Starts a top-level entry from a clean tick arena. A previous entry's scratch

@@ -353,6 +353,38 @@ fn test_malformed_headers_and_sections_are_rejected(t: goosetest::Test&) {
     t.assert_eq(vm::ParseError.BadSection, vm::parse_rite(no_end[..], file));
 }
 
+fn test_append_keeps_absolute_records_and_roots(t: goosetest::Test&) {
+    var bytes: u8[>..] = [];
+    bytes.append(RITE_PREFIX);
+    bytes.append(COUNTER_CHI);
+    let first_len = bytes.len;
+    bytes.append(RITE_PREFIX);
+    bytes.append(TODO_CHI);
+
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    t.assert_eq(vm::ParseError.Ok, vm::parse_rite(bytes[..first_len], file));
+    t.assert_eq(1, file.roots.len);
+    t.assert_eq(0, file.roots[0]);
+    t.assert_true(file.records[0].record_offset_bytes > 0);
+    let first_record_count = file.records.len;
+    let first_pool_count = file.pools.len;
+
+    t.assert_eq(vm::ParseError.Ok, vm::parse_rite_append(bytes[..], file, first_len));
+    t.assert_eq(2, file.roots.len);
+    t.assert_eq(first_record_count, file.roots[1]);
+    t.assert_true(file.records[file.roots[1]].record_offset_bytes > 0);
+    t.assert_true(file.records[file.roots[1]].record_offset_bytes >= first_len);
+    t.assert_eq(bytes.len as u32, file.binary_size_bytes);
+    t.assert_true(file.pools.len > first_pool_count);
+
+    t.assert_eq(
+        vm::ParseError.BadMagic, vm::parse_rite_append(bytes[..], file, first_len + 1)
+    );
+    t.assert_eq(2, file.roots.len);
+}
+
 fn test_corrupt_records_are_rejected(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..
