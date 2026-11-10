@@ -19,6 +19,7 @@
 // Goose resolves because a program is compiled as one translation unit.
 namespace vm;
 
+import.collection_arena;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -28,6 +29,7 @@ import.vm_entry;
 let MAX_TRACKED_IVARS: u8 = 64;
 let MAX_SIGNAL_DEPTH = 32;
 let MAX_BINDINGS = 256;
+let MAX_JSON_DEPTH = 16;
 
 // One DOM binding: which instance owns it, which getter produces its text, and
 // the ivar mask recorded the last time the getter ran. `initialized` is false
@@ -84,12 +86,224 @@ fn binding_append_u32_le(out: u8[>..]&, value: u32) {
     out.push((value >> 24)as u8);
 }
 
-// Renders one binding result as text. Strings return their existing bytes;
-// scalar values are formatted into the tick arena. The view stays valid until
-// the next top-level entry resets the arena.
+// Returns true when a value is an Array or Hash in either arena. The loader's
+// `each` binding receives a JSON array, so collections are serialized instead
+// of being treated as strings with an empty byte view.
+fn binding_value_is_array(machine: Vm&, value: MrbValue) -> bool {
+    if mrb_is_scratch(value) {
+        return scratch_is_array(machine.scratch, value);
+    }
+    if mrb_is_state(value) {
+        return state_is_array(machine.pool, value);
+    }
+    return false;
+}
+
+fn binding_value_is_hash(machine: Vm&, value: MrbValue) -> bool {
+    if mrb_is_scratch(value) {
+        return scratch_is_hash(machine.scratch, value);
+    }
+    if mrb_is_state(value) {
+        return state_is_hash(machine.pool, value);
+    }
+    return false;
+}
+
+fn binding_json_hex_digit(value: u8) -> u8 {
+    if value < 10 {
+        return 48 + value;
+    }
+    return 87 + value;
+}
+
+// Escapes one UTF-8 byte string for a JSON string literal. Non-ASCII bytes pass
+// through unchanged, which is valid JSON and preserves Ruby symbol names.
+fn binding_json_escape(out: u8[>..]&, bytes: u8[:]) {
+    for index in 0..bytes.len {
+        let byte = bytes[index];
+        if byte == 34 {
+            out.push(92);
+            out.push(34);
+        } else if byte == 92 {
+            out.push(92);
+            out.push(92);
+        } else if byte == 8 {
+            out.push(92);
+            out.push(98);
+        } else if byte == 9 {
+            out.push(92);
+            out.push(116);
+        } else if byte == 10 {
+            out.push(92);
+            out.push(110);
+        } else if byte == 12 {
+            out.push(92);
+            out.push(102);
+        } else if byte == 13 {
+            out.push(92);
+            out.push(114);
+        } else if byte < 32 {
+            out.push(92);
+            out.push(117);
+            out.push(48);
+            out.push(48);
+            out.push(binding_json_hex_digit(byte >> 4));
+            out.push(binding_json_hex_digit(byte & 0x0F));
+        } else {
+            out.push(byte);
+        }
+    }
+}
+
+fn binding_json_append_key(machine: Vm&, out: u8[>..]&, key: MrbValue) {
+    out.push(34);
+    if mrb_is_symbol(key) {
+        binding_json_escape(out, symbol_name(mrb_symbol_id(key)));
+    } else {
+        var text: u8[>..] = [];
+        vm_append_value_text(machine, text, key);
+        binding_json_escape(out, text[..]);
+    }
+    out.push(34);
+}
+
+fn binding_array_length(machine: Vm&, value: MrbValue) -> i64 {
+    if mrb_is_scratch(value) {
+        return scratch_array_length(machine.scratch, value);
+    }
+    return state_array_length(machine.pool, value);
+}
+
+fn binding_array_get(machine: Vm&, value: MrbValue, index: i64) -> MrbValue, bool {
+    if mrb_is_scratch(value) {
+        return scratch_array_get(machine.scratch, value, index);
+    }
+    return state_array_get(machine.pool, value, index);
+}
+
+fn binding_hash_length(machine: Vm&, value: MrbValue) -> i64 {
+    if mrb_is_scratch(value) {
+        return scratch_hash_length(machine.scratch, value);
+    }
+    return state_hash_length(machine.pool, value);
+}
+
+fn binding_hash_slot_index(machine: Vm&, value: MrbValue, position: i64) -> i64 {
+    let object_index = mrb_arena_index(value)as i64;
+    if mrb_is_scratch(value) {
+        return scratch_slot_index_at(machine.scratch, object_index, position);
+    }
+    return state_slot_index_at(machine.pool, object_index, position);
+}
+
+fn binding_hash_slot_key(machine: Vm&, value: MrbValue, slot_index: i64) -> MrbValue {
+    if mrb_is_scratch(value) {
+        return machine.scratch.slots[slot_index].key;
+    }
+    return machine.pool.slots[slot_index].key;
+}
+
+fn binding_hash_slot_value(machine: Vm&, value: MrbValue, slot_index: i64) -> MrbValue {
+    if mrb_is_scratch(value) {
+        return machine.scratch.slots[slot_index].value;
+    }
+    return machine.pool.slots[slot_index].value;
+}
+
+recursive fn binding_json_append_array(machine: Vm&, out: u8[>..]&, value: MrbValue, depth: i64) {
+    let length = binding_array_length(machine, value);
+    out.push(91);
+    for index in 0..length {
+        if index > 0 {
+            out.push(44);
+        }
+        let item, found = binding_array_get(machine, value, index);
+        if found {
+            binding_json_append_value(machine, out, item, depth + 1);
+        } else {
+            out.append("null");
+        }
+    }
+    out.push(93);
+}
+
+recursive fn binding_json_append_hash(machine: Vm&, out: u8[>..]&, value: MrbValue, depth: i64) {
+    let length = binding_hash_length(machine, value);
+    out.push(123);
+    for position in 0..length {
+        if position > 0 {
+            out.push(44);
+        }
+        let slot_index = binding_hash_slot_index(machine, value, position);
+        if slot_index < 0 {
+            continue;
+        }
+        binding_json_append_key(machine, out, binding_hash_slot_key(machine, value, slot_index));
+        out.push(58);
+        binding_json_append_value(
+            machine, out, binding_hash_slot_value(machine, value, slot_index), depth + 1);
+    }
+    out.push(125);
+}
+
+// Appends one JSON value. Scalars mirror `binding_text`; collections recurse
+// with a depth bound so cyclic or very deep state cannot exhaust the stack.
+recursive fn binding_json_append_value(machine: Vm&, out: u8[>..]&, value: MrbValue, depth: i64) {
+    if depth > MAX_JSON_DEPTH {
+        out.append("null");
+        return;
+    }
+    if binding_value_is_array(machine, value) {
+        binding_json_append_array(machine, out, value, depth);
+        return;
+    }
+    if binding_value_is_hash(machine, value) {
+        binding_json_append_hash(machine, out, value, depth);
+        return;
+    }
+    if mrb_is_nil(value) {
+        out.append("null");
+        return;
+    }
+    if mrb_is_true(value) {
+        out.append("true");
+        return;
+    }
+    if mrb_is_false(value) {
+        out.append("false");
+        return;
+    }
+    if mrb_is_fixnum(value) {
+        mrb_format_fixnum(out, mrb_fixnum_value(value));
+        return;
+    }
+    if mrb_is_symbol(value) {
+        out.push(34);
+        binding_json_escape(out, symbol_name(mrb_symbol_id(value)));
+        out.push(34);
+        return;
+    }
+    if mrb_is_scratch(value) || mrb_is_state(value) {
+        out.push(34);
+        binding_json_escape(out, vm_string_value(machine, value));
+        out.push(34);
+        return;
+    }
+    out.append("null");
+}
+
+// Renders one binding result as text. Strings return their existing bytes and
+// Arrays/Hashes become JSON, which is how `each` bindings transport keyed
+// rows. The view stays valid until the next top-level entry resets the arena.
 fn binding_text(machine: Vm&, value: MrbValue) -> const u8[:] {
     if mrb_is_nil(value) {
         return "";
+    }
+    if binding_value_is_array(machine, value) || binding_value_is_hash(machine, value) {
+        var json: u8[>..] = [];
+        binding_json_append_value(machine, json, value, 0);
+        let handle = scratch_alloc_string(machine.scratch, json[..]);
+        return scratch_string_bytes(machine.scratch, handle);
     }
     if mrb_is_scratch(value) || mrb_is_state(value) {
         return vm_string_value(machine, value);

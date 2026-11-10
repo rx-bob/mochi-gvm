@@ -383,6 +383,46 @@ fn test_flush_only_reevaluates_dirty_binding(t: goosetest::Test&) {
     t.assert_eq(vm::state_ivar_bit(1), pool.bindings[1].dep_mask);
 }
 
+fn test_binding_text_serializes_collections_as_json(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let id_key = vm::mrb_symbol(vm::intern_symbol("id"));
+    let name_key = vm::mrb_symbol(vm::intern_symbol("name"));
+    let items = vm::state_alloc_array(pool);
+    let item = vm::state_alloc_hash(pool);
+    t.assert_true(vm::state_hash_set(pool, item, id_key, vm::mrb_fixnum(7)));
+    t.assert_true(vm::state_hash_set(pool, item, name_key,
+        vm::state_alloc_string(pool, "A & B")));
+    t.assert_true(vm::state_array_push(pool, items, item));
+    let hash = vm::state_alloc_hash(pool);
+    t.assert_true(vm::state_hash_set(pool, hash, name_key, vm::mrb_true()));
+    let quoted = vm::state_alloc_string(pool, "line\n\"quoted\"");
+    let quoted_items = vm::state_alloc_array(pool);
+    t.assert_true(vm::state_array_push(pool, quoted_items, quoted));
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+
+    let expected: const u8[:] = "[{\"id\":7,\"name\":\"A & B\"}]";
+    t.assert_eq(expected, vm::binding_text(machine, items));
+
+    let expected_hash: const u8[:] = "{\"name\":true}";
+    t.assert_eq(expected_hash, vm::binding_text(machine, hash));
+
+    let expected_quoted: const u8[:] = "[\"line\\n\\\"quoted\\\"\"]";
+    t.assert_eq(expected_quoted, vm::binding_text(machine, quoted_items));
+}
+
 fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
     let show_symbol = vm::intern_symbol("@show");
     let detail_symbol = vm::intern_symbol("@detail");

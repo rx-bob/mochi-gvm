@@ -20,7 +20,8 @@ fn vm_dispatch_step(
     if op == OP_JMPIF || op == OP_JMPNOT {
         return vm_op_cond_jump(machine, frame, record, iseq, pc, op), true;
     }
-    if op == OP_ADD || op == OP_SUB || op == OP_EQ || op == OP_LT {
+    if op == OP_ADD || op == OP_SUB || op == OP_EQ || op == OP_LT
+        || op == OP_LE || op == OP_GT || op == OP_GE {
         return vm_op_binary(machine, frame, record, iseq, pc, op), true;
     }
     if op == OP_ARRAY {
@@ -139,9 +140,18 @@ fn vm_op_binary(
     }
     let left_number = mrb_fixnum_value(left);
     let right_number = mrb_fixnum_value(right);
-    if op == OP_LT {
-        if !vm_write_register(machine, record, frame.base, ops.a,
-            mrb_bool(left_number < right_number)) {
+    if op == OP_LT || op == OP_LE || op == OP_GT || op == OP_GE {
+        var comparison = false;
+        if op == OP_LT {
+            comparison = left_number < right_number;
+        } else if op == OP_LE {
+            comparison = left_number <= right_number;
+        } else if op == OP_GT {
+            comparison = left_number > right_number;
+        } else {
+            comparison = left_number >= right_number;
+        }
+        if !vm_write_register(machine, record, frame.base, ops.a, mrb_bool(comparison)) {
             return vm_fail(machine, VmError.BadOperand, pc + 1);
         }
         return vm_step_continue(pc + 1);

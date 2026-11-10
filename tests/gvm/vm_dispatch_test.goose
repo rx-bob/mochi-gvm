@@ -189,6 +189,21 @@ fn test_binary_and_array_ops(t: goosetest::Test&) {
     machine.regs[0] = vm::mrb_fixnum(3);
     vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_LT);
     t.assert_true(vm::mrb_is_true(machine.regs[0]));
+    machine.regs[0] = vm::mrb_fixnum(3);
+    vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_LE);
+    t.assert_true(vm::mrb_is_true(machine.regs[0]));
+    machine.regs[0] = vm::mrb_fixnum(3);
+    vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_GT);
+    t.assert_true(vm::mrb_is_false(machine.regs[0]));
+    machine.regs[0] = vm::mrb_fixnum(3);
+    vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_GE);
+    t.assert_true(vm::mrb_is_false(machine.regs[0]));
+    machine.regs[0] = vm::mrb_fixnum(5);
+    vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_GT);
+    t.assert_true(vm::mrb_is_true(machine.regs[0]));
+    machine.regs[0] = vm::mrb_fixnum(5);
+    vm::vm_op_binary(machine, frame, record, one[..], 0, vm::OP_GE);
+    t.assert_true(vm::mrb_is_true(machine.regs[0]));
 
     machine.regs[0] = vm::mrb_fixnum(5);
     machine.regs[1] = vm::mrb_fixnum(6);
