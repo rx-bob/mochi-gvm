@@ -10,12 +10,14 @@ let COUNTER_CHI: const u8[:] = embed_file("../fixtures/counter.chi");
 let TODO_CHI: const u8[:] = embed_file("../fixtures/todo.chi");
 let USERS_CHI: const u8[:] = embed_file("../fixtures/users.chi");
 let FETCH_PROBE_CHI: const u8[:] = embed_file("../fixtures/fetch_probe.chi");
+let WIDE_COMPONENT_CHI: const u8[:] = embed_file("../fixtures/wide_component.chi");
 let COUNTER_HTML: const u8[:] = "<div class='counter'><h2>Click me</h2><span class='count'>1</span><div class='buttons'><button data-action='decrement'>-</button><button data-action='increment'>+</button><button data-action='reset'>Reset</button></div></div>";
 let TODO_HTML_EMPTY: const u8[:] = "<div class='todo'><h2>Todo List (0 items)</h2><ul></ul><div class='buttons'><button data-action='add_item'>Add</button><button data-action='toggle_last'>Toggle Last</button><button data-action='remove_last'>Remove Last</button></div></div>";
 var g_counter_rite: u8[>..] = [];
 var g_todo_rite: u8[>..] = [];
 var g_users_rite: u8[>..] = [];
 var g_fetch_probe_rite: u8[>..] = [];
+var g_wide_component_rite: u8[>..] = [];
 
 fn counter_rite() -> u8[:] {
     if g_counter_rite.len == 0 {
@@ -43,6 +45,13 @@ fn fetch_probe_rite() -> u8[:] {
         vm::vm_restore_rite_header(FETCH_PROBE_CHI, g_fetch_probe_rite);
     }
     return g_fetch_probe_rite[..];
+}
+
+fn wide_component_rite() -> u8[:] {
+    if g_wide_component_rite.len == 0 {
+        vm::vm_restore_rite_header(WIDE_COMPONENT_CHI, g_wide_component_rite);
+    }
+    return g_wide_component_rite[..];
 }
 
 fn test_abi_loads_and_calls_counter(t: goosetest::Test&) {
@@ -281,6 +290,35 @@ fn test_abi_builds_fetch_requests_and_response_hash(t: goosetest::Test&) {
     t.assert_true(vm::abi_has_error());
     t.assert_true(vm::abi_last_error() == "bad fetch response");
     vm::vm_end_entry(vm::g_abi_machine);
+    vm::abi_close();
+}
+
+fn test_abi_mounts_component_with_100_ivars(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(wide_component_rite()));
+    t.assert_false(vm::abi_has_error());
+    let wide_class = vm::abi_const_get(vm::intern_symbol("WideComponent"));
+    let wide = vm::abi_obj_new(vm::mrb_class_id(wide_class));
+    t.assert_true(vm::mrb_is_state(wide));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(100, vm::state_ivar_count(vm::g_abi_pool));
+
+    t.assert_eq(0, vm::abi_register_binding(wide, 0, vm::intern_symbol("late")));
+    vm::abi_call(wide, vm::intern_symbol("set_late"), 0);
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq(1, vm::abi_flush_patches(wide));
+    t.assert_false(vm::abi_has_error());
+    let patches = vm::abi_patch_bytes();
+    t.assert_eq(8, patches.len);
+    t.assert_eq(0, patches[0]);
+    t.assert_eq(0, patches[1]);
+    t.assert_eq(2, patches[2]);
+    t.assert_eq(0, patches[3]);
+    t.assert_eq(0, patches[4]);
+    t.assert_eq(0, patches[5]);
+    t.assert_eq(0x37, patches[6]);
+    t.assert_eq(0x31, patches[7]);
     vm::abi_close();
 }
 
