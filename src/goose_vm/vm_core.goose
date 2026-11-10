@@ -76,6 +76,7 @@ enum VmError {
     NoMethod,
     TypeMismatch,
     WrongArity,
+    NativeError,
     Registers,
     CallDepth,
 }
@@ -93,6 +94,14 @@ struct MethodEntry {
     class_id: u32,
     name_symbol: u32,
     irep_index: i64,
+}
+
+// A method registered through the C ABI. `native_id` indexes the host shim's
+// callback table; the VM never calls a C function pointer directly.
+struct NativeMethod {
+    class_id: u32,
+    name_symbol: u32,
+    native_id: u32,
 }
 
 // One active call frame. `base` is the first register of the window, and `pc`
@@ -130,6 +139,7 @@ root struct Vm {
     pool: StatePool&,
     scratch: ScratchArena&,
     methods: MethodEntry[>..] = [],
+    native_methods: NativeMethod[>..] = [],
     regs: MrbValue[..MAX_VM_REGS] = [],
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],
     booted: bool = false,
@@ -146,6 +156,7 @@ fn vm_error_name(err: VmError) -> u8[:] {
         NoMethod => "unknown method",
         TypeMismatch => "type mismatch",
         WrongArity => "wrong number of arguments",
+        NativeError => "native method failed",
         Registers => "register overflow",
         CallDepth => "call depth exceeded",
     };
@@ -311,7 +322,9 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
 fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool {
     var current = class_id;
     var steps = 0;
-    while current != NULL_CLASS_ID && steps < MAX_STATE_CLASSES {
+    while current != NULL_CLASS_ID
+        && current < state_class_count(machine.pool)as u32
+        && steps < MAX_STATE_CLASSES {
         for index in 0..machine.methods.len {
             let entry = machine.methods[index];
             if entry.class_id == current && entry.name_symbol == name_symbol {
@@ -330,6 +343,15 @@ fn vm_receiver_class_id(machine: Vm&, receiver: MrbValue) -> u32, bool {
         return NULL_CLASS_ID, false;
     }
     return object.class_index, true;
+}
+
+// A native module function such as `Mochi.fetch` is sent to a class value,
+// while component methods are sent to state instances.
+fn vm_owner_class_id(machine: Vm&, receiver: MrbValue) -> u32, bool {
+    if mrb_is_class(receiver) {
+        return mrb_class_id(receiver), true;
+    }
+    return vm_receiver_class_id(machine, receiver);
 }
 
 // Returns the child IREP at `ordinal` in the operand-local child list.

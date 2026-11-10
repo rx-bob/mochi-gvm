@@ -11,6 +11,39 @@ import.vm_ops;
 // Reserved class IDs for constants that have no state-pool class definition.
 let BUILTIN_ARRAY_CLASS_ID: u32 = 0xFFFFFF01;
 let BUILTIN_MOCHI_CLASS_ID: u32 = 0xFFFFFF02;
+let NATIVE_FAIL: u64 = 0xFFFFFFFFFFFFFFFF;
+
+extern fn goose_abi_native_set_arg(index: i64, value: u64);
+
+extern fn goose_abi_native_call(native_id: u32, self_value: u64, argc: i64) -> u64;
+
+fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native_id: u32) {
+    for index in 0..machine.native_methods.len {
+        if machine.native_methods[index].class_id == class_id
+            && machine.native_methods[index].name_symbol == name_symbol {
+            machine.native_methods[index].native_id = native_id;
+            return;
+        }
+    }
+    if machine.native_methods.len >= MAX_VM_METHODS {
+        machine.error = VmError.NoMethod;
+        return;
+    }
+    machine.native_methods.push(NativeMethod {
+            class_id: class_id,
+            name_symbol: name_symbol,
+            native_id: native_id,
+        });
+}
+
+fn vm_lookup_native_method(machine: Vm&, class_id: u32, name_symbol: u32) -> u32, bool {
+    for entry in machine.native_methods {
+        if entry.class_id == class_id && entry.name_symbol == name_symbol {
+            return entry.native_id, true;
+        }
+    }
+    return 0, false;
+}
 
 fn vm_is_array_value(machine: Vm&, value: MrbValue) -> bool {
     if mrb_is_scratch(value) {
@@ -39,16 +72,33 @@ fn vm_is_string_value(machine: Vm&, value: MrbValue) -> bool {
 fn vm_call_user_method(
     machine: Vm&, frame: CallFrame, receiver: MrbValue, method_symbol: u32, args: MrbValue[:], dst: i64
 ) -> bool, bool {
-    let class_id, is_instance = vm_receiver_class_id(machine, receiver);
+    let class_id, is_instance = vm_owner_class_id(machine, receiver);
     if !is_instance {
         return false, true;
     }
     let irep, found = vm_lookup_method(machine, class_id, method_symbol);
-    if !found {
+    if found {
+        vm_exec_with_args(machine, irep, receiver, frame.base + dst, args);
+        return true, machine.error == VmError.Ok;
+    }
+    let native_id, native_found = vm_lookup_native_method(machine, class_id, method_symbol);
+    if !native_found {
         return false, true;
     }
-    vm_exec_with_args(machine, irep, receiver, frame.base + dst, args);
-    return true, machine.error == VmError.Ok;
+    for index in 0..args.len {
+        goose_abi_native_set_arg(index, args[index]);
+    }
+    let result = goose_abi_native_call(native_id, receiver, args.len);
+    if result == NATIVE_FAIL {
+        machine.error = VmError.NativeError;
+        return true, false;
+    }
+    let record = machine.file.records[frame.record_index];
+    if !vm_write_register(machine, record, frame.base, dst, result) {
+        machine.error = VmError.Registers;
+        return true, false;
+    }
+    return true, true;
 }
 
 fn vm_call_array_builtin(

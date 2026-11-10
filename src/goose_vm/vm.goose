@@ -1,6 +1,7 @@
 // Package entry for the Goose mruby VM modules.
 namespace vm;
 
+import.abi;
 import.builtins;
 import.collection_arena;
 import.rite_bytes;
