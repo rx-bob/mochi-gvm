@@ -74,6 +74,8 @@ fn abi_reset() {
     g_abi_pool.slots.clear();
     g_abi_pool.components.clear();
     g_abi_pool.blob.clear();
+    g_abi_pool.active_read_mask = 0;
+    g_abi_pool.tracking_instance_index = -1;
 
     scratch_reset(g_abi_scratch);
     g_abi_scratch.allocated_objects_total = 0;

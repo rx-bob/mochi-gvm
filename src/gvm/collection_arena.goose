@@ -29,6 +29,8 @@ fn scratch_alloc_collection(arena: ScratchArena&, kind: ArenaObjectKind) -> MrbV
             text_length_bytes: 0,
             class_index: 0,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,

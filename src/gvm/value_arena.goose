@@ -55,12 +55,18 @@ enum ArenaObjectKind {
 // One object header. `text_offset_bytes` and `text_length_bytes` view the
 // zone blob for strings. `ivar_head_index` is -1 or the first `IvarSlot`.
 // Arrays and hashes use the item fields to bracket their linked slot list.
+//
+// Instances also carry the reactive signal bookkeeping: `ivar_count` is the
+// number of distinct ivars ever seen (and therefore the next free bit),
+// while `dirty_ivars` records the ivars changed since the binding flush.
 struct ArenaObject {
     kind: ArenaObjectKind,
     text_offset_bytes: i64,
     text_length_bytes: i64,
     class_index: u32,
     ivar_head_index: i64,
+    ivar_count: u8,
+    dirty_ivars: u64,
     items_first_index: i64,
     items_last_index: i64,
     item_count: i64,
@@ -68,8 +74,10 @@ struct ArenaObject {
 
 // One instance variable. Slots form a per-object singly linked list, so
 // assigning unrelated objects never has to move or compact earlier slots.
+// `bit_index` is the slot's stable position in the instance's u64 masks.
 struct IvarSlot {
     key: u32,
+    bit_index: u8,
     value: MrbValue,
     next_index: i64,
 }
@@ -306,6 +314,8 @@ fn empty_arena_object(kind: ArenaObjectKind) -> ArenaObject {
         text_length_bytes: 0,
         class_index: 0,
         ivar_head_index: -1,
+        ivar_count: 0,
+        dirty_ivars: 0,
         items_first_index: -1,
         items_last_index: -1,
         item_count: 0,
@@ -361,6 +371,8 @@ fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
             text_length_bytes: text.len,
             class_index: 0,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -380,6 +392,8 @@ fn scratch_alloc_instance(arena: ScratchArena&, class_id: u32) -> MrbValue {
             text_length_bytes: 0,
             class_index: class_id,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -441,6 +455,7 @@ fn scratch_set_ivar(arena: ScratchArena&, instance: MrbValue, key: u32, value: M
     let new_index = arena.ivars.len;
     arena.ivars.push(IvarSlot {
             key: key,
+            bit_index: 0,
             value: value,
             next_index: object.ivar_head_index,
         });

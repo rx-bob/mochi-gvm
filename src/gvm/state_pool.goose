@@ -6,6 +6,7 @@
 // are addressed through the same 31-bit state handles used by `MrbValue`.
 namespace vm;
 
+import.signals;
 import.value_arena;
 
 // The state pool is long-lived, so its limits are larger but still enforced.
@@ -34,6 +35,11 @@ root struct StatePool {
     slots: ArenaSlot[>..] = [],
     components: u32[>..] = [],
     blob: u8[>..] = [],
+    // Signal tracking is global because at most one binding getter runs at a
+    // time: reads of the tracked instance OR their bits into `active_read_mask`
+    // and writes OR changed bits into the instance's `dirty_ivars`.
+    active_read_mask: u64 = 0,
+    tracking_instance_index: i64 = -1,
 }
 
 fn state_object_count(pool: StatePool&) -> i64 {
@@ -100,6 +106,8 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
             text_length_bytes: text.len,
             class_index: 0,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -117,6 +125,8 @@ fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
             text_length_bytes: 0,
             class_index: class_id,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -141,6 +151,8 @@ fn state_alloc_collection(pool: StatePool&, kind: ArenaObjectKind) -> MrbValue {
             text_length_bytes: 0,
             class_index: 0,
             ivar_head_index: -1,
+            ivar_count: 0,
+            dirty_ivars: 0,
             items_first_index: -1,
             items_last_index: -1,
             item_count: 0,
@@ -201,7 +213,11 @@ fn state_array_push(pool: StatePool&, array: MrbValue, value: MrbValue) -> bool 
     if !ok || object.kind != ArenaObjectKind.Array {
         return false;
     }
-    return state_append_slot(pool, mrb_arena_index(array), mrb_nil(), value);
+    let pushed = state_append_slot(pool, mrb_arena_index(array), mrb_nil(), value);
+    if pushed {
+        state_mark_collection_mutated(pool, array);
+    }
+    return pushed;
 }
 
 fn state_array_pop(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
@@ -223,6 +239,7 @@ fn state_array_pop(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
     if tail == pool.slots.len - 1 {
         pool.slots.pop();
     }
+    state_mark_collection_mutated(pool, array);
     return value, true;
 }
 
@@ -253,7 +270,12 @@ fn state_array_set(pool: StatePool&, array: MrbValue, position: i64, value: MrbV
     if slot_index < 0 {
         return false;
     }
+    let previous = pool.slots[slot_index].value;
+    if state_value_equal(pool, previous, value) {
+        return true;
+    }
     pool.slots[slot_index].value = value;
+    state_mark_collection_mutated(pool, array);
     return true;
 }
 
@@ -281,12 +303,21 @@ fn state_hash_set(pool: StatePool&, hash: MrbValue, key: MrbValue, value: MrbVal
     var slot_index = object.items_first_index;
     while slot_index >= 0 {
         if mrb_value_identical(pool.slots[slot_index].key, key) {
+            let previous = pool.slots[slot_index].value;
+            if state_value_equal(pool, previous, value) {
+                return true;
+            }
             pool.slots[slot_index].value = value;
+            state_mark_collection_mutated(pool, hash);
             return true;
         }
         slot_index = pool.slots[slot_index].next_index;
     }
-    return state_append_slot(pool, mrb_arena_index(hash), key, value);
+    let inserted = state_append_slot(pool, mrb_arena_index(hash), key, value);
+    if inserted {
+        state_mark_collection_mutated(pool, hash);
+    }
+    return inserted;
 }
 
 fn state_hash_get(pool: StatePool&, hash: MrbValue, key: MrbValue) -> MrbValue, bool {
@@ -339,59 +370,7 @@ fn state_string_bytes(pool: StatePool&, value: MrbValue) -> const u8[:] {
     return pool.blob[start..stop];
 }
 
-// Stores an already-promoted value. Promotion happens in `promote_to_state`;
-// this helper never copies, so recursive promotion cannot re-promote a value.
-fn state_store_ivar_raw(pool: StatePool&, object_index: u32, key: u32, value: MrbValue) -> bool {
-    assert(object_index < pool.objects.len);
-    let index = object_index as i64;
-    if pool.objects[index].kind != ArenaObjectKind.Instance {
-        return false;
-    }
-    var slot_index = pool.objects[index].ivar_head_index;
-    while slot_index >= 0 {
-        if pool.ivars[slot_index].key == key {
-            pool.ivars[slot_index].value = value;
-            return true;
-        }
-        slot_index = pool.ivars[slot_index].next_index;
-    }
-    assert(pool.ivars.len < MAX_STATE_IVARS);
-    let new_index = pool.ivars.len;
-    pool.ivars.push(IvarSlot {
-            key: key,
-            value: value,
-            next_index: pool.objects[index].ivar_head_index,
-        });
-    pool.objects[index].ivar_head_index = new_index;
-    return true;
-}
-
-// Stores an ivar on a state instance, promoting scratch values first.
-fn state_set_ivar(pool: StatePool&, scratch: ScratchArena&, instance: MrbValue, key: u32, value: MrbValue) -> bool {
-    let object, ok = state_object(pool, instance);
-    if !ok || object.kind != ArenaObjectKind.Instance {
-        return false;
-    }
-    let stored = promote_to_state(pool, scratch, value);
-    return state_store_ivar_raw(pool, mrb_arena_index(instance), key, stored);
-}
-
-fn state_get_ivar(pool: StatePool&, instance: MrbValue, key: u32) -> MrbValue, bool {
-    let object, ok = state_object(pool, instance);
-    if !ok || object.kind != ArenaObjectKind.Instance {
-        return mrb_nil(), false;
-    }
-    var slot_index = object.ivar_head_index;
-    while slot_index >= 0 {
-        let slot = pool.ivars[slot_index];
-        if slot.key == key {
-            return slot.value, true;
-        }
-        slot_index = slot.next_index;
-    }
-    return mrb_nil(), false;
-}
-
+// Registers an instance as a component root exactly once.
 fn state_register_component(pool: StatePool&, instance: MrbValue) -> bool {
     let object, ok = state_object(pool, instance);
     if !ok || object.kind != ArenaObjectKind.Instance {
