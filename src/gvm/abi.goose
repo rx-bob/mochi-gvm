@@ -6,9 +6,11 @@
 // component, look up a class or method, or run one host call.
 namespace vm;
 
+import.builtins;
 import.ivar_mask;
 import.json_args;
 import.rite_types;
+import.signals;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -42,6 +44,7 @@ var g_abi_bytecode: u8[>..] = [];
 var g_abi_error: bool = false;
 var g_abi_error_text: u8[>..] = [];
 var g_abi_patch_bytes: u8[>..] = [];
+var g_abi_json: u8[>..] = [];
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -117,6 +120,7 @@ fn abi_reset() {
 
     g_abi_call_args.clear();
     g_abi_patch_bytes.clear();
+    g_abi_json.clear();
     abi_clear_error();
 }
 
@@ -391,6 +395,32 @@ fn abi_is_class(value: u64) -> bool {
     return mrb_is_class(value);
 }
 
+fn abi_is_hash(value: u64) -> bool {
+    return vm_is_hash_value(g_abi_machine, value);
+}
+
+// Resolves a Hash key by symbol id. `builtin_hash_get` keeps Symbol and String
+// keys indifferent, so `:target` and `"target"` hit the same payload entry.
+fn abi_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    if !vm_is_hash_value(g_abi_machine, hash) {
+        abi_fail("bad Hash payload");
+        return mrb_nil();
+    }
+    return builtin_hash_get(g_abi_pool, g_abi_scratch, hash, mrb_symbol(key_symbol));
+}
+
+// Serializes one value for the host. The returned view points at a module-owned
+// buffer and stays valid until the next `abi_value_json` call.
+fn abi_value_json(value: u64) -> const u8[:] {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    g_abi_json.clear();
+    binding_json_append_value(g_abi_machine, g_abi_json, value, 0);
+    return g_abi_json[..];
+}
+
 export fn goose_vm_open() -> i64 {
     return abi_open();
 }
@@ -481,4 +511,16 @@ export fn goose_vm_is_string(value: u64) -> bool {
 
 export fn goose_vm_is_class(value: u64) -> bool {
     return abi_is_class(value);
+}
+
+export fn goose_vm_is_hash(value: u64) -> bool {
+    return abi_is_hash(value);
+}
+
+export fn goose_vm_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
+    return abi_hash_get_symbol(hash, key_symbol);
+}
+
+export fn goose_vm_value_json(value: u64) -> const u8[:] {
+    return abi_value_json(value);
 }

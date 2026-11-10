@@ -65,6 +65,9 @@ extern int64_t goose_vm_register_binding(uint64_t instance, uint32_t binding_id,
 extern int64_t goose_vm_flush_patches(uint64_t instance);
 extern const uint8_t *goose_vm_patch_bytes(int64_t *out_len);
 extern uint8_t goose_vm_is_class(uint64_t value);
+extern uint8_t goose_vm_is_hash(uint64_t value);
+extern uint64_t goose_vm_hash_get_symbol(uint64_t hash, uint32_t key_symbol);
+extern const uint8_t *goose_vm_value_json(uint64_t value, int64_t *out_len);
 
 static mrb_state *g_mrb = NULL;
 static uint8_t g_patch_buffer[MOCHI_PATCH_CAPACITY];
@@ -154,24 +157,97 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
   return mrb_fixnum_value(fetch_id);
 }
 
-/* Ruby-callable: Mochi.emit("show_canvas"). Appends one action name per line
- * to the emit outbox. The loader drains it after every dispatch and publishes
- * a document-level `mochi:action` event so sibling components can participate
- * without sharing a Ruby object graph. */
+/* Ruby-callable: Mochi.emit("show_canvas").
+ * Ruby-callable: Mochi.emit("select_trace", id: "tr_1", target: "cowboy-logs").
+ * Appends one JSON object per emit:
+ *   {"action":"...","target":...,"payload":...}\n
+ * The loader filters by target tag and passes payload to one-argument action
+ * handlers. A plain action line is still emitted with null target and payload. */
+static int append_emit_piece(
+    char *buffer, size_t capacity, size_t *at, const void *data, size_t length
+) {
+  if (*at > capacity || length > capacity - *at) return 0;
+  if (length > 0 && data) memcpy(buffer + *at, data, length);
+  *at += length;
+  return 1;
+}
+
 static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
-  const char *action = "";
-  size_t length;
+  static const char PREFIX[] = "{\"action\":";
+  static const char TARGET_KEY[] = ",\"target\":";
+  static const char PAYLOAD_KEY[] = ",\"payload\":";
+  static const char SUFFIX[] = "}\n";
+  static const char JSON_NULL[] = "null";
+  mrb_value action_value = mrb_nil_value();
+  mrb_value payload = mrb_nil_value();
+  mrb_value target = mrb_nil_value();
+  mrb_int argc;
+  const uint8_t *action_json;
+  const uint8_t *target_json;
+  const uint8_t *payload_json;
+  int64_t action_len = 0;
+  int64_t target_len = 0;
+  int64_t payload_len = 0;
+  char line[MOCHI_EMIT_CAPACITY];
+  size_t at = 0;
   (void)self;
-  mrb_get_args(mrb, "z", &action);
-  length = strlen(action);
-  if (length == 0) return mrb_fixnum_value(-1);
-  if (g_emit_outbox_len + (int32_t)length + 1 > MOCHI_EMIT_CAPACITY) {
+
+  argc = mrb_get_args(mrb, "oo", &action_value, &payload);
+  if (argc < 1 || !mrb_string_p(action_value) || mrb_string_len(action_value) <= 0) {
     return mrb_fixnum_value(-1);
   }
-  memcpy(g_emit_outbox + g_emit_outbox_len, action, length);
-  g_emit_outbox_len += (int32_t)length;
-  g_emit_outbox[g_emit_outbox_len] = '\n';
-  g_emit_outbox_len += 1;
+  if (argc >= 2 && !goose_vm_is_hash(payload)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  action_json = goose_vm_value_json(action_value, &action_len);
+  if (!action_json || action_len <= 0) return mrb_fixnum_value(-1);
+  if (!append_emit_piece(line, sizeof(line), &at, PREFIX, sizeof(PREFIX) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+  if (!append_emit_piece(line, sizeof(line), &at, action_json, (size_t)action_len)) {
+    return mrb_fixnum_value(-1);
+  }
+  if (!append_emit_piece(line, sizeof(line), &at, TARGET_KEY,
+                         sizeof(TARGET_KEY) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  if (argc >= 2) {
+    mrb_sym target_symbol = mrb_intern_cstr(mrb, "target");
+    target = goose_vm_hash_get_symbol(payload, target_symbol);
+  }
+  target_json = goose_vm_value_json(target, &target_len);
+  if (!target_json || target_len <= 0) return mrb_fixnum_value(-1);
+  if (!append_emit_piece(line, sizeof(line), &at, target_json, (size_t)target_len)) {
+    return mrb_fixnum_value(-1);
+  }
+  if (!append_emit_piece(line, sizeof(line), &at, PAYLOAD_KEY,
+                         sizeof(PAYLOAD_KEY) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  if (argc >= 2) {
+    payload_json = goose_vm_value_json(payload, &payload_len);
+    if (!payload_json || payload_len <= 0) return mrb_fixnum_value(-1);
+    if (!append_emit_piece(line, sizeof(line), &at, payload_json, (size_t)payload_len)) {
+      return mrb_fixnum_value(-1);
+    }
+  } else if (!append_emit_piece(line, sizeof(line), &at, JSON_NULL,
+                                sizeof(JSON_NULL) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  if (!append_emit_piece(line, sizeof(line), &at, SUFFIX, sizeof(SUFFIX) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+  if (g_emit_outbox_len + (int32_t)at >= MOCHI_EMIT_CAPACITY) {
+    return mrb_fixnum_value(-1);
+  }
+
+  memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
+  g_emit_outbox_len += (int32_t)at;
+  g_emit_outbox[g_emit_outbox_len] = '\0';
   return mrb_fixnum_value(0);
 }
 
@@ -189,7 +265,7 @@ int32_t mochi_init_runtime(void) {
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
                              MRB_ARGS_REQ(3));
   mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
-                             MRB_ARGS_REQ(1));
+                             MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   if (g_mrb->exc) {
     set_error_text("Mochi module registration failed");
     return -1;

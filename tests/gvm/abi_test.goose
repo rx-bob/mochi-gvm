@@ -188,3 +188,31 @@ fn test_abi_reports_parse_errors(t: goosetest::Test&) {
     t.assert_false(vm::abi_has_error());
     vm::abi_close();
 }
+
+fn test_abi_serializes_and_reads_hash_payloads(t: goosetest::Test&) {
+    vm::abi_open();
+    let payload = vm::builtin_hash_new(vm::g_abi_scratch);
+    let target_key = vm::intern_symbol("target");
+    let target = vm::abi_make_string("cowboy-logs");
+    t.assert_true(vm::builtin_hash_set(vm::g_abi_pool, vm::g_abi_scratch, payload,
+        vm::mrb_symbol(target_key), target));
+    t.assert_true(vm::abi_is_hash(payload));
+    t.assert_eq("{\"target\":\"cowboy-logs\"}", vm::abi_value_json(payload));
+
+    let by_symbol = vm::abi_hash_get_symbol(payload, target_key);
+    t.assert_true(vm::abi_string_bytes(by_symbol) == "cowboy-logs");
+    let string_key = vm::abi_make_string("target");
+    let by_string = vm::builtin_hash_get(vm::g_abi_pool, vm::g_abi_scratch, payload, string_key);
+    t.assert_true(vm::abi_string_bytes(by_string) == "cowboy-logs");
+
+    let nested = vm::builtin_hash_new(vm::g_abi_scratch);
+    let id_key = vm::scratch_alloc_string(vm::g_abi_scratch, "id");
+    let id = vm::scratch_alloc_string(vm::g_abi_scratch, "tr_9f2a");
+    t.assert_true(vm::builtin_hash_set(vm::g_abi_pool, vm::g_abi_scratch, nested,
+        id_key, id));
+    t.assert_eq("{\"id\":\"tr_9f2a\"}", vm::abi_value_json(nested));
+    t.assert_eq("null", vm::abi_value_json(vm::mrb_nil()));
+    t.assert_eq("\"line\\n\\\"quoted\\\"\"",
+        vm::abi_value_json(vm::abi_make_string("line\n\"quoted\"")));
+    vm::abi_close();
+}
