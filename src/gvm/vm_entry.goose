@@ -58,6 +58,15 @@ fn vm_call_args(
     machine: Vm&, receiver: MrbValue, method_sym: u32, args: MrbValue[:]
 ) -> MrbValue {
     vm_begin_entry(machine);
+    return vm_call_args_prepared(machine, receiver, method_sym, args);
+}
+
+// Calls a method after the caller has begun the entry. JSON event arguments are
+// parsed into the tick arena, so the entry must not reset it between parsing
+// and this call.
+fn vm_call_args_prepared(
+    machine: Vm&, receiver: MrbValue, method_sym: u32, args: MrbValue[:]
+) -> MrbValue {
     let class_id, is_instance = vm_owner_class_id(machine, receiver);
     if !is_instance {
         machine.error = VmError.BadReceiver;

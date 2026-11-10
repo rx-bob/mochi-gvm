@@ -155,6 +155,54 @@ fn test_scratch_hash_get_set_and_update(t: goosetest::Test&) {
     t.assert_true(vm::mrb_is_nil(vm::builtin_hash_get(pool, scratch, hash, vm::mrb_symbol(22))));
 }
 
+fn test_hash_keys_are_indifferent(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let key_symbol = vm::mrb_symbol(vm::intern_symbol("indifferent_id"));
+    let key_text = vm::scratch_alloc_string(scratch, "indifferent_id");
+    let hash = vm::builtin_hash_new(scratch);
+    let first = vm::scratch_alloc_string(scratch, "tr_1");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, hash, key_symbol, first));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, hash, key_text)) == "tr_1");
+
+    let second = vm::scratch_alloc_string(scratch, "tr_2");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, hash, key_text, second));
+    t.assert_eq(1, vm::builtin_hash_length(pool, scratch, hash));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, hash, key_symbol)) == "tr_2");
+
+    let durable = vm::promote_to_state(pool, scratch, hash);
+    vm::scratch_reset(scratch);
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, durable, key_symbol)) == "tr_2");
+    let durable_key = vm::scratch_alloc_string(scratch, "indifferent_id");
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, durable, durable_key)) == "tr_2");
+
+    let string_hash = vm::builtin_hash_new(scratch);
+    let row = vm::scratch_alloc_string(scratch, "tr_9f2a");
+    let row_key = vm::scratch_alloc_string(scratch, "row");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, string_hash, row_key, row));
+    let stored_hash = vm::promote_to_state(pool, scratch, string_hash);
+    let row_symbol = vm::mrb_symbol(vm::intern_symbol("row"));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, stored_hash, row_symbol)) == "tr_9f2a");
+    let fresh_row_key = vm::scratch_alloc_string(scratch, "row");
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, stored_hash, fresh_row_key)) == "tr_9f2a");
+    let updated = vm::scratch_alloc_string(scratch, "tr_1");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, stored_hash, row_symbol, updated));
+    t.assert_eq(1, vm::builtin_hash_length(pool, scratch, stored_hash));
+    let updated_key = vm::scratch_alloc_string(scratch, "row");
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, stored_hash, updated_key)) == "tr_1");
+}
+
 fn test_state_hash_promotes_keys_and_values(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

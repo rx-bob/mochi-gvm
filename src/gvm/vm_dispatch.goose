@@ -223,11 +223,17 @@ fn vm_op_send(
         return vm_fail(machine, VmError.BadOperand, pc + count);
     }
     var arg_count = 0;
+    var keyword_count = 0;
     if !no_args {
-        if ops.c >= 15 || ops.c > MAX_VM_ARGS {
+        arg_count = ops.c & 0x0F;
+        keyword_count = (ops.c >> 4) & 0x0F;
+        var packed_count = arg_count;
+        if keyword_count > 0 {
+            packed_count += 1;
+        }
+        if packed_count > MAX_VM_ARGS {
             return vm_fail(machine, VmError.BadOperand, pc + 3);
         }
-        arg_count = ops.c;
     }
     let receiver_value, receiver_ok = vm_read_register(machine, record, frame.base, ops.a);
     if !receiver_ok {
@@ -246,6 +252,24 @@ fn vm_op_send(
         }
         args.push(value);
         index += 1;
+    }
+    if keyword_count > 0 {
+        let keywords = builtin_hash_new(machine.scratch);
+        var key_index = 0;
+        while key_index < keyword_count {
+            let key, key_ok = vm_read_register(machine, record, frame.base,
+                ops.a + 1 + arg_count + key_index * 2);
+            let value, value_ok = vm_read_register(machine, record, frame.base,
+                ops.a + 1 + arg_count + key_index * 2 + 1);
+            if !key_ok || !value_ok {
+                return vm_fail(machine, VmError.BadOperand, pc + count);
+            }
+            if !builtin_hash_set(machine.pool, machine.scratch, keywords, key, value) {
+                return vm_fail(machine, VmError.BadOperand, pc + count);
+            }
+            key_index += 1;
+        }
+        args.push(keywords);
     }
     let found, ok = vm_call_user_method(machine, frame, receiver, symbol, args[..], ops.a);
     if found {

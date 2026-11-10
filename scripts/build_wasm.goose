@@ -44,7 +44,9 @@ fn compile_bridge() {
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
     command.append("\"_mochi_mount_component\",\"_mochi_intern\",");
     command.append("\"_mochi_register_binding\",\"_mochi_dispatch_event\",");
+    command.append("\"_mochi_dispatch_event_args\",");
     command.append("\"_mochi_has_method\",\"_goose_vm_has_method\",");
+    command.append("\"_goose_vm_method_req_argc\",");
     command.append("\"_mochi_flush_patches\",");
     command.append("\"_mochi_patch_buffer_offset\",");
     command.append("\"_mochi_patch_buffer_len\",\"_mochi_last_error_offset\",");

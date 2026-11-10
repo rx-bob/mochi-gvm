@@ -152,6 +152,73 @@ fn test_jump_and_conditional_offsets(t: goosetest::Test&) {
     t.assert_eq(5, not_step.pc);
 }
 
+fn test_send_packs_keyword_hash(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let class_id = vm::state_define_class(pool, vm::intern_symbol("KeywordReceiver"),
+        vm::NULL_CLASS_ID);
+    let receiver = vm::state_alloc_instance(pool, class_id);
+    let method_symbol = vm::intern_symbol("capture");
+    let child_bytes: u8[6] = [vm::OP_ENTER, 8, 0, 0, vm::OP_RETURN, 2];
+    file.data = child_bytes[..];
+
+    var root_record = fake_record(6);
+    root_record.syms_first_index = 0;
+    root_record.syms_count = 1;
+    var child_record = fake_record(3);
+    child_record.iseq_length_bytes = child_bytes.len as u32;
+    file.records.push(root_record);
+    file.records.push(child_record);
+    file.syms.push(vm::SymbolId {
+            index: method_symbol,
+        });
+    machine.methods.push(vm::MethodEntry {
+            class_id: class_id,
+            name_symbol: method_symbol,
+            irep_index: 1,
+        });
+
+    for _ in root_record.nregs {
+        machine.regs.push(vm::mrb_nil());
+    }
+    machine.regs[0] = receiver;
+    machine.regs[1] = vm::scratch_alloc_string(scratch, "action");
+    machine.regs[2] = vm::mrb_symbol(vm::intern_symbol("id"));
+    machine.regs[3] = vm::mrb_fixnum(42);
+    let frame = vm::CallFrame {
+        record_index: 0,
+        base: 0,
+        self_value: receiver,
+        pc: 0,
+    };
+    let send_bytes: u8[3] = [0, 0, 0x11];
+    let step = vm::vm_op_send(machine, frame, root_record, send_bytes[..], 0, vm::OP_SEND);
+    t.assert_eq(vm::StepKind.Continue, step.kind);
+    t.assert_eq(vm::VmError.Ok, machine.error);
+
+    let keywords = machine.regs[0];
+    t.assert_true(vm::scratch_is_hash(scratch, keywords));
+    let id_symbol = vm::mrb_symbol(vm::intern_symbol("id"));
+    t.assert_eq(42, vm::mrb_fixnum_value(
+        vm::builtin_hash_get(pool, scratch, keywords, id_symbol)));
+    let id_text = vm::scratch_alloc_string(scratch, "id");
+    t.assert_eq(42, vm::mrb_fixnum_value(
+        vm::builtin_hash_get(pool, scratch, keywords, id_text)));
+}
+
 fn test_binary_and_array_ops(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..

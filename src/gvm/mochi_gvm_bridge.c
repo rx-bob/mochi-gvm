@@ -32,6 +32,7 @@
 #define MOCHI_FETCH_CAPACITY (64 * 1024)
 #define MOCHI_FETCH_LINE_CAPACITY 2048
 #define MOCHI_EMIT_CAPACITY (16 * 1024)
+#define MOCHI_EVENT_ARGS_CAPACITY 8192
 #define MOCHI_ERROR_CAPACITY 256
 #define MOCHI_CALLBACK_CAPACITY 128
 
@@ -55,7 +56,10 @@ extern uint8_t goose_vm_has_error(void);
 extern uint32_t goose_vm_intern(goose_u8_slice name);
 extern uint64_t goose_vm_const_get(uint32_t name);
 extern uint64_t goose_vm_call(uint64_t receiver, uint32_t method, int64_t argc);
+extern uint64_t goose_vm_dispatch_event_args(uint64_t receiver, uint32_t method,
+                                              goose_u8_slice json);
 extern uint8_t goose_vm_has_method(uint64_t receiver, uint32_t method);
+extern int64_t goose_vm_method_req_argc(uint64_t receiver, uint32_t method);
 extern int64_t goose_vm_register_binding(uint64_t instance, uint32_t binding_id,
                                          uint32_t getter_symbol);
 extern int64_t goose_vm_flush_patches(uint64_t instance);
@@ -261,6 +265,26 @@ MOCHI_EXPORT
 int32_t mochi_dispatch_event(uint64_t instance, uint32_t method_symbol) {
   clear_error();
   goose_vm_call(instance, method_symbol, 0);
+  if (goose_vm_has_error()) {
+    capture_vm_error();
+    return 0;
+  }
+  return 1;
+}
+
+/* dispatch_event_args(instance, method_symbol, json_ptr, json_len): decodes a
+ * JSON array of strings, ints, booleans, nulls, arrays and objects into tick
+ * values and invokes the handler with them. */
+MOCHI_EXPORT
+int32_t mochi_dispatch_event_args(uint64_t instance, uint32_t method_symbol,
+                                  const uint8_t *json, int32_t length) {
+  clear_error();
+  if (!json || length <= 0 || length > MOCHI_EVENT_ARGS_CAPACITY) {
+    set_error_text("invalid event arguments");
+    return 0;
+  }
+  goose_vm_dispatch_event_args(instance, method_symbol,
+                               slice_of(json, (size_t)length));
   if (goose_vm_has_error()) {
     capture_vm_error();
     return 0;

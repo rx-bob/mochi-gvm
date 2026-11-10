@@ -4,6 +4,7 @@ namespace vm;
 import.abi;
 import.builtins;
 import.collection_arena;
+import.json_args;
 import.rite_bytes;
 import.rite_parser;
 import.rite_pool;

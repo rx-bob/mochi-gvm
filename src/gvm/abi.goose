@@ -7,6 +7,7 @@
 namespace vm;
 
 import.ivar_mask;
+import.json_args;
 import.rite_types;
 import.state_pool;
 import.value_arena;
@@ -278,6 +279,48 @@ fn abi_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     return result;
 }
 
+// Returns the required positional arity declared by the target method's leading
+// OP_ENTER. A missing method or a native method has no IREP, so both report -1.
+fn abi_method_req_argc(receiver: u64, method_symbol: u32) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
+    if !is_instance {
+        return -1;
+    }
+    let irep, found = vm_lookup_method(g_abi_machine, class_id, method_symbol);
+    if !found || irep < 0 || irep >= g_abi_file.records.len {
+        return -1;
+    }
+    let iseq = record_iseq(g_abi_file, g_abi_file.records[irep]);
+    let required, has_enter = vm_required_args(iseq);
+    if !has_enter {
+        return 0;
+    }
+    return required;
+}
+
+// Decodes a JSON argument array into tick-arena values and invokes the method
+// without resetting the arena between decoding and dispatch.
+fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    vm_begin_entry(g_abi_machine);
+    var args: MrbValue[>..] = [];
+    if !json_parse_args(g_abi_pool, g_abi_scratch, json, args) {
+        abi_fail("bad JSON argument list");
+        vm_end_entry(g_abi_machine);
+        return mrb_nil();
+    }
+    let result = vm_call_args_prepared(g_abi_machine, receiver, method_symbol, args[..]);
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
+    if is_instance {
+        vm_set_error_context(g_abi_machine, class_id, method_symbol, -1);
+    }
+    abi_record_vm_error(g_abi_machine);
+    return result;
+}
+
 // Checks whether a receiver implements a method without invoking it. The host
 // uses this to route document-level actions to only the components that opt in.
 fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
@@ -402,6 +445,14 @@ export fn goose_vm_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
 
 export fn goose_vm_has_method(receiver: u64, method_symbol: u32) -> bool {
     return abi_has_method(receiver, method_symbol);
+}
+
+export fn goose_vm_method_req_argc(receiver: u64, method_symbol: u32) -> i64 {
+    return abi_method_req_argc(receiver, method_symbol);
+}
+
+export fn goose_vm_dispatch_event_args(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
+    return abi_call_json(receiver, method_symbol, json);
 }
 
 export fn goose_vm_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {

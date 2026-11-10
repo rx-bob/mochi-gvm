@@ -270,12 +270,79 @@ fn builtin_hash_new(scratch: ScratchArena&) -> MrbValue {
     return scratch_alloc_hash(scratch);
 }
 
+// Returns the lookup text for a Hash key. Symbols and strings participate in
+// indifferent lookup; every other value only matches itself.
+fn builtin_hash_key_text(
+    pool: StatePool&, scratch: ScratchArena&, value: MrbValue
+) -> const u8[:], bool {
+    if mrb_is_symbol(value) {
+        let symbol_id = mrb_symbol_id(value);
+        if symbol_id >= symbol_count() {
+            return "", false;
+        }
+        return symbol_name(symbol_id), true;
+    }
+    if mrb_is_scratch(value) {
+        if !scratch_is_string(scratch, value) {
+            return "", false;
+        }
+        return scratch_string_bytes(scratch, value), true;
+    }
+    if mrb_is_state(value) {
+        let object, ok = state_object(pool, value);
+        if !ok || object.kind != ArenaObjectKind.String {
+            return "", false;
+        }
+        return state_string_bytes(pool, value), true;
+    }
+    return "", false;
+}
+
+// Compares two Hash keys. Symbol and String keys match when their UTF-8 bytes
+// match, so `hash[:id]` and `hash["id"]` address the same slot.
+fn builtin_hash_key_equal(
+    pool: StatePool&, scratch: ScratchArena&, left: MrbValue, right: MrbValue
+) -> bool {
+    if mrb_value_identical(left, right) {
+        return true;
+    }
+    let left_text, left_ok = builtin_hash_key_text(pool, scratch, left);
+    if !left_ok {
+        return false;
+    }
+    let right_text, right_ok = builtin_hash_key_text(pool, scratch, right);
+    if !right_ok {
+        return false;
+    }
+    return left_text == right_text;
+}
+
 fn builtin_hash_set(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue, key: MrbValue, value: MrbValue) -> bool {
     if mrb_is_scratch(hash) {
+        let object, ok = scratch_object(scratch, hash);
+        if !ok || object.kind != ArenaObjectKind.Hash {
+            return false;
+        }
+        var slot_index = object.items_first_index;
+        while slot_index >= 0 {
+            if builtin_hash_key_equal(pool, scratch, scratch.slots[slot_index].key, key) {
+                return scratch_hash_set(scratch, hash, scratch.slots[slot_index].key, value);
+            }
+            slot_index = scratch.slots[slot_index].next_index;
+        }
         return scratch_hash_set(scratch, hash, key, value);
     }
-    if !state_is_hash(pool, hash) {
+    let object, ok = state_object(pool, hash);
+    if !ok || object.kind != ArenaObjectKind.Hash {
         return false;
+    }
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        if builtin_hash_key_equal(pool, scratch, pool.slots[slot_index].key, key) {
+            let stored = promote_to_state(pool, scratch, value);
+            return state_hash_set(pool, hash, pool.slots[slot_index].key, stored);
+        }
+        slot_index = pool.slots[slot_index].next_index;
     }
     let stored_key = promote_to_state(pool, scratch, key);
     let stored_value = promote_to_state(pool, scratch, value);
@@ -284,17 +351,31 @@ fn builtin_hash_set(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue, ke
 
 fn builtin_hash_get(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue, key: MrbValue) -> MrbValue {
     if mrb_is_scratch(hash) {
-        let value, ok = scratch_hash_get(scratch, hash, key);
-        if !ok {
+        let object, ok = scratch_object(scratch, hash);
+        if !ok || object.kind != ArenaObjectKind.Hash {
             return mrb_nil();
         }
-        return value;
-    }
-    let value, ok = state_hash_get(pool, hash, key);
-    if !ok {
+        var slot_index = object.items_first_index;
+        while slot_index >= 0 {
+            if builtin_hash_key_equal(pool, scratch, scratch.slots[slot_index].key, key) {
+                return scratch.slots[slot_index].value;
+            }
+            slot_index = scratch.slots[slot_index].next_index;
+        }
         return mrb_nil();
     }
-    return value;
+    let object, ok = state_object(pool, hash);
+    if !ok || object.kind != ArenaObjectKind.Hash {
+        return mrb_nil();
+    }
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        if builtin_hash_key_equal(pool, scratch, pool.slots[slot_index].key, key) {
+            return pool.slots[slot_index].value;
+        }
+        slot_index = pool.slots[slot_index].next_index;
+    }
+    return mrb_nil();
 }
 
 fn builtin_hash_length(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue) -> i64 {

@@ -8,10 +8,12 @@ import vm;
 
 let COUNTER_CHI: const u8[:] = embed_file("../fixtures/counter.chi");
 let TODO_CHI: const u8[:] = embed_file("../fixtures/todo.chi");
+let USERS_CHI: const u8[:] = embed_file("../fixtures/users.chi");
 let COUNTER_HTML: const u8[:] = "<div class='counter'><h2>Click me</h2><span class='count'>1</span><div class='buttons'><button data-action='decrement'>-</button><button data-action='increment'>+</button><button data-action='reset'>Reset</button></div></div>";
 let TODO_HTML_EMPTY: const u8[:] = "<div class='todo'><h2>Todo List (0 items)</h2><ul></ul><div class='buttons'><button data-action='add_item'>Add</button><button data-action='toggle_last'>Toggle Last</button><button data-action='remove_last'>Remove Last</button></div></div>";
 var g_counter_rite: u8[>..] = [];
 var g_todo_rite: u8[>..] = [];
+var g_users_rite: u8[>..] = [];
 
 fn counter_rite() -> u8[:] {
     if g_counter_rite.len == 0 {
@@ -25,6 +27,13 @@ fn todo_rite() -> u8[:] {
         vm::vm_restore_rite_header(TODO_CHI, g_todo_rite);
     }
     return g_todo_rite[..];
+}
+
+fn users_rite() -> u8[:] {
+    if g_users_rite.len == 0 {
+        vm::vm_restore_rite_header(USERS_CHI, g_users_rite);
+    }
+    return g_users_rite[..];
 }
 
 fn test_abi_loads_and_calls_counter(t: goosetest::Test&) {
@@ -125,6 +134,45 @@ fn test_abi_binding_errors_include_context(t: goosetest::Test&) {
     t.assert_eq(-1, vm::abi_flush_patches(counter));
     t.assert_true(vm::abi_has_error());
     t.assert_eq("Counter#missing_getter (binding 7): unknown method", vm::abi_last_error());
+    vm::abi_close();
+}
+
+fn test_abi_method_req_argc_reads_target_enter(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    t.assert_eq(0, vm::abi_load_irep(users_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_eq(0, vm::abi_method_req_argc(counter, vm::intern_symbol("increment")));
+    t.assert_eq(-1, vm::abi_method_req_argc(counter, vm::intern_symbol("missing")));
+
+    let users_class = vm::abi_const_get(vm::intern_symbol("UserList"));
+    let user_list = vm::abi_obj_new(vm::mrb_class_id(users_class));
+    t.assert_eq(1, vm::abi_method_req_argc(user_list, vm::intern_symbol("on_users_loaded")));
+    t.assert_false(vm::abi_has_error());
+    vm::abi_close();
+}
+
+fn test_abi_dispatches_json_event_arguments(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(users_rite()));
+    let users_class = vm::abi_const_get(vm::intern_symbol("UserList"));
+    let user_list = vm::abi_obj_new(vm::mrb_class_id(users_class));
+    let json_args = "[\"[{\\\"name\\\":\\\"Alice\\\"}]\"]";
+    vm::abi_call_json(user_list, vm::intern_symbol("on_users_loaded"), json_args);
+    t.assert_false(vm::abi_has_error());
+
+    let users, users_ok = vm::state_get_ivar(vm::g_abi_pool, user_list,
+        vm::intern_symbol("@users"));
+    t.assert_true(users_ok);
+    t.assert_true(vm::state_is_array(vm::g_abi_pool, users));
+    t.assert_eq(1, vm::builtin_array_length(vm::g_abi_pool, vm::g_abi_scratch, users));
+    t.assert_true(vm::builtin_string_bytes(vm::g_abi_pool, vm::g_abi_scratch,
+        vm::builtin_array_get(vm::g_abi_pool, vm::g_abi_scratch, users, 0)) == "Alice");
+
+    vm::abi_call_json(user_list, vm::intern_symbol("on_users_loaded"), "[");
+    t.assert_true(vm::abi_has_error());
+    t.assert_true(vm::abi_last_error() == "bad JSON argument list");
     vm::abi_close();
 }
 
