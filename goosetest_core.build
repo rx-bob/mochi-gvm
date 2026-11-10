@@ -1,5 +1,5 @@
-c_include = ["src/goose_vm/include"];
+c_include = ["src/gvm/include"];
 c_sources = [
-    "src/goose_vm/mrb_abi_shim.c",
-    "src/goose_vm/mrbgem_loader.c",
+    "src/gvm/mrb_abi_shim.c",
+    "src/gvm/mrbgem_loader.c",
 ];

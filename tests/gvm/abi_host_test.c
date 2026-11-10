@@ -4,7 +4,7 @@
  * `mochi_bridge.c` stores pointers in `int`, so this test must run in a
  * 32-bit process. Generate the Goose C and header with:
  *
- *   goose --standalone --header abi.h -o abi.c <entry importing src/goose_vm>
+ *   goose --standalone --header abi.h -o abi.c <entry importing src/gvm>
  *
  * Then compile this file with `mrb_abi_shim.c` (and
  * `-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE`), `mrbgem_loader.c` and

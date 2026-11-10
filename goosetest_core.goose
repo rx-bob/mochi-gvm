@@ -1,7 +1,7 @@
-// Configured goosetest entry point for the mochi-goose core target.
+// Configured goosetest entry point for the mochi-gvm core target.
 
 import goosetest from "../goosetest";
-import vm from "./src/goose_vm";
+import vm from "./src/gvm";
 
 import goosetest_generated.core.runner;
 
