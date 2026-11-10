@@ -21,10 +21,144 @@ namespace vm;
 
 import.state_pool;
 import.value_arena;
+import.vm_core;
+import.vm_entry;
 
 // A component tracks at most one bit per ivar, so 64 distinct ivars fit.
 let MAX_TRACKED_IVARS: u8 = 64;
 let MAX_SIGNAL_DEPTH = 32;
+let MAX_BINDINGS = 256;
+
+// One DOM binding: which instance owns it, which getter produces its text, and
+// the ivar mask recorded the last time the getter ran. `initialized` is false
+// until the binding has produced its first value, so mount evaluates it even
+// when the instance has no dirty bits yet.
+struct BindingEntry {
+    instance: MrbValue,
+    binding_id: u16,
+    getter_symbol: u32,
+    dep_mask: u64,
+    initialized: bool,
+}
+
+// Registers one getter for an instance. Re-registering the same binding id
+// replaces the getter and forces a fresh dependency scan.
+fn binding_register(pool: StatePool&, instance: MrbValue, binding_id: u32, getter_symbol: u32) -> i64 {
+    let object, ok = state_object(pool, instance);
+    if !ok || object.kind != ArenaObjectKind.Instance || binding_id > 0xFFFF {
+        return -1;
+    }
+    for index in 0..pool.bindings.len {
+        let entry = pool.bindings[index];
+        if mrb_value_identical(entry.instance, instance) && entry.binding_id == binding_id {
+            pool.bindings[index].getter_symbol = getter_symbol;
+            pool.bindings[index].dep_mask = 0;
+            pool.bindings[index].initialized = false;
+            return 0;
+        }
+    }
+    if pool.bindings.len >= MAX_BINDINGS {
+        return -1;
+    }
+    pool.bindings.push(BindingEntry {
+            instance: instance,
+            binding_id: binding_id as u16,
+            getter_symbol: getter_symbol,
+            dep_mask: 0,
+            initialized: false,
+        });
+    return 0;
+}
+
+// Appends one little-endian u16. The DOM loader decodes patch headers without
+// depending on host endianness.
+fn binding_append_u16_le(out: u8[>..]&, value: u16) {
+    out.push((value & 0xFF)as u8);
+    out.push((value >> 8)as u8);
+}
+
+fn binding_append_u32_le(out: u8[>..]&, value: u32) {
+    out.push((value & 0xFF)as u8);
+    out.push(((value >> 8) & 0xFF)as u8);
+    out.push(((value >> 16) & 0xFF)as u8);
+    out.push((value >> 24)as u8);
+}
+
+// Renders one binding result as text. Strings return their existing bytes;
+// scalar values are formatted into the tick arena. The view stays valid until
+// the next top-level entry resets the arena.
+fn binding_text(machine: Vm&, value: MrbValue) -> const u8[:] {
+    if mrb_is_nil(value) {
+        return "";
+    }
+    if mrb_is_scratch(value) || mrb_is_state(value) {
+        return vm_string_value(machine, value);
+    }
+    var text: u8[>..] = [];
+    vm_append_value_text(machine, text, value);
+    let handle = scratch_alloc_string(machine.scratch, text[..]);
+    return scratch_string_bytes(machine.scratch, handle);
+}
+
+// Evaluates one binding getter inside a fresh dependency-tracking window.
+// `entry.dep_mask` is replaced, not OR-ed, so conditional branches drop
+// dependencies they no longer read on the next evaluation.
+fn vm_eval_binding(machine: Vm&, entry: BindingEntry&) -> const u8[:] {
+    if !state_tracking_begin(machine.pool, entry.instance) {
+        entry.initialized = false;
+        return "";
+    }
+    let no_args: MrbValue[1] = [mrb_nil()];
+    let value = vm_call_args(machine, entry.instance, entry.getter_symbol, no_args[..0]);
+    entry.dep_mask = state_tracking_end(machine.pool);
+    if machine.error != VmError.Ok {
+        entry.initialized = false;
+        return "";
+    }
+    entry.initialized = true;
+    return binding_text(machine, value);
+}
+
+// Re-evaluates the instance's uninitialized bindings plus every binding whose
+// recorded dependencies intersect `dirty_ivars`. Each emitted record is
+// `[binding_id u16 LE][byte_len u32 LE][utf8 bytes]`. The dirty mask is cleared
+// once the pass finishes, and -1 reports a getter failure.
+fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..]&) -> i64 {
+    if !mrb_is_state(instance) {
+        return 0;
+    }
+    let dirty = state_dirty_mask(machine.pool, instance);
+    var emitted = 0;
+    var first_error = VmError.Ok;
+    for index in 0..machine.pool.bindings.len {
+        let stored = machine.pool.bindings[index];
+        if !mrb_value_identical(stored.instance, instance) {
+            continue;
+        }
+        if stored.initialized && (stored.dep_mask & dirty) == 0 {
+            continue;
+        }
+        var entry = stored;
+        let text = vm_eval_binding(machine, entry);
+        machine.pool.bindings[index] = entry;
+        if machine.error != VmError.Ok {
+            if first_error == VmError.Ok {
+                first_error = machine.error;
+            }
+            continue;
+        }
+        binding_append_u16_le(out_patches, entry.binding_id);
+        binding_append_u32_le(out_patches, text.len as u32);
+        out_patches.append(text);
+        emitted += 1;
+    }
+    state_clear_dirty_mask(machine.pool, instance);
+    if first_error != VmError.Ok {
+        machine.error = first_error;
+        return -1;
+    }
+    return emitted;
+}
 
 // Returns the mask bit for one ivar slot.
 fn state_ivar_bit(bit_index: u8) -> u64 {

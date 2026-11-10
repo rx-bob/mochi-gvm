@@ -39,6 +39,7 @@ var g_abi_call_args: MrbValue[..ABI_MAX_CALL_ARGS] = [];
 var g_abi_bytecode: u8[>..] = [];
 var g_abi_error: bool = false;
 var g_abi_error_text: u8[>..] = [];
+var g_abi_patch_bytes: u8[>..] = [];
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -73,6 +74,7 @@ fn abi_reset() {
     g_abi_pool.ivars.clear();
     g_abi_pool.slots.clear();
     g_abi_pool.components.clear();
+    g_abi_pool.bindings.clear();
     g_abi_pool.blob.clear();
     g_abi_pool.active_read_mask = 0;
     g_abi_pool.tracking_instance_index = -1;
@@ -90,6 +92,7 @@ fn abi_reset() {
     g_abi_machine.error = VmError.Ok;
 
     g_abi_call_args.clear();
+    g_abi_patch_bytes.clear();
     abi_clear_error();
 }
 
@@ -247,6 +250,29 @@ fn abi_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     return result;
 }
 
+fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {
+    abi_clear_error();
+    let result = binding_register(g_abi_pool, instance, binding_id, getter_symbol);
+    if result != 0 {
+        abi_fail("bad binding registration");
+    }
+    return result;
+}
+
+// Flushes the instance's dirty bindings into the module patch buffer. The buffer
+// is rebuilt for every call so the host always reads a complete patch frame.
+fn abi_flush_patches(instance: u64) -> i64 {
+    abi_clear_error();
+    g_abi_patch_bytes.clear();
+    let count = vm_flush_dirty_bindings(g_abi_machine, instance, g_abi_patch_bytes);
+    abi_record_vm_error(g_abi_machine);
+    return count;
+}
+
+fn abi_patch_bytes() -> const u8[:] {
+    return g_abi_patch_bytes[..];
+}
+
 fn abi_make_string(bytes: const u8[:]) -> u64 {
     abi_clear_error();
     if state_object_count(g_abi_pool) >= MAX_STATE_OBJECTS
@@ -325,6 +351,18 @@ export fn goose_vm_set_arg(index: i64, value: u64) {
 
 export fn goose_vm_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     return abi_call(receiver, method_symbol, argc);
+}
+
+export fn goose_vm_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {
+    return abi_register_binding(instance, binding_id, getter_symbol);
+}
+
+export fn goose_vm_flush_patches(instance: u64) -> i64 {
+    return abi_flush_patches(instance);
+}
+
+export fn goose_vm_patch_bytes() -> const u8[:] {
+    return abi_patch_bytes();
 }
 
 export fn goose_vm_make_string(bytes: const u8[:]) -> u64 {

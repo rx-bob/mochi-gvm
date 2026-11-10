@@ -34,6 +34,7 @@ root struct StatePool {
     ivars: IvarSlot[>..] = [],
     slots: ArenaSlot[>..] = [],
     components: u32[>..] = [],
+    bindings: BindingEntry[>..] = [],
     blob: u8[>..] = [],
     // Signal tracking is global because at most one binding getter runs at a
     // time: reads of the tracked instance OR their bits into `active_read_mask`
