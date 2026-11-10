@@ -26,10 +26,18 @@
 #define SHIM_NULL_CLASS_ID 0xFFFFFFFFu
 #define SHIM_NATIVE_FAIL 0xFFFFFFFFFFFFFFFFull
 
-typedef struct {
+/* Goose emits core C types under `#pragma pack(push, 1)`, so a u8 slice is
+ * { pointer, i64 } with the length at offset 4 on wasm32, not offset 8. Keep
+ * the host-side layout identical or the exported-call ABI reads shifted data. */
+typedef struct __attribute__((packed)) {
   uint8_t *data;
   int64_t len;
 } goose_u8_slice;
+
+_Static_assert(offsetof(goose_u8_slice, len) == sizeof(void *),
+               "Goose u8 slice length must follow the packed pointer");
+_Static_assert(sizeof(goose_u8_slice) == sizeof(void *) + sizeof(int64_t),
+               "Goose u8 slice must have no padding");
 
 typedef struct {
   mrb_func_t func;
@@ -505,6 +513,12 @@ mrb_value mrb_load_irep(mrb_state *mrb, const uint8_t *irep) {
   }
   clear_exc(mrb);
   return mrb_nil_value();
+}
+
+const char *mrb_abi_last_error(mrb_state *mrb) {
+  mrb_shim *shim = shim_of(mrb);
+  if (!shim) return "";
+  return shim->error_text;
 }
 
 mrb_value mrb_load_irep_buf(mrb_state *mrb, const void *bytes, size_t length) {
