@@ -14,36 +14,48 @@ import.vm_core;
 import.vm_dispatch;
 import.vm_ops_collections;
 
-// Runs the root IREP once per loaded program. The root defines classes and
-// methods, so every host entry calls this before looking anything up.
+// Runs the root IREP once per loaded program. Each root advances `booted_roots`
+// before executing so a runtime failure in one class body does not leave later
+// components unbooted.
 fn vm_ensure_booted(machine: Vm&) {
     if machine.file.records.len == 0 {
         machine.error = VmError.BadOpcode;
         return;
     }
+    var first_error = VmError.Ok;
     while machine.booted_roots < machine.file.roots.len {
         let root = machine.file.roots[machine.booted_roots];
+        machine.booted_roots += 1;
         vm_exec(machine, root, mrb_nil(), -1);
         if machine.error != VmError.Ok {
-            return;
+            if first_error == VmError.Ok {
+                first_error = machine.error;
+            }
+            machine.error = VmError.Ok;
         }
-        machine.booted_roots += 1;
+    }
+    if first_error != VmError.Ok {
+        machine.error = first_error;
     }
 }
 
-// Executes one IREP frame. `dst_register` is an absolute register index in the
-// caller's window, or -1 for a host entry call. Recursion is bounded by the
-// frame-stack capacity and by `MAX_VM_CALL_DEPTH`.
 recursive fn vm_exec(
     machine: Vm&, record_index: i64, self_value: MrbValue, dst_register: i64
 ) -> MrbValue {
     let no_args: MrbValue[1] = [mrb_nil()];
-    return vm_exec_with_args(machine, record_index, self_value, dst_register, no_args[..0]);
+    return vm_exec_frame(machine, record_index, self_value, dst_register, no_args[..0], -1);
 }
 
-// Executes one IREP frame with positional arguments copied into R1..Rn.
 recursive fn vm_exec_with_args(
     machine: Vm&, record_index: i64, self_value: MrbValue, dst_register: i64, args: MrbValue[:]
+) -> MrbValue {
+    return vm_exec_frame(machine, record_index, self_value, dst_register, args, -1);
+}
+
+// Executes one IREP frame with positional arguments and optional lexical parent.
+recursive fn vm_exec_frame(
+    machine: Vm&, record_index: i64, self_value: MrbValue,
+    dst_register: i64, args: MrbValue[:], env_frame: i64
 ) -> MrbValue {
     if machine.frames.len >= MAX_VM_CALL_DEPTH {
         machine.error = VmError.CallDepth;
@@ -53,7 +65,7 @@ recursive fn vm_exec_with_args(
     assert(record_index < machine.file.records.len);
     let record = machine.file.records[record_index];
     let iseq = record_iseq(machine.file, record);
-    if !vm_entry_arity_ok(machine, iseq, args) {
+    if env_frame < 0 && !vm_entry_arity_ok(machine, iseq, args) {
         return mrb_nil();
     }
     let base = machine.regs.len;
@@ -75,6 +87,8 @@ recursive fn vm_exec_with_args(
         base: base,
         self_value: self_value,
         pc: 0,
+        env_frame: env_frame,
+        argc: args.len,
     };
     machine.frames.push(frame);
     let frame_index = machine.frames.len - 1;
@@ -87,7 +101,10 @@ recursive fn vm_exec_with_args(
         let step = vm_exec_step(machine, frame, record, iseq, pc + 1, op);
         pc = step.pc;
         machine.frames[frame_index].pc = pc;
-        if step.kind == StepKind.Execute {
+        if machine.scratch.overflow && machine.error == VmError.Ok {
+            machine.error = VmError.ScratchFull;
+            running = false;
+        } else if step.kind == StepKind.Execute {
             vm_exec(machine, step.child_index, step.value, step.dst_register);
             if machine.error != VmError.Ok {
                 running = false;
@@ -132,6 +149,9 @@ fn vm_exec_step(
         || op == OP_LOADINEG || op == OP_LOADI_NEG1 {
         return vm_op_loadi(machine, frame, record, iseq, pc, op);
     }
+    if op == OP_LOADL || op == OP_LOADI16 || op == OP_LOADI32 {
+        return vm_op_load_literal(machine, frame, record, iseq, pc, op);
+    }
     if op == OP_LOADNIL || op == OP_LOADSELF || op == OP_LOADTRUE
         || op == OP_LOADFALSE || op == OP_LOADSYM {
         return vm_op_loadvalue(machine, frame, record, iseq, pc, op);
@@ -139,16 +159,19 @@ fn vm_exec_step(
     if op == OP_GETIV || op == OP_SETIV {
         return vm_op_ivar(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_GETIDX || op == OP_SETIDX {
+    if op == OP_GETUPVAR || op == OP_SETUPVAR {
+        return vm_op_upvar(machine, frame, record, iseq, pc, op);
+    }
+    if op == OP_GETIDX || op == OP_GETIDX0 || op == OP_SETIDX || op == OP_AREF {
         return vm_op_index(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_HASH {
-        return vm_op_hash(machine, frame, record, iseq, pc);
+    if op == OP_HASH || op == OP_HASHADD || op == OP_HASHCAT {
+        return vm_op_hash(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_ADDI || op == OP_SUBI {
+    if op == OP_ADDI || op == OP_SUBI || op == OP_ADDILV || op == OP_SUBILV {
         return vm_op_arith(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_STRING || op == OP_STRCAT {
+    if op == OP_STRING || op == OP_STRCAT || op == OP_SYMBOL {
         return vm_op_string(machine, frame, record, iseq, pc, op);
     }
     if op == OP_CLASS || op == OP_MODULE {
@@ -160,7 +183,9 @@ fn vm_exec_step(
     if op == OP_TDEF || op == OP_SDEF {
         return vm_op_tdef(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_ENTER || op == OP_RETURN || op == OP_RETNIL || op == OP_STOP {
+    if op == OP_ENTER || op == OP_RETURN || op == OP_RETURN_BLK || op == OP_BREAK
+        || op == OP_RETSELF || op == OP_RETNIL || op == OP_RETTRUE
+        || op == OP_RETFALSE || op == OP_STOP {
         return vm_op_control(machine, frame, record, iseq, pc, op);
     }
     machine.error = VmError.BadOpcode;
@@ -288,58 +313,36 @@ fn vm_op_ivar(
 fn vm_op_arith(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
-    let ops = vm_read_operands(iseq, pc, 2);
+    let is_ilv = op == OP_ADDILV || op == OP_SUBILV;
+    let count = if is_ilv {
+        3
+    } else {
+        2
+    };
+    let ops = vm_read_operands(iseq, pc, count);
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
     }
     let value, value_ok = vm_read_register(machine, record, frame.base, ops.a);
     if !value_ok || !mrb_is_fixnum(value) {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+        return vm_fail(machine, VmError.TypeMismatch, pc + count);
     }
-    var delta = ops.b;
-    if op == OP_SUBI {
+    var delta = if is_ilv {
+        ops.c
+    } else {
+        ops.b
+    };
+    if op == OP_SUBI || op == OP_SUBILV {
         delta = -delta;
     }
     let updated = mrb_fixnum_value(value) + delta;
     if updated < MRB_FIXNUM_MIN || updated > MRB_FIXNUM_MAX {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+        return vm_fail(machine, VmError.TypeMismatch, pc + count);
     }
     if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(updated)) {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
+        return vm_fail(machine, VmError.BadOperand, pc + count);
     }
-    return vm_step_continue(pc + 2);
-}
-
-fn vm_op_string(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
-) -> Step {
-    if op == OP_STRING {
-        let ops = vm_read_operands(iseq, pc, 2);
-        if !ops.valid {
-            return vm_fail(machine, VmError.BadOperand, pc);
-        }
-        let text, text_ok = vm_record_pool_text(machine.file, record, ops.b);
-        if !text_ok
-            || !vm_write_register(machine, record, frame.base, ops.a,
-            scratch_alloc_string(machine.scratch, text)) {
-            return vm_fail(machine, VmError.BadOperand, pc + 2);
-        }
-        return vm_step_continue(pc + 2);
-    }
-    let ops = vm_read_operands(iseq, pc, 1);
-    if !ops.valid {
-        return vm_fail(machine, VmError.BadOperand, pc);
-    }
-    let left, left_ok = vm_read_register(machine, record, frame.base, ops.a);
-    let right, right_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
-    if !left_ok || !right_ok {
-        return vm_fail(machine, VmError.BadOperand, pc + 1);
-    }
-    let joined = vm_concat_text(machine, left, right);
-    if !vm_write_register(machine, record, frame.base, ops.a, joined) {
-        return vm_fail(machine, VmError.BadOperand, pc + 1);
-    }
-    return vm_step_continue(pc + 1);
+    return vm_step_continue(pc + count);
 }
 
 fn vm_op_class(
@@ -429,17 +432,28 @@ fn vm_op_control(
             return vm_fail(machine, VmError.BadOperand, pc);
         }
         let aspec = (ops.a << 16) | (ops.b << 8) | ops.c;
+        let required = (aspec >> 18) & 0x1f;
         let optional = (aspec >> 13) & 0x1f;
         let rest = (aspec >> 12) & 1;
         let post = (aspec >> 7) & 0x1f;
         let key = (aspec >> 2) & 0x1f;
         let kdict = (aspec >> 1) & 1;
-        if optional != 0 || rest != 0 || post != 0 || key != 0 || kdict != 0 {
+        if rest != 0 || post != 0 || key != 0 || kdict != 0 {
             return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        if optional > 0 {
+            var provided = frame.argc - required;
+            if provided < 0 {
+                provided = 0;
+            }
+            if provided > optional {
+                provided = optional;
+            }
+            return vm_step_continue(pc + 3 + provided * 3);
         }
         return vm_step_continue(pc + 3);
     }
-    if op == OP_RETURN {
+    if op == OP_RETURN || op == OP_RETURN_BLK || op == OP_BREAK {
         let ops = vm_read_operands(iseq, pc, 1);
         if !ops.valid {
             return vm_fail(machine, VmError.BadOperand, pc);
@@ -450,8 +464,17 @@ fn vm_op_control(
         }
         return vm_step_return(pc + 1, value);
     }
+    if op == OP_RETSELF {
+        return vm_step_return(pc, machine.regs[frame.base]);
+    }
     if op == OP_RETNIL {
         return vm_step_return(pc, mrb_nil());
+    }
+    if op == OP_RETTRUE {
+        return vm_step_return(pc, mrb_true());
+    }
+    if op == OP_RETFALSE {
+        return vm_step_return(pc, mrb_false());
     }
     if op == OP_STOP {
         return vm_step_stop(pc);

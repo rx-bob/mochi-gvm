@@ -74,6 +74,16 @@ extern const uint8_t *goose_vm_fetch_request_json(
     uint64_t options, int64_t *out_len);
 extern int64_t goose_vm_deliver_fetch(uint64_t instance, uint32_t callback_symbol,
                                       goose_u8_slice envelope);
+extern void goose_vm_seed_storage(goose_u8_slice key, goose_u8_slice value);
+extern void goose_vm_set_route_state(goose_u8_slice path);
+extern const uint8_t *goose_vm_host_outbox(int64_t *out_len);
+extern void goose_vm_clear_host_outbox(void);
+extern int64_t goose_vm_set_ivar_string(uint64_t instance, goose_u8_slice name,
+                                        goose_u8_slice value);
+extern const uint8_t *goose_vm_eval_each_expr(uint64_t receiver,
+                                              uint32_t method_symbol,
+                                              goose_u8_slice json,
+                                              int64_t *out_len);
 
 static mrb_state *g_mrb = NULL;
 static uint8_t g_patch_buffer[MOCHI_PATCH_CAPACITY];
@@ -84,6 +94,8 @@ static uint8_t g_fetch_inbox[MOCHI_FETCH_CAPACITY];
 static int32_t g_fetch_next_id = 1;
 static uint8_t g_emit_outbox[MOCHI_EMIT_CAPACITY];
 static int32_t g_emit_outbox_len = 0;
+static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
+static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
 static int32_t g_error_len = 0;
 
@@ -483,20 +495,93 @@ int32_t mochi_fetch_inbox_offset(void) {
 MOCHI_EXPORT
 int32_t mochi_fetch_inbox_capacity(void) { return MOCHI_FETCH_CAPACITY; }
 
+static void sync_host_outbox(void) {
+  int64_t host_len = 0;
+  const uint8_t *host_bytes = goose_vm_host_outbox(&host_len);
+  if (host_bytes && host_len > 0) {
+    int32_t avail = MOCHI_EMIT_CAPACITY - 1 - g_emit_outbox_len;
+    int32_t copy_len = clamp_length(host_len, avail);
+    if (copy_len > 0) {
+      memcpy(g_emit_outbox + g_emit_outbox_len, host_bytes, (size_t)copy_len);
+      g_emit_outbox_len += copy_len;
+      g_emit_outbox[g_emit_outbox_len] = '\0';
+    }
+    goose_vm_clear_host_outbox();
+  }
+}
+
 MOCHI_EXPORT
 int32_t mochi_emit_outbox_offset(void) {
+  sync_host_outbox();
   return (int32_t)(intptr_t)g_emit_outbox;
 }
 
 MOCHI_EXPORT
-int32_t mochi_emit_outbox_len(void) { return g_emit_outbox_len; }
+int32_t mochi_emit_outbox_len(void) {
+  sync_host_outbox();
+  return g_emit_outbox_len;
+}
 
 MOCHI_EXPORT
 int32_t mochi_emit_outbox_clear(void) {
+  goose_vm_clear_host_outbox();
   g_emit_outbox_len = 0;
   g_emit_outbox[0] = '\0';
   return 0;
 }
+
+MOCHI_EXPORT
+void mochi_seed_storage(const uint8_t *key, int32_t key_len,
+                        const uint8_t *val, int32_t val_len) {
+  if (!key || key_len <= 0 || val_len < 0) return;
+  goose_vm_seed_storage(slice_of(key, (size_t)key_len),
+                        slice_of(val ? val : (const uint8_t *)"", (size_t)val_len));
+}
+
+MOCHI_EXPORT
+void mochi_set_route_state(const uint8_t *path, int32_t path_len) {
+  if (!path || path_len < 0) return;
+  goose_vm_set_route_state(slice_of(path, (size_t)path_len));
+}
+
+MOCHI_EXPORT
+int32_t mochi_set_ivar_string(uint64_t instance, const uint8_t *name,
+                              int32_t name_len, const uint8_t *val,
+                              int32_t val_len) {
+  if (!name || name_len <= 0 || val_len < 0) return -1;
+  return (int32_t)goose_vm_set_ivar_string(
+      instance, slice_of(name, (size_t)name_len),
+      slice_of(val ? val : (const uint8_t *)"", (size_t)val_len));
+}
+
+MOCHI_EXPORT
+int32_t mochi_eval_each_expr(uint64_t instance, uint32_t method_symbol,
+                             const uint8_t *json, int32_t json_len) {
+  int64_t out_len = 0;
+  const uint8_t *bytes;
+  g_eval_len = 0;
+  if (!json || json_len <= 0) return -1;
+  bytes = goose_vm_eval_each_expr(instance, method_symbol,
+                                  slice_of(json, (size_t)json_len), &out_len);
+  if (goose_vm_has_error()) {
+    capture_vm_error();
+    return -1;
+  }
+  g_eval_len = clamp_length(out_len, MOCHI_EVENT_ARGS_CAPACITY - 1);
+  if (bytes && g_eval_len > 0) {
+    memcpy(g_eval_buffer, bytes, (size_t)g_eval_len);
+  }
+  g_eval_buffer[g_eval_len] = '\0';
+  return g_eval_len;
+}
+
+MOCHI_EXPORT
+int32_t mochi_eval_buffer_offset(void) {
+  return (int32_t)(intptr_t)g_eval_buffer;
+}
+
+MOCHI_EXPORT
+int32_t mochi_eval_buffer_len(void) { return g_eval_len; }
 
 /* deliver_fetch(instance, callback_name, callback_len, response_len): the
  * loader has written the JSON response envelope to the inbox. Goose parses the

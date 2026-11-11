@@ -10,14 +10,15 @@ import.ivar_mask;
 import.signals;
 import.value_arena;
 import.vm_core;
+import.vm_errors;
 
 // The state pool is long-lived, so its limits are larger but still enforced.
-let MAX_STATE_CLASSES = 256;
-let MAX_STATE_OBJECTS = 4096;
-let MAX_STATE_IVARS = 8192;
-let MAX_STATE_SLOTS = 16384;
-let MAX_STATE_BYTES = 1048576;
-let MAX_STATE_COMPONENTS = 256;
+let MAX_STATE_CLASSES = 512;
+let MAX_STATE_OBJECTS = 32768;
+let MAX_STATE_IVARS = 65536;
+let MAX_STATE_SLOTS = 131072;
+let MAX_STATE_BYTES = 8388608;
+let MAX_STATE_COMPONENTS = 1024;
 let MAX_PROMOTION_DEPTH = 32;
 
 let NULL_CLASS_ID: u32 = 0xFFFFFFFF;
@@ -28,10 +29,16 @@ struct ClassDef {
     superclass_id: u32,
 }
 
+struct ConstEntry {
+    name_symbol: u32,
+    value: MrbValue,
+}
+
 // Long-lived objects, classes and registered component roots. The VM owns one
 // instance for its lifetime; unlike the scratch arena, this pool never resets.
 root struct StatePool {
     classes: ClassDef[>..] = [],
+    consts: ConstEntry[>..] = [],
     objects: ArenaObject[>..] = [],
     ivars: IvarSlot[>..] = [],
     slots: ArenaSlot[>..] = [],
@@ -104,6 +111,29 @@ fn state_class_superclass_id(pool: StatePool&, class_id: u32) -> u32 {
     return pool.classes[class_id].superclass_id;
 }
 
+fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, value: MrbValue) {
+    let promoted = promote_to_state(pool, scratch, value);
+    for index in 0..pool.consts.len {
+        if pool.consts[index].name_symbol == name_symbol {
+            pool.consts[index].value = promoted;
+            return;
+        }
+    }
+    pool.consts.push(ConstEntry {
+            name_symbol: name_symbol,
+            value: promoted,
+        });
+}
+
+fn state_get_const(pool: StatePool&, name_symbol: u32) -> MrbValue, bool {
+    for entry in pool.consts {
+        if entry.name_symbol == name_symbol {
+            return entry.value, true;
+        }
+    }
+    return mrb_nil(), false;
+}
+
 // Copies `text` into the persistent state blob and returns a state string.
 fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
     assert(pool.objects.len < MAX_STATE_OBJECTS);
@@ -111,18 +141,10 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
     let offset = pool.blob.len;
     pool.blob.append(text);
     let index = pool.objects.len;
-    pool.objects.push(ArenaObject {
-            kind: ArenaObjectKind.String,
-            text_offset_bytes: offset,
-            text_length_bytes: text.len,
-            class_index: 0,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    var object = empty_arena_object(ArenaObjectKind.String);
+    object.text_offset_bytes = offset;
+    object.text_length_bytes = text.len;
+    pool.objects.push(object);
     return mrb_arena_value(MRB_ARENA_STATE, index as u32);
 }
 
@@ -131,18 +153,9 @@ fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
     assert(pool.objects.len < MAX_STATE_OBJECTS);
     pool.error = VmError.Ok;
     let index = pool.objects.len;
-    pool.objects.push(ArenaObject {
-            kind: ArenaObjectKind.Instance,
-            text_offset_bytes: 0,
-            text_length_bytes: 0,
-            class_index: class_id,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    var object = empty_arena_object(ArenaObjectKind.Instance);
+    object.class_index = class_id;
+    pool.objects.push(object);
     return mrb_arena_value(MRB_ARENA_STATE, index as u32);
 }
 
@@ -157,18 +170,7 @@ fn state_alloc_hash(pool: StatePool&) -> MrbValue {
 fn state_alloc_collection(pool: StatePool&, kind: ArenaObjectKind) -> MrbValue {
     assert(pool.objects.len < MAX_STATE_OBJECTS);
     let index = pool.objects.len;
-    pool.objects.push(ArenaObject {
-            kind: kind,
-            text_offset_bytes: 0,
-            text_length_bytes: 0,
-            class_index: 0,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    pool.objects.push(empty_arena_object(kind));
     return mrb_arena_value(MRB_ARENA_STATE, index as u32);
 }
 

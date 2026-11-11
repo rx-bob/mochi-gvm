@@ -2,10 +2,13 @@
 namespace vm;
 
 import.builtins;
+import.builtins_ext;
 import.collection_arena;
+import.host_api;
 import.state_pool;
 import.value_arena;
 import.vm_core;
+import.vm_dispatch;
 import.vm_ops;
 
 // Reserved class IDs for constants that have no state-pool class definition.
@@ -149,7 +152,7 @@ fn vm_call_array_builtin(
         }
         return args[1], true;
     }
-    return mrb_nil(), false;
+    return builtin_array_ext(machine, receiver, name, args);
 }
 
 fn vm_call_hash_builtin(
@@ -176,7 +179,7 @@ fn vm_call_hash_builtin(
     if name == "empty?" {
         return mrb_bool(builtin_hash_length(machine.pool, machine.scratch, receiver) == 0), true;
     }
-    return mrb_nil(), false;
+    return builtin_hash_ext(machine, receiver, name, args);
 }
 
 fn vm_call_string_builtin(
@@ -210,7 +213,7 @@ fn vm_call_string_builtin(
     if name == "empty?" {
         return mrb_bool(builtin_string_length(machine.pool, machine.scratch, receiver) == 0), true;
     }
-    return mrb_nil(), false;
+    return builtin_string_ext(machine, receiver, name, args);
 }
 
 // Dispatches an intrinsic method. Returns `handled` so the caller can report a
@@ -222,10 +225,31 @@ fn vm_call_builtin(
     if name == "!" {
         return builtin_not(receiver), true;
     }
+    if name == "==" && args.len >= 1 {
+        return mrb_bool(vm_values_equal(machine, receiver, args[0])), true;
+    }
+    if name == "!=" && args.len >= 1 {
+        return mrb_bool(!vm_values_equal(machine, receiver, args[0])), true;
+    }
+    if name == "nil?" {
+        return mrb_bool(mrb_is_nil(receiver)), true;
+    }
+    if name == "to_s" {
+        return builtin_to_s(machine, receiver), true;
+    }
+    if name == "to_i" {
+        return builtin_to_i(machine, receiver), true;
+    }
+    if mrb_is_fixnum(receiver) {
+        return builtin_fixnum_method(machine, receiver, name, args);
+    }
     if mrb_is_class(receiver) {
         let class_id = mrb_class_id(receiver);
         if class_id == BUILTIN_ARRAY_CLASS_ID && name == "new" {
             return builtin_array_new(machine.scratch), true;
+        }
+        if class_id == BUILTIN_MOCHI_CLASS_ID {
+            return vm_call_mochi_builtin(machine, name, args);
         }
         return mrb_nil(), false;
     }

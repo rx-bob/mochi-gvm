@@ -7,6 +7,7 @@
 namespace vm;
 
 import.builtins;
+import.host_api;
 import.ivar_mask;
 import.json_args;
 import.rite_types;
@@ -96,6 +97,7 @@ fn abi_reset() {
     g_abi_file.irep_section_size_bytes = 0;
 
     g_abi_pool.classes.clear();
+    g_abi_pool.consts.clear();
     g_abi_pool.objects.clear();
     g_abi_pool.ivars.clear();
     g_abi_pool.slots.clear();
@@ -123,6 +125,7 @@ fn abi_reset() {
     g_abi_patch_bytes.clear();
     g_abi_json.clear();
     g_abi_fetch_json.clear();
+    host_reset();
     abi_clear_error();
 }
 
@@ -650,4 +653,40 @@ export fn goose_vm_deliver_fetch(
     instance: u64, callback_symbol: u32, envelope: const u8[:]
 ) -> i64 {
     return abi_deliver_fetch(instance, callback_symbol, envelope);
+}
+
+export fn goose_vm_set_ivar_string(
+    instance: u64, name: const u8[:], value: const u8[:]
+) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    if name.len == 0 {
+        return -1;
+    }
+    var ivar_name: u8[>..] = [];
+    if name[0] != 64 {
+        ivar_name.push(64);
+    }
+    ivar_name.append(name);
+    let sym = intern_symbol(ivar_name[..]);
+    let str_val = abi_make_string(value);
+    if abi_has_error() {
+        return -1;
+    }
+    if !state_set_ivar(g_abi_pool, g_abi_scratch, instance, sym, str_val) {
+        return -1;
+    }
+    return 0;
+}
+
+export fn goose_vm_eval_each_expr(
+    receiver: u64, method_symbol: u32, json: const u8[:]
+) -> const u8[:] {
+    let result = abi_call_json(receiver, method_symbol, json);
+    g_abi_json.clear();
+    if !abi_has_error() && g_abi_machine.error == VmError.Ok {
+        vm_append_value_text(g_abi_machine, g_abi_json, result);
+    }
+    vm_end_entry(g_abi_machine);
+    return g_abi_json[..];
 }

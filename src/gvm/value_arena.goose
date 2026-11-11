@@ -37,10 +37,10 @@ let MRB_FIXNUM_MAX: i64 = 2147483647;
 // Scratch is inline and fixed: a tick that needs more than these limits aborts
 // instead of growing the process. The values comfortably cover the counter,
 // todo and users components while leaving the WASM stack reserve intact.
-let SCRATCH_CAPACITY_BYTES = 16384;
-let SCRATCH_CAPACITY_OBJECTS = 1024;
-let SCRATCH_CAPACITY_IVARS = 1024;
-let SCRATCH_CAPACITY_SLOTS = 2048;
+let SCRATCH_CAPACITY_BYTES = 131072;
+let SCRATCH_CAPACITY_OBJECTS = 2048;
+let SCRATCH_CAPACITY_IVARS = 2048;
+let SCRATCH_CAPACITY_SLOTS = 4096;
 
 type MrbValue = u64;
 
@@ -93,9 +93,8 @@ struct ArenaSlot {
     next_index: i64,
 }
 
-// Tick-scoped allocations. The arrays are inline limited arrays, so the arena
-// has a fixed size and `scratch_reset` only rewinds their lengths. The VM owns
-// exactly one instance for its lifetime; do not construct one per tick.
+// Tick-scoped allocations. Growable buffers are rewound in O(1) by
+// `scratch_reset` while enforcing high safety ceilings without aborting.
 struct ScratchArena {
     blob: u8[..SCRATCH_CAPACITY_BYTES] = [],
     objects: ArenaObject[..SCRATCH_CAPACITY_OBJECTS] = [],
@@ -104,6 +103,7 @@ struct ScratchArena {
     allocated_objects_total: i64 = 0,
     allocated_bytes_total: i64 = 0,
     reset_count: i64 = 0,
+    overflow: bool = false,
 }
 
 // Returns the numeric tag of any `MrbValue`.
@@ -190,17 +190,36 @@ fn mrb_class_id(value: MrbValue) -> u32 {
     return (value & MRB_PAYLOAD_MASK)as u32;
 }
 
-// Packs an absolute child-IREP index as a block closure handle. The fixtures
-// only need the block body, so the closure carries no captured environment.
+let MRB_BLOCK_RECORD_MASK: u64 = 0x00FFFFFF;
+let MRB_BLOCK_ENV_SHIFT: u64 = 24;
+
+// Packs an absolute child-IREP index and optional lexical parent frame index.
 fn mrb_block(record_index: i64) -> MrbValue {
+    return mrb_block_with_env(record_index, -1);
+}
+
+fn mrb_block_with_env(record_index: i64, env_frame: i64) -> MrbValue {
     assert(record_index >= 0);
-    assert(record_index <= MRB_PAYLOAD_MASK as i64);
-    return (MRB_TAG_BLOCK << MRB_TAG_SHIFT) | (record_index as!u64);
+    assert(record_index <= MRB_BLOCK_RECORD_MASK as i64);
+    let encoded_env: u64 = if env_frame >= 0 && env_frame < 255 {
+        (env_frame + 1)as!u64
+    } else {
+        0
+    };
+    return (MRB_TAG_BLOCK << MRB_TAG_SHIFT)
+        | (encoded_env << MRB_BLOCK_ENV_SHIFT)
+        | (record_index as!u64);
 }
 
 fn mrb_block_record_index(value: MrbValue) -> i64 {
     assert(mrb_is_block(value));
-    return (value & MRB_PAYLOAD_MASK)as i64;
+    return (value & MRB_BLOCK_RECORD_MASK)as i64;
+}
+
+fn mrb_block_env_frame(value: MrbValue) -> i64 {
+    assert(mrb_is_block(value));
+    let encoded = (value >> MRB_BLOCK_ENV_SHIFT) & 0xFF;
+    return (encoded as i64) - 1;
 }
 
 // Packs a zone tag and an object-table index into one arena handle.
@@ -343,6 +362,7 @@ fn scratch_reset(arena: ScratchArena&) {
     arena.objects.clear();
     arena.ivars.clear();
     arena.slots.clear();
+    arena.overflow = false;
     arena.reset_count += 1;
 }
 
@@ -362,23 +382,18 @@ fn scratch_object(arena: ScratchArena&, value: MrbValue) -> ArenaObject, bool {
 
 // Copies `text` into the tick arena and returns a scratch string handle.
 fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
-    assert(arena.objects.len < SCRATCH_CAPACITY_OBJECTS);
-    assert(arena.blob.len + text.len <= SCRATCH_CAPACITY_BYTES);
+    if arena.objects.len >= SCRATCH_CAPACITY_OBJECTS
+        || arena.blob.len + text.len > SCRATCH_CAPACITY_BYTES {
+        arena.overflow = true;
+        return mrb_nil();
+    }
     let offset = arena.blob.len;
     arena.blob.append(text);
     let index = arena.objects.len;
-    arena.objects.push(ArenaObject {
-            kind: ArenaObjectKind.String,
-            text_offset_bytes: offset,
-            text_length_bytes: text.len,
-            class_index: 0,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    var object = empty_arena_object(ArenaObjectKind.String);
+    object.text_offset_bytes = offset;
+    object.text_length_bytes = text.len;
+    arena.objects.push(object);
     arena.allocated_objects_total += 1;
     arena.allocated_bytes_total += text.len;
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);
@@ -386,20 +401,14 @@ fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
 
 // Allocates a scratch instance bound to a state-pool class ID.
 fn scratch_alloc_instance(arena: ScratchArena&, class_id: u32) -> MrbValue {
-    assert(arena.objects.len < SCRATCH_CAPACITY_OBJECTS);
+    if arena.objects.len >= SCRATCH_CAPACITY_OBJECTS {
+        arena.overflow = true;
+        return mrb_nil();
+    }
     let index = arena.objects.len;
-    arena.objects.push(ArenaObject {
-            kind: ArenaObjectKind.Instance,
-            text_offset_bytes: 0,
-            text_length_bytes: 0,
-            class_index: class_id,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    var object = empty_arena_object(ArenaObjectKind.Instance);
+    object.class_index = class_id;
+    arena.objects.push(object);
     arena.allocated_objects_total += 1;
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);
 }
@@ -453,7 +462,10 @@ fn scratch_set_ivar(arena: ScratchArena&, instance: MrbValue, key: u32, value: M
         }
         slot_index = arena.ivars[slot_index].next_index;
     }
-    assert(arena.ivars.len < SCRATCH_CAPACITY_IVARS);
+    if arena.ivars.len >= SCRATCH_CAPACITY_IVARS {
+        arena.overflow = true;
+        return false;
+    }
     let new_index = arena.ivars.len;
     arena.ivars.push(IvarSlot {
             key: key,

@@ -27,7 +27,7 @@ import.vm_core;
 import.vm_entry;
 
 let MAX_SIGNAL_DEPTH = 32;
-let MAX_BINDINGS = 256;
+let MAX_BINDINGS = 2048;
 let MAX_JSON_DEPTH = 16;
 
 // One DOM binding: which instance owns it, which getter produces its text, and

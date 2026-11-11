@@ -1,17 +1,46 @@
-// Diagnostic context for VM failures.
-//
-// A bare `VmError` name does not tell a host which component method failed.
-// `ErrorContext` names the class, method and binding that were running, and the
-// C ABI formats those fields into `lastError` as
-// `CowboyToast#__mochi_bind_2 (binding 2): type mismatch`.
+// Diagnostic context and error codes for VM failures.
 namespace vm;
 
 import.vm_core;
+
+enum VmError {
+    Ok,
+    BadOpcode,
+    BadOperand,
+    BadReceiver,
+    NoClass,
+    NoMethod,
+    TypeMismatch,
+    WrongArity,
+    NativeError,
+    Registers,
+    CallDepth,
+    IvarCapacity,
+    ScratchFull,
+}
 
 struct ErrorContext {
     class_id: u32,
     method_symbol: u32,
     binding_id: i64,
+}
+
+fn vm_error_name(err: VmError) -> u8[:] {
+    return match err {
+        Ok => "ok",
+        BadOpcode => "bad opcode",
+        BadOperand => "bad operand",
+        BadReceiver => "bad receiver",
+        NoClass => "unknown class",
+        NoMethod => "unknown method",
+        TypeMismatch => "type mismatch",
+        WrongArity => "wrong number of arguments",
+        NativeError => "native method failed",
+        Registers => "register overflow",
+        CallDepth => "call depth exceeded",
+        IvarCapacity => "ivar capacity exceeded",
+        ScratchFull => "scratch arena capacity exceeded",
+    };
 }
 
 // Records which component method and binding was running when `error` was set.

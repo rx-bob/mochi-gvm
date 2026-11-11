@@ -22,20 +22,12 @@ fn scratch_alloc_hash(arena: ScratchArena&) -> MrbValue {
 }
 
 fn scratch_alloc_collection(arena: ScratchArena&, kind: ArenaObjectKind) -> MrbValue {
-    assert(arena.objects.len < SCRATCH_CAPACITY_OBJECTS);
+    if arena.objects.len >= SCRATCH_CAPACITY_OBJECTS {
+        arena.overflow = true;
+        return mrb_nil();
+    }
     let index = arena.objects.len;
-    arena.objects.push(ArenaObject {
-            kind: kind,
-            text_offset_bytes: 0,
-            text_length_bytes: 0,
-            class_index: 0,
-            ivar_head_index: -1,
-            ivar_count: 0,
-            dirty_ivars: mask_clear(),
-            items_first_index: -1,
-            items_last_index: -1,
-            item_count: 0,
-        });
+    arena.objects.push(empty_arena_object(kind));
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);
 }
 
@@ -51,9 +43,11 @@ fn scratch_is_hash(arena: ScratchArena&, value: MrbValue) -> bool {
 
 // Appends one slot to `object_index`'s linked list and returns its index.
 fn scratch_append_slot(arena: ScratchArena&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
-    assert(object_index >= 0);
-    assert(object_index < arena.objects.len);
-    assert(arena.slots.len < SCRATCH_CAPACITY_SLOTS);
+    if object_index < 0 || object_index >= arena.objects.len
+        || arena.slots.len >= SCRATCH_CAPACITY_SLOTS {
+        arena.overflow = true;
+        return false;
+    }
     let slot_index = arena.slots.len;
     let previous = arena.objects[object_index].items_last_index;
     arena.slots.push(ArenaSlot {

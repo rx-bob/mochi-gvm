@@ -1,33 +1,29 @@
 // Shared state and helpers for the scalar RITE register VM.
-//
-// The VM keeps its public surface here: the bounded `Vm` owner, the frame and
-// step records used by the dispatch loop, the RITE loader, the tick boundary,
-// and the register, symbol, class and string helpers. The instruction handlers
-// and the interpreter loop live in `vm_ops.goose` so both files stay within the
-// style guide's file and function length limits.
 namespace vm;
 
 import.rite_parser;
+import.rite_pool;
 import.rite_types;
 import.state_pool;
 import.value_arena;
 import.vm_errors;
 
-let MAX_VM_REGS = 512;
-let MAX_VM_CALL_DEPTH = 32;
-let MAX_VM_METHODS = 256;
+let MAX_VM_REGS = 1024;
+let MAX_VM_CALL_DEPTH = 64;
+let MAX_VM_METHODS = 4096;
 let MAX_VM_ARGS = 8;
 
-// Opcode bytes from mruby 4.0 `include/mruby/ops.h`. Only the subset emitted by
-// the scalar component slice is decoded; anything else stops the VM with
-// `VmError.BadOpcode` instead of guessing at an instruction width.
+// Opcode bytes from mruby 4.0 `include/mruby/ops.h`.
 let OP_NOP: u8 = 0;
 let OP_MOVE: u8 = 1;
+let OP_LOADL: u8 = 2;
 let OP_LOADI8: u8 = 3;
 let OP_LOADINEG: u8 = 4;
 let OP_LOADI_NEG1: u8 = 5;
 let OP_LOADI_0: u8 = 6;
 let OP_LOADI_7: u8 = 13;
+let OP_LOADI16: u8 = 14;
+let OP_LOADI32: u8 = 15;
 let OP_LOADSYM: u8 = 16;
 let OP_LOADNIL: u8 = 17;
 let OP_LOADSELF: u8 = 18;
@@ -36,33 +32,55 @@ let OP_LOADFALSE: u8 = 20;
 let OP_GETIV: u8 = 25;
 let OP_SETIV: u8 = 26;
 let OP_GETCONST: u8 = 29;
+let OP_SETCONST: u8 = 30;
+let OP_GETUPVAR: u8 = 33;
+let OP_SETUPVAR: u8 = 34;
 let OP_GETIDX: u8 = 35;
+let OP_GETIDX0: u8 = 36;
 let OP_SETIDX: u8 = 37;
 let OP_JMP: u8 = 38;
 let OP_JMPIF: u8 = 39;
 let OP_JMPNOT: u8 = 40;
+let OP_JMPNIL: u8 = 41;
 let OP_JMPUW: u8 = 42;
 let OP_SSEND: u8 = 47;
 let OP_SSEND0: u8 = 48;
+let OP_SSENDB: u8 = 49;
 let OP_SEND: u8 = 50;
 let OP_SEND0: u8 = 51;
 let OP_SENDB: u8 = 52;
 let OP_ENTER: u8 = 57;
 let OP_RETURN: u8 = 61;
+let OP_RETURN_BLK: u8 = 62;
+let OP_RETSELF: u8 = 63;
 let OP_RETNIL: u8 = 64;
+let OP_RETTRUE: u8 = 65;
+let OP_RETFALSE: u8 = 66;
+let OP_BREAK: u8 = 67;
 let OP_ADD: u8 = 69;
 let OP_ADDI: u8 = 70;
 let OP_SUB: u8 = 71;
 let OP_SUBI: u8 = 72;
+let OP_ADDILV: u8 = 73;
+let OP_SUBILV: u8 = 74;
+let OP_MUL: u8 = 75;
+let OP_DIV: u8 = 76;
 let OP_EQ: u8 = 77;
 let OP_LT: u8 = 78;
 let OP_LE: u8 = 79;
 let OP_GT: u8 = 80;
 let OP_GE: u8 = 81;
 let OP_ARRAY: u8 = 82;
+let OP_ARRAY2: u8 = 83;
+let OP_ARYCAT: u8 = 84;
+let OP_ARYPUSH: u8 = 85;
+let OP_AREF: u8 = 87;
+let OP_SYMBOL: u8 = 91;
 let OP_STRING: u8 = 92;
 let OP_STRCAT: u8 = 93;
 let OP_HASH: u8 = 94;
+let OP_HASHADD: u8 = 95;
+let OP_HASHCAT: u8 = 96;
 let OP_BLOCK: u8 = 98;
 let OP_CLASS: u8 = 103;
 let OP_MODULE: u8 = 104;
@@ -71,24 +89,6 @@ let OP_TDEF: u8 = 107;
 let OP_SDEF: u8 = 108;
 let OP_STOP: u8 = 118;
 
-// A VM rejection reason. Bytecode from an untrusted component must never abort
-// the process, so dispatch records the first problem here and stops the frame.
-enum VmError {
-    Ok,
-    BadOpcode,
-    BadOperand,
-    BadReceiver,
-    NoClass,
-    NoMethod,
-    TypeMismatch,
-    WrongArity,
-    NativeError,
-    Registers,
-    CallDepth,
-    IvarCapacity,
-}
-
-// What the interpreter loop should do after one decoded instruction.
 enum StepKind {
     Continue,
     Return,
@@ -96,32 +96,27 @@ enum StepKind {
     Execute,
 }
 
-// One method definition binding a class ID to a child IREP.
 struct MethodEntry {
     class_id: u32,
     name_symbol: u32,
     irep_index: i64,
 }
 
-// A method registered through the C ABI. `native_id` indexes the host shim's
-// callback table; the VM never calls a C function pointer directly.
 struct NativeMethod {
     class_id: u32,
     name_symbol: u32,
     native_id: u32,
 }
 
-// One active call frame. `base` is the first register of the window, and `pc`
-// is the byte offset of the next instruction inside the frame's IREP.
 struct CallFrame {
     record_index: i64,
     base: i64,
     self_value: MrbValue,
     pc: i64,
+    env_frame: i64 = -1,
+    argc: i64 = 0,
 }
 
-// The result of one instruction. `Execute` asks the loop to recurse into a child
-// IREP with `value` as self and `dst_register` as the caller's result slot.
 struct Step {
     pc: i64,
     kind: StepKind,
@@ -130,8 +125,6 @@ struct Step {
     dst_register: i64,
 }
 
-// Operands decoded as unsigned bytes. `valid` is false when the instruction
-// stream ended before all requested bytes, which is a malformed frame.
 struct Operands {
     a: i64,
     b: i64,
@@ -139,8 +132,6 @@ struct Operands {
     valid: bool,
 }
 
-// The VM owns the mutable dispatch state while the caller owns the three
-// storage roots. The register window and frame stack are inline and bounded.
 root struct Vm {
     file: RiteFile&,
     pool: StatePool&,
@@ -156,23 +147,6 @@ root struct Vm {
         method_symbol: NULL_SYMBOL,
         binding_id: -1,
     },
-}
-
-fn vm_error_name(err: VmError) -> u8[:] {
-    return match err {
-        Ok => "ok",
-        BadOpcode => "bad opcode",
-        BadOperand => "bad operand",
-        BadReceiver => "bad receiver",
-        NoClass => "unknown class",
-        NoMethod => "unknown method",
-        TypeMismatch => "type mismatch",
-        WrongArity => "wrong number of arguments",
-        NativeError => "native method failed",
-        Registers => "register overflow",
-        CallDepth => "call depth exceeded",
-        IvarCapacity => "ivar capacity exceeded",
-    };
 }
 
 fn vm_step_continue(pc: i64) -> Step {
@@ -291,6 +265,10 @@ fn vm_append_value_text(machine: Vm&, out: u8[>..]&, value: MrbValue) {
         mrb_format_fixnum(out, mrb_fixnum_value(value));
         return;
     }
+    if mrb_is_symbol(value) {
+        out.append(symbol_name(mrb_symbol_id(value)));
+        return;
+    }
     if mrb_is_true(value) {
         out.append("true");
         return;
@@ -403,15 +381,23 @@ fn vm_record_symbol(file: RiteFile&, record: IrepRecord, local_index: i64) -> u3
     return file.syms[index].index, true;
 }
 
-fn vm_record_pool_text(file: RiteFile&, record: IrepRecord, local_index: i64) -> const u8[:], bool {
+fn vm_record_pool_entry(file: RiteFile&, record: IrepRecord, local_index: i64) -> PoolEntry, bool {
     if local_index < 0 || local_index >= record.pool_count {
-        return "", false;
+        return empty_pool_entry(), false;
     }
     let index = record.pool_first_index + local_index;
     if index < 0 || index >= file.pools.len {
+        return empty_pool_entry(), false;
+    }
+    return file.pools[index], true;
+}
+
+fn vm_record_pool_text(file: RiteFile&, record: IrepRecord, local_index: i64) -> const u8[:], bool {
+    let entry, ok = vm_record_pool_entry(file, record, local_index);
+    if !ok {
         return "", false;
     }
-    return pool_text(file, file.pools[index]), true;
+    return pool_text(file, entry), true;
 }
 
 fn vm_read_register(machine: Vm&, record: IrepRecord, base: i64, a: i64) -> MrbValue, bool {
@@ -449,8 +435,17 @@ fn vm_required_args(iseq: u8[:]) -> i64, bool {
 
 // Rejects a call whose positional argument count disagrees with a leading ENTER.
 fn vm_entry_arity_ok(machine: Vm&, iseq: u8[:], args: MrbValue[:]) -> bool {
-    let required, has_enter = vm_required_args(iseq);
-    if has_enter && args.len != required {
+    if iseq.len == 0 || iseq[0] != OP_ENTER {
+        return true;
+    }
+    let ops = vm_read_operands(iseq, 1, 3);
+    if !ops.valid {
+        return false;
+    }
+    let aspec = (ops.a << 16) | (ops.b << 8) | ops.c;
+    let required = (aspec >> 18) & 0x1f;
+    let optional = (aspec >> 13) & 0x1f;
+    if args.len < required || args.len > required + optional {
         machine.error = VmError.WrongArity;
         return false;
     }

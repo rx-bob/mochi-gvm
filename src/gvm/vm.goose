@@ -3,7 +3,9 @@ namespace vm;
 
 import.abi;
 import.builtins;
+import.builtins_ext;
 import.collection_arena;
+import.host_api;
 import.json_args;
 import.rite_bytes;
 import.rite_parser;
@@ -16,6 +18,7 @@ import.vm_blocks;
 import.vm_core;
 import.vm_dispatch;
 import.vm_entry;
+import.vm_errors;
 import.vm_methods;
 import.vm_ops;
 import.vm_ops_collections;

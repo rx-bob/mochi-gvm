@@ -385,15 +385,32 @@ fn builtin_hash_length(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue)
     return state_hash_length(pool, hash);
 }
 
-// Dispatches Ruby `obj[key]` for arrays and hashes.
+// Dispatches Ruby `obj[key]` for arrays, strings, and hashes.
 fn builtin_get_index(pool: StatePool&, scratch: ScratchArena&, container: MrbValue, key: MrbValue) -> MrbValue {
     if mrb_is_fixnum(key) && (mrb_is_scratch(container) || mrb_is_state(container)) {
+        let idx = mrb_fixnum_value(key);
         if mrb_is_scratch(container) {
             if scratch_is_array(scratch, container) {
-                return builtin_array_get(pool, scratch, container, mrb_fixnum_value(key));
+                return builtin_array_get(pool, scratch, container, idx);
+            }
+            if scratch_is_string(scratch, container) {
+                let len = builtin_string_length(pool, scratch, container);
+                if idx >= len || idx < - len {
+                    return mrb_nil();
+                }
+                return builtin_string_slice(pool, scratch, container, idx, 1);
             }
         } else if state_is_array(pool, container) {
-            return builtin_array_get(pool, scratch, container, mrb_fixnum_value(key));
+            return builtin_array_get(pool, scratch, container, idx);
+        } else {
+            let obj, ok = state_object(pool, container);
+            if ok && obj.kind == ArenaObjectKind.String {
+                let len = builtin_string_length(pool, scratch, container);
+                if idx >= len || idx < - len {
+                    return mrb_nil();
+                }
+                return builtin_string_slice(pool, scratch, container, idx, 1);
+            }
         }
     }
     return builtin_hash_get(pool, scratch, container, key);

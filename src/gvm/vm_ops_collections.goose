@@ -1,14 +1,183 @@
-// Opcode handlers for inline Array and Hash access.
+// Opcode handlers for literals, strings, upvars, and Array/Hash operations.
 namespace vm;
 
 import.builtins;
+import.collection_arena;
+import.rite_types;
+import.state_pool;
+import.value_arena;
 import.vm_core;
 
-// GETIDX: R[a] = R[a][R[a+1]]
-// SETIDX: R[a][R[a+1]] = R[a+2]
+fn vm_op_load_literal(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
+    if op == OP_LOADI16 {
+        let ops = vm_read_operands(iseq, pc, 1);
+        let value, ok = vm_read_signed16(iseq, pc + 1);
+        if !ops.valid || !ok {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(value)) {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        return vm_step_continue(pc + 3);
+    }
+    if op == OP_LOADI32 {
+        if !vm_operands_available(iseq, pc, 5) {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let a = iseq[pc]as i64;
+        let b0 = iseq[pc + 1]as u32;
+        let b1 = iseq[pc + 2]as u32;
+        let b2 = iseq[pc + 3]as u32;
+        let b3 = iseq[pc + 4]as u32;
+        let raw_u32: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        var value = raw_u32 as i64;
+        if value >= 2147483648 {
+            value -= 4294967296;
+        }
+        if !vm_write_register(machine, record, frame.base, a, mrb_fixnum(value)) {
+            return vm_fail(machine, VmError.BadOperand, pc + 5);
+        }
+        return vm_step_continue(pc + 5);
+    }
+    let ops = vm_read_operands(iseq, pc, 2);
+    if !ops.valid {
+        return vm_fail(machine, VmError.BadOperand, pc);
+    }
+    let entry, entry_ok = vm_record_pool_entry(machine.file, record, ops.b);
+    if !entry_ok {
+        return vm_fail(machine, VmError.BadOperand, pc + 2);
+    }
+    var number: i64 = 0;
+    if entry.tag == 1 || entry.tag == 3 {
+        number = entry.int_value;
+    } else if entry.tag == 5 {
+        number = entry.float_value as i64;
+    } else {
+        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+    }
+    if number < MRB_FIXNUM_MIN || number > MRB_FIXNUM_MAX {
+        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+    }
+    if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(number)) {
+        return vm_fail(machine, VmError.BadOperand, pc + 2);
+    }
+    return vm_step_continue(pc + 2);
+}
+
+fn vm_op_string(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
+    if op == OP_STRING || op == OP_SYMBOL {
+        let ops = vm_read_operands(iseq, pc, 2);
+        if !ops.valid {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let text, text_ok = vm_record_pool_text(machine.file, record, ops.b);
+        if !text_ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        let result = if op == OP_SYMBOL {
+            mrb_symbol(intern_symbol(text))
+        } else {
+            scratch_alloc_string(machine.scratch, text)
+        };
+        if !vm_write_register(machine, record, frame.base, ops.a, result) {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        return vm_step_continue(pc + 2);
+    }
+    let ops = vm_read_operands(iseq, pc, 1);
+    if !ops.valid {
+        return vm_fail(machine, VmError.BadOperand, pc);
+    }
+    let left, left_ok = vm_read_register(machine, record, frame.base, ops.a);
+    let right, right_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
+    if !left_ok || !right_ok {
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
+    }
+    let joined = vm_concat_text(machine, left, right);
+    if !vm_write_register(machine, record, frame.base, ops.a, joined) {
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
+    }
+    return vm_step_continue(pc + 1);
+}
+
+fn vm_op_upvar(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
+    let ops = vm_read_operands(iseq, pc, 3);
+    if !ops.valid {
+        return vm_fail(machine, VmError.BadOperand, pc);
+    }
+    var target_frame = frame.env_frame;
+    var depth = ops.c;
+    while depth > 0 && target_frame >= 0 && target_frame < machine.frames.len {
+        target_frame = machine.frames[target_frame].env_frame;
+        depth -= 1;
+    }
+    if target_frame < 0 || target_frame >= machine.frames.len {
+        return vm_fail(machine, VmError.BadOperand, pc + 3);
+    }
+    let env = machine.frames[target_frame];
+    if env.record_index < 0 || env.record_index >= machine.file.records.len {
+        return vm_fail(machine, VmError.BadOperand, pc + 3);
+    }
+    let env_record = machine.file.records[env.record_index];
+    if op == OP_GETUPVAR {
+        let value, ok = vm_read_register(machine, env_record, env.base, ops.b);
+        if !ok || !vm_write_register(machine, record, frame.base, ops.a, value) {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        return vm_step_continue(pc + 3);
+    }
+    let value, ok = vm_read_register(machine, record, frame.base, ops.a);
+    if !ok || !vm_write_register(machine, env_record, env.base, ops.b, value) {
+        return vm_fail(machine, VmError.BadOperand, pc + 3);
+    }
+    return vm_step_continue(pc + 3);
+}
+
+// GETIDX, GETIDX0, SETIDX, AREF
 fn vm_op_index(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
+    if op == OP_GETIDX0 {
+        let ops = vm_read_operands(iseq, pc, 2);
+        if !ops.valid {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let container, ok = vm_read_register(machine, record, frame.base, ops.b);
+        if !ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        let value = builtin_get_index(machine.pool, machine.scratch, container, mrb_fixnum(0));
+        if !vm_write_register(machine, record, frame.base, ops.a, value) {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        return vm_step_continue(pc + 2);
+    }
+    if op == OP_AREF {
+        let ops = vm_read_operands(iseq, pc, 3);
+        if !ops.valid {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let src, ok = vm_read_register(machine, record, frame.base, ops.b);
+        if !ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        var value = mrb_nil();
+        if scratch_is_array(machine.scratch, src) || state_is_array(machine.pool, src) {
+            value = builtin_array_get(machine.pool, machine.scratch, src, ops.c);
+        } else if ops.c == 0 {
+            value = src;
+        }
+        if !vm_write_register(machine, record, frame.base, ops.a, value) {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        return vm_step_continue(pc + 3);
+    }
     let ops = vm_read_operands(iseq, pc, 1);
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
@@ -35,40 +204,147 @@ fn vm_op_index(
     return vm_step_continue(pc + 1);
 }
 
-// HASH a,b: build a hash from b key-value pairs starting at R[a]. The first
-// pair overwrites the destination register, so save it before writing.
-fn vm_op_hash(
+fn vm_op_array_ext(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
+    if op == OP_ARRAY2 {
+        let ops = vm_read_operands(iseq, pc, 3);
+        if !ops.valid {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let array = builtin_array_new(machine.scratch);
+        var index = 0;
+        while index < ops.c {
+            let value, ok = vm_read_register(machine, record, frame.base, ops.b + index);
+            if !ok || !builtin_array_push(machine.pool, machine.scratch, array, value) {
+                return vm_fail(machine, VmError.BadOperand, pc + 3);
+            }
+            index += 1;
+        }
+        if !vm_write_register(machine, record, frame.base, ops.a, array) {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        return vm_step_continue(pc + 3);
+    }
+    if op == OP_ARYPUSH {
+        let ops = vm_read_operands(iseq, pc, 2);
+        if !ops.valid {
+            return vm_fail(machine, VmError.BadOperand, pc);
+        }
+        let array, ok = vm_read_register(machine, record, frame.base, ops.a);
+        if !ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        var index = 0;
+        while index < ops.b {
+            let item, item_ok = vm_read_register(machine, record, frame.base, ops.a + 1 + index);
+            if !item_ok || !builtin_array_push(machine.pool, machine.scratch, array, item) {
+                return vm_fail(machine, VmError.BadOperand, pc + 2);
+            }
+            index += 1;
+        }
+        return vm_step_continue(pc + 2);
+    }
+    let ops = vm_read_operands(iseq, pc, 1);
+    if !ops.valid {
+        return vm_fail(machine, VmError.BadOperand, pc);
+    }
+    var dst, dst_ok = vm_read_register(machine, record, frame.base, ops.a);
+    let src, src_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
+    if !dst_ok || !src_ok {
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
+    }
+    if mrb_is_nil(dst) {
+        dst = builtin_array_new(machine.scratch);
+        if !vm_write_register(machine, record, frame.base, ops.a, dst) {
+            return vm_fail(machine, VmError.BadOperand, pc + 1);
+        }
+    }
+    let len = builtin_array_length(machine.pool, machine.scratch, src);
+    var idx = 0;
+    while idx < len {
+        let item = builtin_array_get(machine.pool, machine.scratch, src, idx);
+        if !builtin_array_push(machine.pool, machine.scratch, dst, item) {
+            return vm_fail(machine, VmError.TypeMismatch, pc + 1);
+        }
+        idx += 1;
+    }
+    return vm_step_continue(pc + 1);
+}
+
+fn vm_op_hashcat(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64
 ) -> Step {
+    let ops = vm_read_operands(iseq, pc, 1);
+    if !ops.valid {
+        return vm_fail(machine, VmError.BadOperand, pc);
+    }
+    let dst, dst_ok = vm_read_register(machine, record, frame.base, ops.a);
+    let src, src_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
+    if !dst_ok || !src_ok {
+        return vm_fail(machine, VmError.BadOperand, pc + 1);
+    }
+    if mrb_is_scratch(src) {
+        let obj, ok = scratch_object(machine.scratch, src);
+        if ok && obj.kind == ArenaObjectKind.Hash {
+            var slot = obj.items_first_index;
+            while slot >= 0 {
+                let s = machine.scratch.slots[slot];
+                builtin_hash_set(machine.pool, machine.scratch, dst, s.key, s.value);
+                slot = s.next_index;
+            }
+        }
+    } else if mrb_is_state(src) {
+        let obj, ok = state_object(machine.pool, src);
+        if ok && obj.kind == ArenaObjectKind.Hash {
+            var slot = obj.items_first_index;
+            while slot >= 0 {
+                let s = machine.pool.slots[slot];
+                builtin_hash_set(machine.pool, machine.scratch, dst, s.key, s.value);
+                slot = s.next_index;
+            }
+        }
+    }
+    return vm_step_continue(pc + 1);
+}
+
+// HASH, HASHADD, HASHCAT
+fn vm_op_hash(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
+    if op == OP_HASHCAT {
+        return vm_op_hashcat(machine, frame, record, iseq, pc);
+    }
     let ops = vm_read_operands(iseq, pc, 2);
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
     }
-    let hash = builtin_hash_new(machine.scratch);
-    if ops.b > 0 {
-        let first_key, first_key_ok = vm_read_register(machine, record, frame.base, ops.a);
-        let first_value, first_value_ok = vm_read_register(machine, record, frame.base, ops.a + 1);
-        if !first_key_ok || !first_value_ok {
+    var hash = mrb_nil();
+    var start_offset = ops.a;
+    if op == OP_HASHADD {
+        let existing, ok = vm_read_register(machine, record, frame.base, ops.a);
+        if !ok {
             return vm_fail(machine, VmError.BadOperand, pc + 2);
         }
-        if !builtin_hash_set(machine.pool, machine.scratch, hash, first_key, first_value) {
+        hash = existing;
+        start_offset = ops.a + 1;
+    } else {
+        hash = builtin_hash_new(machine.scratch);
+    }
+    var pair = 0;
+    while pair < ops.b {
+        let offset = start_offset + pair * 2;
+        let key, key_ok = vm_read_register(machine, record, frame.base, offset);
+        let value, value_ok = vm_read_register(machine, record, frame.base, offset + 1);
+        if !key_ok || !value_ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 2);
+        }
+        if !builtin_hash_set(machine.pool, machine.scratch, hash, key, value) {
             return vm_fail(machine, VmError.TypeMismatch, pc + 2);
         }
-        var pair = 1;
-        while pair < ops.b {
-            let offset = ops.a + pair * 2;
-            let key, key_ok = vm_read_register(machine, record, frame.base, offset);
-            let value, value_ok = vm_read_register(machine, record, frame.base, offset + 1);
-            if !key_ok || !value_ok {
-                return vm_fail(machine, VmError.BadOperand, pc + 2);
-            }
-            if !builtin_hash_set(machine.pool, machine.scratch, hash, key, value) {
-                return vm_fail(machine, VmError.TypeMismatch, pc + 2);
-            }
-            pair += 1;
-        }
+        pair += 1;
     }
-    if !vm_write_register(machine, record, frame.base, ops.a, hash) {
+    if op == OP_HASH && !vm_write_register(machine, record, frame.base, ops.a, hash) {
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }
     return vm_step_continue(pc + 2);

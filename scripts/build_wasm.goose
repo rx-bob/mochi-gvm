@@ -57,7 +57,11 @@ fn compile_bridge() {
     command.append("\"_mochi_emit_outbox_len\",\"_mochi_emit_outbox_clear\",");
     command.append("\"_mochi_fetch_inbox_offset\",");
     command.append("\"_mochi_fetch_inbox_capacity\",");
-    command.append("\"_mochi_deliver_fetch\",\"_malloc\",\"_free\"]' ");
+    command.append("\"_mochi_deliver_fetch\",");
+    command.append("\"_mochi_seed_storage\",\"_mochi_set_route_state\",");
+    command.append("\"_mochi_set_ivar_string\",\"_mochi_eval_each_expr\",");
+    command.append("\"_mochi_eval_buffer_offset\",\"_mochi_eval_buffer_len\",");
+    command.append("\"_malloc\",\"_free\"]' ");
     command.append(
         "-sEXPORTED_RUNTIME_METHODS='[\"HEAPU8\",\"UTF8ToString\","
     );
