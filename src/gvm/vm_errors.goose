@@ -34,6 +34,10 @@ struct ErrorContext {
     scratch_requested: i64 = 0,
     scratch_used: i64 = 0,
     scratch_capacity: i64 = 0,
+    capacity_resource: CapacityResource = CapacityResource.None,
+    capacity_requested: i64 = 0,
+    capacity_used: i64 = 0,
+    capacity_limit: i64 = 0,
 }
 
 fn vm_error_name(err: VmError) -> u8[:] {
@@ -67,25 +71,43 @@ fn vm_set_error_context(machine: Vm&, class_id: u32, method_symbol: u32, binding
     machine.error_context.binding_id = binding_id;
 }
 
-fn vm_clear_scratch_failure(machine: Vm&) {
+fn vm_clear_entry_capacity_failure(machine: Vm&) {
     machine.error_context.scratch_resource = ScratchResource.None;
     machine.error_context.scratch_requested = 0;
     machine.error_context.scratch_used = 0;
     machine.error_context.scratch_capacity = 0;
+    machine.error_context.capacity_resource = CapacityResource.None;
+    machine.error_context.capacity_requested = 0;
+    machine.error_context.capacity_used = 0;
+    machine.error_context.capacity_limit = 0;
     machine.scratch.failure.resource = ScratchResource.None;
     machine.scratch.failure.requested = 0;
     machine.scratch.failure.used = 0;
     machine.scratch.failure.capacity = 0;
     machine.scratch.failure.active = false;
+    machine.pool.failure.resource = CapacityResource.None;
+    machine.pool.failure.requested = 0;
+    machine.pool.failure.used = 0;
+    machine.pool.failure.capacity = 0;
+    machine.pool.failure.active = false;
 }
 
-fn scratch_resource_name(resource: ScratchResource) -> u8[:] {
+fn capacity_resource_name(resource: CapacityResource) -> u8[:] {
     return match resource {
         None => "",
-        Objects => "objects",
-        Bytes => "bytes",
-        Ivars => "ivars",
-        Slots => "slots",
+        ScratchObjects => "scratch objects",
+        ScratchBytes => "scratch bytes",
+        ScratchIvars => "scratch ivars",
+        ScratchSlots => "scratch slots",
+        StateBytes => "state bytes",
+        StateObjects => "state objects",
+        StateIvars => "state ivars",
+        StateSlots => "state slots",
+        IvarsPerObject => "ivars per object",
+        Components => "component registrations",
+        Bindings => "bindings",
+        Classes => "classes",
+        AbiBytecode => "ABI bytecode bytes",
     };
 }
 
@@ -111,10 +133,31 @@ fn vm_absorb_method_context(machine: Vm&, record_index: i64) {
 fn vm_absorb_scratch_failure(machine: Vm&, record_index: i64) {
     let failure = machine.scratch.failure;
     if failure.active {
+        machine.error_context.capacity_resource = match failure.resource {
+            Objects => CapacityResource.ScratchObjects,
+            Bytes => CapacityResource.ScratchBytes,
+            Ivars => CapacityResource.ScratchIvars,
+            Slots => CapacityResource.ScratchSlots,
+            None => CapacityResource.None,
+        };
+        machine.error_context.capacity_requested = failure.requested;
+        machine.error_context.capacity_used = failure.used;
+        machine.error_context.capacity_limit = failure.capacity;
         machine.error_context.scratch_resource = failure.resource;
         machine.error_context.scratch_requested = failure.requested;
         machine.error_context.scratch_used = failure.used;
         machine.error_context.scratch_capacity = failure.capacity;
+    }
+    vm_absorb_method_context(machine, record_index);
+}
+
+fn vm_absorb_state_failure(machine: Vm&, record_index: i64) {
+    let failure = machine.pool.failure;
+    if failure.active {
+        machine.error_context.capacity_resource = failure.resource;
+        machine.error_context.capacity_requested = failure.requested;
+        machine.error_context.capacity_used = failure.used;
+        machine.error_context.capacity_limit = failure.capacity;
     }
     vm_absorb_method_context(machine, record_index);
 }

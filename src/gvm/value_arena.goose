@@ -138,6 +138,31 @@ enum ScratchResource {
     Slots,
 }
 
+enum CapacityResource {
+    None,
+    ScratchObjects,
+    ScratchBytes,
+    ScratchIvars,
+    ScratchSlots,
+    StateBytes,
+    StateObjects,
+    StateIvars,
+    StateSlots,
+    IvarsPerObject,
+    Components,
+    Bindings,
+    Classes,
+    AbiBytecode,
+}
+
+struct CapacityFailure {
+    resource: CapacityResource,
+    requested: i64,
+    used: i64,
+    capacity: i64,
+    active: bool,
+}
+
 struct ScratchFailure {
     resource: ScratchResource,
     requested: i64,

@@ -76,6 +76,28 @@ root struct StatePool {
     // Capacity failures are reported here because the state layer has no `Vm`
     // handle. `vm_begin_entry` clears it before every host call.
     error: VmError = VmError.Ok,
+    failure: CapacityFailure = CapacityFailure {
+        resource: CapacityResource.None,
+        requested: 0,
+        used: 0,
+        capacity: 0,
+        active: false,
+    },
+}
+
+fn state_fail_capacity(
+    pool: StatePool&, resource: CapacityResource, requested: i64, used: i64, capacity: i64
+) {
+    if !pool.failure.active {
+        pool.failure = CapacityFailure {
+            resource: resource,
+            requested: requested,
+            used: used,
+            capacity: capacity,
+            active: true,
+        };
+    }
+    pool.error = VmError.StateCapacity;
 }
 
 fn state_object_count(pool: StatePool&) -> i64 {
@@ -223,7 +245,8 @@ fn state_blob_allocate(pool: StatePool&, length: i64) -> i64 {
         return offset;
     }
     if pool.blob.len + length > MAX_STATE_BYTES {
-        pool.error = VmError.StateCapacity;
+        state_fail_capacity(pool, CapacityResource.StateBytes, length, pool.blob.len,
+            MAX_STATE_BYTES);
         return -1;
     }
     let offset = pool.blob.len;
@@ -283,7 +306,8 @@ fn state_take_object(pool: StatePool&, kind: ArenaObjectKind) -> i64 {
         return index;
     }
     if pool.objects.len >= MAX_STATE_OBJECTS {
-        pool.error = VmError.StateCapacity;
+        state_fail_capacity(pool, CapacityResource.StateObjects, 1, pool.objects.len,
+            MAX_STATE_OBJECTS);
         return -1;
     }
     let index = pool.objects.len;
@@ -386,7 +410,8 @@ fn state_take_slot(pool: StatePool&) -> i64 {
         return index;
     }
     if pool.slots.len >= MAX_STATE_SLOTS {
-        pool.error = VmError.StateCapacity;
+        state_fail_capacity(pool, CapacityResource.StateSlots, 1, pool.slots.len,
+            MAX_STATE_SLOTS);
         return -1;
     }
     let index = pool.slots.len;
@@ -628,7 +653,11 @@ fn state_register_component(pool: StatePool&, instance: MrbValue) -> bool {
             return true;
         }
     }
-    assert(pool.components.len < MAX_STATE_COMPONENTS);
+    if pool.components.len >= MAX_STATE_COMPONENTS {
+        state_fail_capacity(pool, CapacityResource.Components, 1, pool.components.len,
+            MAX_STATE_COMPONENTS);
+        return false;
+    }
     pool.components.push(instance);
     return true;
 }

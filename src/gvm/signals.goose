@@ -67,6 +67,8 @@ fn binding_register(pool: StatePool&, instance: MrbValue, binding_id: u32, gette
         }
     }
     if pool.bindings.len >= MAX_BINDINGS {
+        state_fail_capacity(pool, CapacityResource.Bindings, 1, pool.bindings.len,
+            MAX_BINDINGS);
         return -1;
     }
     pool.bindings.push(BindingEntry {

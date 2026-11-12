@@ -298,6 +298,10 @@ fn test_abi_failed_call_does_not_stick(t: goosetest::Test&) {
     vm::abi_call(counter, vm::intern_symbol("missing_handler"), 0);
     t.assert_true(vm::abi_has_error());
     t.assert_eq("Counter#missing_handler: unknown method", vm::abi_last_error());
+    t.assert_eq(0, vm::g_abi_machine.regs.len);
+    t.assert_eq(0, vm::g_abi_machine.frames.len);
+    t.assert_eq(0, vm::g_abi_machine.entry_args.len);
+    t.assert_eq(0, vm::scratch_object_count(vm::g_abi_scratch));
     // Interning a method name starts a fresh entry: a previous call failure
     // must not make the host skip a real `mounted` callback.
     let html_symbol = vm::abi_intern("html");
@@ -321,6 +325,25 @@ fn test_abi_formats_ivar_capacity_error(t: goosetest::Test&) {
     vm::abi_record_vm_error(vm::g_abi_machine);
     t.assert_true(vm::abi_has_error());
     t.assert_eq("Counter#html: ivar capacity exceeded", vm::abi_last_error());
+    vm::abi_close();
+}
+
+fn test_abi_formats_state_capacity_details(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    vm::vm_set_error_context(vm::g_abi_machine, vm::mrb_class_id(counter_class),
+        vm::intern_symbol("html"), -1);
+    vm::state_fail_capacity(vm::g_abi_pool, vm::CapacityResource.StateBytes,
+        64, 8388544, 8388608);
+    vm::g_abi_machine.error = vm::VmError.StateCapacity;
+    vm::abi_record_vm_error(vm::g_abi_machine);
+    t.assert_eq("Counter#html: state bytes exhausted (requested 64, used 8388544 of 8388608)",
+        vm::abi_last_error());
+
+    vm::vm_begin_entry(vm::g_abi_machine);
+    t.assert_false(vm::g_abi_pool.failure.active);
+    t.assert_eq(vm::CapacityResource.None, vm::g_abi_machine.error_context.capacity_resource);
     vm::abi_close();
 }
 

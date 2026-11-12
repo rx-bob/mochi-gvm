@@ -83,15 +83,14 @@ fn abi_format_error_context() -> u8[>..] {
         }
         text.append(": ");
     }
-    if g_abi_machine.error_context.scratch_resource != ScratchResource.None {
-        text.append("scratch ");
-        text.append(scratch_resource_name(g_abi_machine.error_context.scratch_resource));
+    if g_abi_machine.error_context.capacity_resource != CapacityResource.None {
+        text.append(capacity_resource_name(g_abi_machine.error_context.capacity_resource));
         text.append(" exhausted (requested ");
-        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_requested);
+        mrb_format_fixnum(text, g_abi_machine.error_context.capacity_requested);
         text.append(", used ");
-        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_used);
+        mrb_format_fixnum(text, g_abi_machine.error_context.capacity_used);
         text.append(" of ");
-        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_capacity);
+        mrb_format_fixnum(text, g_abi_machine.error_context.capacity_limit);
         text.append(")");
         return text;
     }
@@ -105,6 +104,9 @@ fn abi_format_error_context() -> u8[>..] {
 
 fn abi_record_vm_error(machine: Vm&) {
     if machine.error != VmError.Ok {
+        if machine.error == VmError.StateCapacity || machine.error == VmError.IvarCapacity {
+            vm_absorb_state_failure(machine, -1);
+        }
         abi_fail(abi_format_error_context());
     }
 }
@@ -199,7 +201,10 @@ fn abi_define_class(name_symbol: u32, superclass_id: u32) -> u32 {
         return existing;
     }
     if state_class_count(g_abi_pool) >= MAX_STATE_CLASSES {
-        abi_fail("class capacity exceeded");
+        state_fail_capacity(g_abi_pool, CapacityResource.Classes, 1,
+            state_class_count(g_abi_pool), MAX_STATE_CLASSES);
+        g_abi_machine.error = VmError.StateCapacity;
+        abi_record_vm_error(g_abi_machine);
         return NULL_CLASS_ID;
     }
     return state_define_class(g_abi_pool, name_symbol, superclass_id);
@@ -219,7 +224,16 @@ fn abi_load_irep(bytes: const u8[:]) -> i64 {
     g_abi_file.data = "";
     let offset = g_abi_bytecode.len;
     if offset + bytes.len > ABI_MAX_BYTECODE {
-        abi_fail("bytecode capacity exceeded");
+        g_abi_pool.failure = CapacityFailure {
+            resource: CapacityResource.AbiBytecode,
+            requested: bytes.len,
+            used: offset,
+            capacity: ABI_MAX_BYTECODE,
+            active: true,
+        };
+        vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
+        g_abi_machine.error = VmError.StateCapacity;
+        abi_record_vm_error(g_abi_machine);
         return 1;
     }
     g_abi_bytecode.append(bytes);
@@ -352,6 +366,9 @@ fn abi_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
     let result = vm_call_args(g_abi_machine, receiver, method_symbol, g_abi_call_args[..argc]);
     abi_record_call_context(receiver, method_symbol);
     abi_record_vm_error(g_abi_machine);
+    if g_abi_machine.error != VmError.Ok {
+        vm_end_entry(g_abi_machine);
+    }
     return result;
 }
 
@@ -391,6 +408,9 @@ fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
     let result = vm_call_args_prepared(g_abi_machine, receiver, method_symbol, args[..]);
     abi_record_call_context(receiver, method_symbol);
     abi_record_vm_error(g_abi_machine);
+    if g_abi_machine.error != VmError.Ok {
+        vm_end_entry(g_abi_machine);
+    }
     return result;
 }
 
@@ -425,7 +445,7 @@ fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i
     if result != 0 {
         let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
         if is_instance {
-            vm_set_error_context(g_abi_machine, class_id, NULL_SYMBOL, binding_id);
+            vm_set_error_context(g_abi_machine, class_id, getter_symbol, binding_id);
         }
         g_abi_machine.error = VmError.StateCapacity;
         abi_record_vm_error(g_abi_machine);
@@ -491,7 +511,15 @@ fn abi_make_string(bytes: const u8[:]) -> u64 {
     abi_clear_error();
     if !state_has_object_capacity(g_abi_pool)
         || !state_has_byte_capacity(g_abi_pool, bytes.len) {
-        abi_fail("state string capacity exceeded");
+        if !state_has_object_capacity(g_abi_pool) {
+            state_fail_capacity(g_abi_pool, CapacityResource.StateObjects, 1,
+                state_object_count(g_abi_pool), MAX_STATE_OBJECTS);
+        } else {
+            state_fail_capacity(g_abi_pool, CapacityResource.StateBytes, bytes.len,
+                state_bytes_used(g_abi_pool), MAX_STATE_BYTES);
+        }
+        g_abi_machine.error = VmError.StateCapacity;
+        abi_record_vm_error(g_abi_machine);
         return mrb_nil();
     }
     return state_alloc_string(g_abi_pool, bytes);
@@ -709,6 +737,7 @@ fn abi_deliver_host_result(
     vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
     abi_record_call_context(instance, callback_symbol);
     abi_record_vm_error(g_abi_machine);
+    vm_end_entry(g_abi_machine);
     if g_abi_machine.error != VmError.Ok {
         return -1;
     }
@@ -765,6 +794,7 @@ fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:])
     vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
     abi_record_call_context(instance, callback_symbol);
     abi_record_vm_error(g_abi_machine);
+    vm_end_entry(g_abi_machine);
     if g_abi_machine.error != VmError.Ok {
         return -1;
     }
@@ -998,12 +1028,15 @@ export fn goose_vm_set_ivar_string(
         return -1;
     }
     if !state_set_ivar(g_abi_pool, g_abi_scratch, instance, sym, str_val) {
-        if g_abi_pool.error == VmError.IvarCapacity {
-            abi_fail("ivar capacity exceeded");
-        } else if g_abi_pool.error == VmError.StateCapacity {
-            abi_fail("state capacity exceeded");
-        } else {
+        if g_abi_pool.error == VmError.Ok {
             abi_fail("unknown component instance");
+        } else {
+            g_abi_machine.error = g_abi_pool.error;
+            let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
+            if is_instance {
+                vm_set_error_context(g_abi_machine, class_id, NULL_SYMBOL, -1);
+            }
+            abi_record_vm_error(g_abi_machine);
         }
         return -1;
     }

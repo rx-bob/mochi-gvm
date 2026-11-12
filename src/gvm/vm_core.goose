@@ -200,6 +200,9 @@ fn vm_step_execute(pc: i64, child_index: i64, target: MrbValue, dst_register: i6
 // Records `err` and stops the current frame without aborting the process.
 fn vm_fail(machine: Vm&, err: VmError, pc: i64) -> Step {
     machine.error = err;
+    if err == VmError.StateCapacity || err == VmError.IvarCapacity {
+        vm_absorb_state_failure(machine, -1);
+    }
     return vm_step_stop(pc);
 }
 
@@ -230,7 +233,7 @@ fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError
 fn vm_begin_entry(machine: Vm&) {
     machine.error = VmError.Ok;
     vm_set_error_context(machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
-    vm_clear_scratch_failure(machine);
+    vm_clear_entry_capacity_failure(machine);
     machine.pool.error = VmError.Ok;
     machine.regs.clear();
     machine.frames.clear();

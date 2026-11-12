@@ -157,6 +157,15 @@ fn state_append_ivar_slot(pool: StatePool&, object_index: i64, key: u32, value: 
     let bit_index = pool.objects[object_index].ivar_count;
     if bit_index >= MAX_TRACKED_IVARS {
         pool.error = VmError.IvarCapacity;
+        if !pool.failure.active {
+            pool.failure = CapacityFailure {
+                resource: CapacityResource.IvarsPerObject,
+                requested: 1,
+                used: bit_index,
+                capacity: MAX_TRACKED_IVARS,
+                active: true,
+            };
+        }
         return -1;
     }
     var slot_index = -1;
@@ -165,7 +174,8 @@ fn state_append_ivar_slot(pool: StatePool&, object_index: i64, key: u32, value: 
         pool.free_ivars.pop();
     } else {
         if pool.ivars.len >= MAX_STATE_IVARS {
-            pool.error = VmError.StateCapacity;
+            state_fail_capacity(pool, CapacityResource.StateIvars, 1, pool.ivars.len,
+                MAX_STATE_IVARS);
             return -1;
         }
         slot_index = pool.ivars.len;

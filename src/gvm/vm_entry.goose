@@ -64,6 +64,54 @@ fn vm_apply_component_props(
     return true;
 }
 
+fn vm_component_registration_failed(machine: Vm&, instance: MrbValue) -> MrbValue {
+    machine.error = machine.pool.error;
+    if machine.error == VmError.Ok {
+        machine.error = VmError.StateCapacity;
+    }
+    return vm_rollback_mount(machine, instance);
+}
+
+fn vm_rollback_mount(machine: Vm&, instance: MrbValue) -> MrbValue {
+    vm_end_entry(machine);
+    vm_dispose_instance(machine, instance);
+    return mrb_nil();
+}
+
+fn vm_prepare_mount_props(
+    machine: Vm&, props_json: const u8[:], props: MrbValue&, restore_props: MrbValue&
+) -> bool {
+    props = builtin_hash_new(machine.scratch);
+    restore_props = props;
+    if props_json.len == 0 {
+        return true;
+    }
+    let parsed, parsed_ok = json_parse_document(machine.pool, machine.scratch, props_json);
+    if !parsed_ok || !vm_is_hash_value(machine, parsed) {
+        machine.error = VmError.TypeMismatch;
+        return false;
+    }
+    props = promote_to_state(machine.pool, machine.scratch, parsed);
+    if !mrb_is_state(props) || machine.pool.error != VmError.Ok {
+        machine.error = VmError.StateCapacity;
+        if machine.pool.error != VmError.Ok {
+            machine.error = machine.pool.error;
+        }
+        return false;
+    }
+    // Keep an independent input snapshot because initialize can mutate nested
+    // collections in the first promoted copy.
+    restore_props = promote_to_state(machine.pool, machine.scratch, parsed);
+    if !mrb_is_state(restore_props) || machine.pool.error != VmError.Ok {
+        machine.error = VmError.StateCapacity;
+        if machine.pool.error != VmError.Ok {
+            machine.error = machine.pool.error;
+        }
+        return false;
+    }
+    return true;
+}
+
 // Creates a state instance of `class_sym` and runs its `initialize` method with
 // no arguments. The returned instance is durable state, so the tick arena is
 // released before returning.
@@ -103,41 +151,14 @@ fn vm_instantiate_with_props(
         vm_end_entry(machine);
         return mrb_nil();
     }
-    assert(state_register_component(machine.pool, instance));
+    if !state_register_component(machine.pool, instance) {
+        return vm_component_registration_failed(machine, instance);
+    }
 
-    var props = builtin_hash_new(machine.scratch);
-    var restore_props = props;
-    if props_json.len > 0 {
-        let parsed, parsed_ok = json_parse_document(machine.pool, machine.scratch, props_json);
-        if !parsed_ok || !vm_is_hash_value(machine, parsed) {
-            machine.error = VmError.TypeMismatch;
-            vm_end_entry(machine);
-            vm_dispose_instance(machine, instance);
-            return mrb_nil();
-        }
-        props = promote_to_state(machine.pool, machine.scratch, parsed);
-        if !mrb_is_state(props) || machine.pool.error != VmError.Ok {
-            machine.error = VmError.StateCapacity;
-            if machine.pool.error != VmError.Ok {
-                machine.error = machine.pool.error;
-            }
-            vm_end_entry(machine);
-            vm_dispose_instance(machine, instance);
-            return mrb_nil();
-        }
-        // Promote an independent second copy from the untouched scratch hash.
-        // `initialize` may mutate the arrays/hashes reached through the first
-        // copy in place, so restoring the same handle would not undo it.
-        restore_props = promote_to_state(machine.pool, machine.scratch, parsed);
-        if !mrb_is_state(restore_props) || machine.pool.error != VmError.Ok {
-            machine.error = VmError.StateCapacity;
-            if machine.pool.error != VmError.Ok {
-                machine.error = machine.pool.error;
-            }
-            vm_end_entry(machine);
-            vm_dispose_instance(machine, instance);
-            return mrb_nil();
-        }
+    var props = mrb_nil();
+    var restore_props = mrb_nil();
+    if !vm_prepare_mount_props(machine, props_json, props, restore_props) {
+        return vm_rollback_mount(machine, instance);
     }
 
     // Both promoted snapshots are ordinary locals, so the collector cannot
@@ -147,9 +168,7 @@ fn vm_instantiate_with_props(
     machine.entry_args.push(restore_props);
 
     if !vm_apply_component_props(machine, instance, props, true) {
-        vm_end_entry(machine);
-        vm_dispose_instance(machine, instance);
-        return mrb_nil();
+        return vm_rollback_mount(machine, instance);
     }
 
     let initialize_symbol = intern_symbol("initialize");
@@ -163,9 +182,7 @@ fn vm_instantiate_with_props(
     // mutation, so a mount always starts from the resolved snapshot.
     if machine.error == VmError.Ok {
         if !vm_apply_component_props(machine, instance, restore_props, true) {
-            vm_end_entry(machine);
-            vm_dispose_instance(machine, instance);
-            return mrb_nil();
+            return vm_rollback_mount(machine, instance);
         }
     }
     vm_end_entry(machine);
