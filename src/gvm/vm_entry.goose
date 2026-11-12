@@ -140,6 +140,12 @@ fn vm_instantiate_with_props(
         }
     }
 
+    // Both promoted snapshots are ordinary locals, so the collector cannot
+    // see them while initialize executes between the two generated prop calls.
+    // Keep them in the host-entry root set until vm_end_entry clears it.
+    machine.entry_args.push(props);
+    machine.entry_args.push(restore_props);
+
     if !vm_apply_component_props(machine, instance, props, true) {
         vm_end_entry(machine);
         vm_dispose_instance(machine, instance);

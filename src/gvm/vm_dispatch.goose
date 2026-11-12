@@ -386,6 +386,13 @@ fn vm_op_send(
     }
     let result, handled = vm_call_builtin(machine, receiver, symbol, args[..]);
     if !handled {
+        // Preserve the caller class while naming the unresolved dispatch target
+        // in the existing error context. This makes generated-method failures
+        // distinguish a missing nested builtin from a missing generated method.
+        let context_class = machine.error_context.class_id;
+        if context_class != NULL_CLASS_ID {
+            vm_set_error_context(machine, context_class, symbol, machine.error_context.binding_id);
+        }
         return vm_fail(machine, VmError.NoMethod, pc + count);
     }
     if !vm_write_register(machine, record, frame.base, ops.a, result) {

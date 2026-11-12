@@ -108,6 +108,61 @@ fn test_abi_mounts_typed_props_with_defaults(t: goosetest::Test&) {
     vm::abi_close();
 }
 
+fn test_abi_repeat_prop_mounts(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
+    let klass = vm::abi_const_get(vm::intern_symbol("PropsComponent"));
+    var instances: u64[5] = [0, 0, 0, 0, 0];
+    var index = 0;
+    while index < 5 {
+        let label = if index == 0 {
+            "A"
+        } else if index == 1 {
+            "B"
+        } else if index == 2 {
+            "C"
+        } else if index == 3 {
+            "D"
+        } else {
+            "E"
+        };
+        let payload: const u8[:] = if index == 0 {
+            "{\"label\":\"A\",\"count\":20,\"flag\":true,\"note\":\"n0\"}"
+        } else if index == 1 {
+            "{\"label\":\"B\",\"count\":21,\"flag\":true,\"note\":\"n1\"}"
+        } else if index == 2 {
+            "{\"label\":\"C\",\"count\":22,\"flag\":true,\"note\":\"n2\"}"
+        } else if index == 3 {
+            "{\"label\":\"D\",\"count\":23,\"flag\":true,\"note\":\"n3\"}"
+        } else {
+            "{\"label\":\"E\",\"count\":24,\"flag\":true,\"note\":\"n4\"}"
+        };
+        let instance = vm::abi_obj_new_with_props(vm::mrb_class_id(klass), payload);
+        if !vm::mrb_is_state(instance) {
+            t.assert_true(false, vm::abi_last_error());
+        }
+        t.assert_true(vm::mrb_is_state(instance), "every repeated typed-prop mount succeeds");
+        t.assert_false(vm::abi_has_error());
+        t.assert_eq(label, call_string(instance, "label"));
+        t.assert_eq(20 + index, call_fixnum(instance, "count"));
+        instances[index] = instance;
+        index += 1;
+    }
+    t.assert_eq(0, vm::goose_vm_set_props_json(instances[0], "{\"rows\":[1]}"));
+    t.assert_eq("[1]", call_json(instances[0], "rows"));
+    index = 1;
+    while index < 5 {
+        t.assert_eq("[]", call_json(instances[index], "rows"));
+        index += 1;
+    }
+    index = 0;
+    while index < 5 {
+        t.assert_eq(0, vm::abi_unregister_component(instances[index]));
+        index += 1;
+    }
+    vm::abi_close();
+}
+
 fn test_abi_mounts_typed_props_before_initialize(t: goosetest::Test&) {
     vm::abi_open();
     t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
@@ -456,7 +511,7 @@ fn test_abi_failed_initialize_rolls_back_mount(t: goosetest::Test&) {
     let failed = vm::abi_obj_new(vm::mrb_class_id(failing_class));
     t.assert_true(vm::mrb_is_nil(failed));
     t.assert_true(vm::abi_has_error());
-    t.assert_eq("FailingInit#initialize: unknown method", vm::abi_last_error());
+    t.assert_eq("FailingInit#missing_helper: unknown method", vm::abi_last_error());
     t.assert_eq(0, vm::abi_binding_count());
     t.assert_eq(0, vm::abi_component_count());
 
