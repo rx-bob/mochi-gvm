@@ -52,6 +52,44 @@ fn test_host_storage_roundtrip_and_outbox(t: goosetest::Test&) {
     let fallback, fb_ok = vm::vm_call_mochi_builtin(machine, "storage_get", def_args[..]);
     t.assert_true(fb_ok);
     t.assert_eq("fallback", vm::builtin_string_bytes(pool, scratch, fallback));
+
+    vm::goose_vm_seed_storage("exported", "dark");
+    vm::goose_vm_remove_storage("exported");
+    let export_args: vm::MrbValue[2] = [
+        vm::scratch_alloc_string(scratch, "exported"),
+        vm::scratch_alloc_string(scratch, "absent"),
+    ];
+    let absent, absent_ok = vm::vm_call_mochi_builtin(machine, "storage_get", export_args[..]);
+    t.assert_true(absent_ok);
+    t.assert_eq("absent", vm::builtin_string_bytes(pool, scratch, absent));
+}
+
+fn test_host_storage_subscribe_requires_instance(t: goosetest::Test&) {
+    vm::host_reset();
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+
+    let sub_args: vm::MrbValue[2] = [
+        vm::scratch_alloc_string(scratch, "cowboy_theme"),
+        vm::scratch_alloc_string(scratch, "on_theme"),
+    ];
+    let sub_val, sub_ok = vm::vm_call_mochi_builtin(machine, "storage_subscribe", sub_args[..]);
+    t.assert_true(sub_ok);
+    t.assert_true(vm::mrb_is_false(sub_val));
+    t.assert_eq(0, vm::goose_vm_host_outbox().len);
 }
 
 fn test_host_focus_commands(t: goosetest::Test&) {

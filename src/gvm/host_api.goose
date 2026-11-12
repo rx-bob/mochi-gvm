@@ -180,6 +180,27 @@ fn vm_call_mochi_storage(
         g_host_outbox.append("}\n");
         return mrb_true(), true;
     }
+    if name == "storage_subscribe" && args.len >= 2 {
+        let instance, has_instance = host_current_instance(machine);
+        if !has_instance {
+            return mrb_false(), true;
+        }
+        var kbuf: u8[>..] = [];
+        var cbuf: u8[>..] = [];
+        let key = host_arg_text(machine, args[0], kbuf);
+        let callback = host_arg_text(machine, args[1], cbuf);
+        if key.len == 0 || callback.len == 0 {
+            return mrb_false(), true;
+        }
+        g_host_outbox.append("{\"__host\":\"storage_subscribe\",\"key\":");
+        host_append_json_escaped(g_host_outbox, key);
+        g_host_outbox.append(",\"instance\":\"");
+        mrb_format_fixnum(g_host_outbox, instance as!i64);
+        g_host_outbox.append("\",\"callback\":");
+        host_append_json_escaped(g_host_outbox, callback);
+        g_host_outbox.append("}\n");
+        return mrb_true(), true;
+    }
     return mrb_nil(), false;
 }
 
@@ -336,6 +357,10 @@ fn vm_call_mochi_builtin(
 
 export fn goose_vm_seed_storage(key: const u8[:], value: const u8[:]) {
     host_storage_put_raw(key, value);
+}
+
+export fn goose_vm_remove_storage(key: const u8[:]) {
+    host_storage_remove_raw(key);
 }
 
 export fn goose_vm_set_route_state(path: const u8[:]) {
