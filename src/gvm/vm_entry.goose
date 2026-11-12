@@ -1,11 +1,38 @@
 // Host entrypoints for instantiating components and invoking their methods.
 namespace vm;
 
+import.signals;
 import.state_pool;
+import.state_reclaim;
 import.value_arena;
 import.vm_core;
 import.vm_methods;
 import.vm_ops;
+
+// Releases the registrations created for one instance. Classes and IREP stay
+// resident; the instance header itself is reclaimed by the collector once no
+// root or reachable collection refers to it. Repeated disposal is safe.
+fn vm_dispose_instance(machine: Vm&, instance: MrbValue) -> bool {
+    let object, ok = state_object(machine.pool, instance);
+    if !ok {
+        // A second unmount of an already reclaimed handle is still a successful
+        // no-op; the handle cannot name a live object any more.
+        return state_instance_disposed(machine.pool, instance);
+    }
+    if object.kind != ArenaObjectKind.Instance {
+        return false;
+    }
+    binding_unregister_all(machine.pool, instance);
+    state_unregister_component(machine.pool, instance);
+    state_mark_instance_disposed(machine.pool, instance);
+    // Reclaim immediately when this host entry owns no frames. A collection
+    // shared with another component stays reachable from that component's root.
+    if machine.frames.len == 0 && machine.regs.len == 0
+        && machine.entry_args.len == 0 && machine.pool.tracking_instance_index < 0 {
+        gc_collect(machine);
+    }
+    return true;
+}
 
 // Creates a state instance of `class_sym` and runs its `initialize` method with
 // no arguments. The returned instance is durable state, so the tick arena is
@@ -23,14 +50,30 @@ fn vm_instantiate(machine: Vm&, class_sym: u32) -> MrbValue {
         vm_end_entry(machine);
         return mrb_nil();
     }
+    // Even an allocation failure before `initialize` runs belongs to this
+    // component, so the host never reports a bare "component mount failed".
+    vm_set_error_context(machine, class_id, NULL_SYMBOL, -1);
     let instance = state_alloc_instance(machine.pool, class_id);
+    if !mrb_is_state(instance) {
+        machine.error = VmError.StateCapacity;
+        if machine.pool.error != VmError.Ok {
+            machine.error = machine.pool.error;
+        }
+        vm_end_entry(machine);
+        return mrb_nil();
+    }
     assert(state_register_component(machine.pool, instance));
-    let irep, has_initialize = vm_lookup_method(machine, class_id, intern_symbol("initialize"));
+    let initialize_symbol = intern_symbol("initialize");
+    let irep, has_initialize = vm_lookup_method(machine, class_id, initialize_symbol);
     if has_initialize {
+        vm_set_error_context(machine, class_id, initialize_symbol, -1);
         vm_exec(machine, irep, instance, -1);
     }
     vm_end_entry(machine);
     if machine.error != VmError.Ok {
+        // A failed initialize is a failed mount: its bindings and component
+        // root must not survive as a half-live instance.
+        vm_dispose_instance(machine, instance);
         return mrb_nil();
     }
     return instance;
@@ -67,6 +110,11 @@ fn vm_call_args(
 fn vm_call_args_prepared(
     machine: Vm&, receiver: MrbValue, method_sym: u32, args: MrbValue[:]
 ) -> MrbValue {
+    if state_instance_disposed(machine.pool, receiver) {
+        machine.error = VmError.Disposed;
+        vm_end_entry(machine);
+        return mrb_nil();
+    }
     let class_id, is_instance = vm_owner_class_id(machine, receiver);
     if !is_instance {
         machine.error = VmError.BadReceiver;
@@ -86,7 +134,11 @@ fn vm_call_args_prepared(
         }
         return native_result;
     }
+    for value in args {
+        machine.entry_args.push(value);
+    }
     vm_ensure_booted(machine);
+    machine.entry_args.clear();
     if machine.error != VmError.Ok {
         vm_end_entry(machine);
         return mrb_nil();

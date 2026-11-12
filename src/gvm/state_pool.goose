@@ -7,6 +7,7 @@
 namespace vm;
 
 import.ivar_mask;
+import.scratch_alloc;
 import.signals;
 import.value_arena;
 import.vm_core;
@@ -34,17 +35,40 @@ struct ConstEntry {
     value: MrbValue,
 }
 
+// One reclaimed string byte range. Adjacent ranges are coalesced on free so a
+// pool with `n` live strings keeps at most `n + 1` ranges.
+struct ByteRange {
+    offset: i64,
+    length: i64,
+}
+
 // Long-lived objects, classes and registered component roots. The VM owns one
-// instance for its lifetime; unlike the scratch arena, this pool never resets.
+// instance for its lifetime. Storage is reused rather than grown forever:
+// `state_reclaim.goose` frees unreachable headers, ivars, slots and string
+// ranges into the free lists below at safe VM boundaries.
 root struct StatePool {
     classes: ClassDef[>..] = [],
     consts: ConstEntry[>..] = [],
     objects: ArenaObject[>..] = [],
     ivars: IvarSlot[>..] = [],
     slots: ArenaSlot[>..] = [],
-    components: u32[>..] = [],
+    components: MrbValue[>..] = [],
     bindings: BindingEntry[>..] = [],
     blob: u8[>..] = [],
+    free_objects: i64[>..] = [],
+    free_ivars: i64[>..] = [],
+    free_slots: i64[>..] = [],
+    // String bytes use first-fit reuse without compaction. Adjacent ranges are
+    // coalesced on free, so the list is bounded by the live string count. The
+    // collector runs at most one allocation interval (64 objects) after a value
+    // becomes garbage; that interval plus the live graph is the retention bound.
+    free_bytes: ByteRange[>..] = [],
+    // One mark word per object header. `mark_epoch` advances per collection so
+    // marking never has to clear the whole table.
+    marks: u32[>..] = [],
+    mark_epoch: u32 = 0,
+    mark_stack: MrbValue[>..] = [],
+    allocations_since_collect: i64 = 0,
     // Signal tracking is global because at most one binding getter runs at a
     // time: reads of the tracked instance set their bits in `active_read_mask`
     // and writes set changed bits in the instance's `dirty_ivars`.
@@ -55,6 +79,7 @@ root struct StatePool {
         w3: 0,
     },
     tracking_instance_index: i64 = -1,
+    tracking_instance_generation: u16 = 0,
     // Capacity failures are reported here because the state layer has no `Vm`
     // handle. `vm_begin_entry` clears it before every host call.
     error: VmError = VmError.Ok,
@@ -84,10 +109,45 @@ fn state_component_count(pool: StatePool&) -> i64 {
     return pool.components.len;
 }
 
+// Number of headers currently holding a live object. `state_object_count`
+// remains the table high-water mark used to prove bounded reuse.
+fn state_allocated_object_count(pool: StatePool&) -> i64 {
+    return pool.objects.len - pool.free_objects.len;
+}
+
+fn state_free_object_count(pool: StatePool&) -> i64 {
+    return pool.free_objects.len;
+}
+
+fn state_free_byte_count(pool: StatePool&) -> i64 {
+    var total = 0;
+    for range in pool.free_bytes {
+        total += range.length;
+    }
+    return total;
+}
+
 fn state_component_at(pool: StatePool&, at: i64) -> MrbValue {
     assert(at >= 0);
     assert(at < pool.components.len);
-    return mrb_arena_value(MRB_ARENA_STATE, pool.components[at]);
+    return pool.components[at];
+}
+
+// True when one more object can be allocated without growing the table.
+fn state_has_object_capacity(pool: StatePool&) -> bool {
+    return pool.free_objects.len > 0 || pool.objects.len < MAX_STATE_OBJECTS;
+}
+
+fn state_has_byte_capacity(pool: StatePool&, length: i64) -> bool {
+    if length <= 0 {
+        return true;
+    }
+    for range in pool.free_bytes {
+        if range.length >= length {
+            return true;
+        }
+    }
+    return pool.blob.len + length <= MAX_STATE_BYTES;
 }
 
 // Appends a class definition and returns its immediate class ID.
@@ -134,29 +194,148 @@ fn state_get_const(pool: StatePool&, name_symbol: u32) -> MrbValue, bool {
     return mrb_nil(), false;
 }
 
-// Copies `text` into the persistent state blob and returns a state string.
-fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
-    assert(pool.objects.len < MAX_STATE_OBJECTS);
-    assert(pool.blob.len + text.len <= MAX_STATE_BYTES);
-    let offset = pool.blob.len;
-    pool.blob.append(text);
-    let index = pool.objects.len;
-    var object = empty_arena_object(ArenaObjectKind.String);
-    object.text_offset_bytes = offset;
-    object.text_length_bytes = text.len;
-    pool.objects.push(object);
-    return mrb_arena_value(MRB_ARENA_STATE, index as u32);
+// Removes one byte range from the free list, preserving order so coalescing
+// stays simple and deterministic.
+fn state_remove_free_byte(pool: StatePool&, at: i64) {
+    var cursor = at;
+    while cursor + 1 < pool.free_bytes.len {
+        pool.free_bytes[cursor] = pool.free_bytes[cursor + 1];
+        cursor += 1;
+    }
+    pool.free_bytes.pop();
 }
 
+// Allocates `length` bytes from a freed range or the blob high-water mark.
+// Returns -1 when the pool cannot satisfy the request without exceeding its
+// documented ceiling.
+fn state_blob_allocate(pool: StatePool&, length: i64) -> i64 {
+    if length <= 0 {
+        return 0;
+    }
+    var found = -1;
+    for index in 0..pool.free_bytes.len {
+        if pool.free_bytes[index].length >= length {
+            found = index;
+            break;
+        }
+    }
+    if found >= 0 {
+        let offset = pool.free_bytes[found].offset;
+        if pool.free_bytes[found].length == length {
+            state_remove_free_byte(pool, found);
+        } else {
+            pool.free_bytes[found].offset = offset + length;
+            pool.free_bytes[found].length -= length;
+        }
+        return offset;
+    }
+    if pool.blob.len + length > MAX_STATE_BYTES {
+        pool.error = VmError.StateCapacity;
+        return -1;
+    }
+    let offset = pool.blob.len;
+    var appended = 0;
+    while appended < length {
+        pool.blob.push(0);
+        appended += 1;
+    }
+    return offset;
+}
+
+// Returns a string's byte range to the free list and merges touching ranges.
+fn state_blob_free(pool: StatePool&, offset: i64, length: i64) {
+    if length <= 0 || offset < 0 {
+        return;
+    }
+    var at = 0;
+    while at < pool.free_bytes.len && pool.free_bytes[at].offset < offset {
+        at += 1;
+    }
+    pool.free_bytes.push(ByteRange {
+            offset: offset,
+            length: length,
+        });
+    var cursor = pool.free_bytes.len - 1;
+    while cursor > at {
+        pool.free_bytes[cursor] = pool.free_bytes[cursor - 1];
+        cursor -= 1;
+    }
+    pool.free_bytes[at] = ByteRange {
+        offset: offset,
+        length: length,
+    };
+    if at + 1 < pool.free_bytes.len
+        && pool.free_bytes[at].offset + pool.free_bytes[at].length == pool.free_bytes[at + 1].offset {
+        pool.free_bytes[at].length += pool.free_bytes[at + 1].length;
+        state_remove_free_byte(pool, at + 1);
+    }
+    if at > 0
+        && pool.free_bytes[at - 1].offset + pool.free_bytes[at - 1].length == pool.free_bytes[at].offset {
+        pool.free_bytes[at - 1].length += pool.free_bytes[at].length;
+        state_remove_free_byte(pool, at);
+    }
+}
+
+// Takes a header from the free list or grows the table. A reused header keeps
+// its generation, which the handle carries so stale references miss.
+fn state_take_object(pool: StatePool&, kind: ArenaObjectKind) -> i64 {
+    pool.allocations_since_collect += 1;
+    if pool.free_objects.len > 0 {
+        let index = pool.free_objects[pool.free_objects.len - 1];
+        pool.free_objects.pop();
+        let generation = pool.objects[index].generation;
+        var object = empty_arena_object(kind);
+        object.generation = generation;
+        pool.objects[index] = object;
+        return index;
+    }
+    if pool.objects.len >= MAX_STATE_OBJECTS {
+        pool.error = VmError.StateCapacity;
+        return -1;
+    }
+    let index = pool.objects.len;
+    pool.objects.push(empty_arena_object(kind));
+    pool.marks.push(0);
+    return index;
+}
+
+fn state_object_handle(pool: StatePool&, index: i64) -> MrbValue {
+    assert(index >= 0);
+    assert(index < pool.objects.len);
+    return mrb_arena_value_versioned(MRB_ARENA_STATE, index as u32, pool.objects[index].generation);
+}
+
+// Copies `text` into the persistent state blob and returns a state string.
+fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
+    let offset = state_blob_allocate(pool, text.len);
+    if offset < 0 {
+        return mrb_nil();
+    }
+    let index = state_take_object(pool, ArenaObjectKind.String);
+    if index < 0 {
+        state_blob_free(pool, offset, text.len);
+        return mrb_nil();
+    }
+    for at in 0..text.len {
+        pool.blob[offset + at] = text[at];
+    }
+    pool.objects[index].text_offset_bytes = offset;
+    pool.objects[index].text_length_bytes = text.len;
+    return state_object_handle(pool, index);
+}
+
+// Instances receive a header from the free list when one exists. Disposal
+// clears registration state; reclamation only frees the header once no root or
+// reachable collection refers to it.
 fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
     assert(class_id < pool.classes.len);
-    assert(pool.objects.len < MAX_STATE_OBJECTS);
     pool.error = VmError.Ok;
-    let index = pool.objects.len;
-    var object = empty_arena_object(ArenaObjectKind.Instance);
-    object.class_index = class_id;
-    pool.objects.push(object);
-    return mrb_arena_value(MRB_ARENA_STATE, index as u32);
+    let index = state_take_object(pool, ArenaObjectKind.Instance);
+    if index < 0 {
+        return mrb_nil();
+    }
+    pool.objects[index].class_index = class_id;
+    return state_object_handle(pool, index);
 }
 
 fn state_alloc_array(pool: StatePool&) -> MrbValue {
@@ -168,10 +347,11 @@ fn state_alloc_hash(pool: StatePool&) -> MrbValue {
 }
 
 fn state_alloc_collection(pool: StatePool&, kind: ArenaObjectKind) -> MrbValue {
-    assert(pool.objects.len < MAX_STATE_OBJECTS);
-    let index = pool.objects.len;
-    pool.objects.push(empty_arena_object(kind));
-    return mrb_arena_value(MRB_ARENA_STATE, index as u32);
+    let index = state_take_object(pool, kind);
+    if index < 0 {
+        return mrb_nil();
+    }
+    return state_object_handle(pool, index);
 }
 
 fn state_is_array(pool: StatePool&, value: MrbValue) -> bool {
@@ -184,21 +364,59 @@ fn state_is_hash(pool: StatePool&, value: MrbValue) -> bool {
     return ok && object.kind == ArenaObjectKind.Hash;
 }
 
+// Takes one array/hash slot node from the free list or grows the table.
+fn state_take_slot(pool: StatePool&) -> i64 {
+    if pool.free_slots.len > 0 {
+        let index = pool.free_slots[pool.free_slots.len - 1];
+        pool.free_slots.pop();
+        pool.slots[index].allocated = true;
+        return index;
+    }
+    if pool.slots.len >= MAX_STATE_SLOTS {
+        pool.error = VmError.StateCapacity;
+        return -1;
+    }
+    let index = pool.slots.len;
+    pool.slots.push(ArenaSlot {
+            key: mrb_nil(),
+            value: mrb_nil(),
+            previous_index: -1,
+            next_index: -1,
+            allocated: true,
+        });
+    return index;
+}
+
+fn state_release_slot(pool: StatePool&, slot_index: i64) {
+    if slot_index < 0 || slot_index >= pool.slots.len {
+        return;
+    }
+    pool.slots[slot_index].key = mrb_nil();
+    pool.slots[slot_index].value = mrb_nil();
+    pool.slots[slot_index].previous_index = -1;
+    pool.slots[slot_index].next_index = -1;
+    pool.slots[slot_index].allocated = false;
+    pool.free_slots.push(slot_index);
+}
+
 // Appends one slot to `object_index`'s linked list. Values must already be
 // promoted; callers that accept scratch values use `state_set_ivar` or the
 // high-level builtins, which promote before reaching this helper.
 fn state_append_slot(pool: StatePool&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
     assert(object_index >= 0);
     assert(object_index < pool.objects.len);
-    assert(pool.slots.len < MAX_STATE_SLOTS);
-    let slot_index = pool.slots.len;
+    let slot_index = state_take_slot(pool);
+    if slot_index < 0 {
+        return false;
+    }
     let previous = pool.objects[object_index].items_last_index;
-    pool.slots.push(ArenaSlot {
-            key: key,
-            value: value,
-            previous_index: previous,
-            next_index: -1,
-        });
+    pool.slots[slot_index] = ArenaSlot {
+        key: key,
+        value: value,
+        previous_index: previous,
+        next_index: -1,
+        allocated: true,
+    };
     if previous >= 0 {
         pool.slots[previous].next_index = slot_index;
     } else {
@@ -250,9 +468,7 @@ fn state_array_pop(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
     }
     pool.objects[object_index].items_last_index = previous;
     pool.objects[object_index].item_count -= 1;
-    if tail == pool.slots.len - 1 {
-        pool.slots.pop();
-    }
+    state_release_slot(pool, tail);
     state_mark_collection_mutated(pool, array);
     return value, true;
 }
@@ -368,7 +584,11 @@ fn state_object(pool: StatePool&, value: MrbValue) -> ArenaObject, bool {
     if index < 0 || index >= pool.objects.len {
         return empty_arena_object(ArenaObjectKind.String), false;
     }
-    return pool.objects[index], true;
+    let object = pool.objects[index];
+    if !object.allocated || object.generation != mrb_arena_generation(value) {
+        return empty_arena_object(ArenaObjectKind.String), false;
+    }
+    return object, true;
 }
 
 fn state_string_bytes(pool: StatePool&, value: MrbValue) -> const u8[:] {
@@ -390,15 +610,71 @@ fn state_register_component(pool: StatePool&, instance: MrbValue) -> bool {
     if !ok || object.kind != ArenaObjectKind.Instance {
         return false;
     }
-    let index = mrb_arena_index(instance);
     for component in pool.components {
-        if component == index {
+        if mrb_value_identical(component, instance) {
             return true;
         }
     }
     assert(pool.components.len < MAX_STATE_COMPONENTS);
-    pool.components.push(index);
+    pool.components.push(instance);
     return true;
+}
+
+// Removes an instance from the component root registry. Order is preserved so
+// `state_component_at` stays stable for observers, and repeated calls are
+// harmless.
+fn state_unregister_component(pool: StatePool&, instance: MrbValue) -> bool {
+    let object, ok = state_object(pool, instance);
+    if !ok || object.kind != ArenaObjectKind.Instance {
+        return false;
+    }
+    var at = 0;
+    while at < pool.components.len {
+        if mrb_value_identical(pool.components[at], instance) {
+            var cursor = at;
+            while cursor + 1 < pool.components.len {
+                pool.components[cursor] = pool.components[cursor + 1];
+                cursor += 1;
+            }
+            pool.components.pop();
+            return true;
+        }
+        at += 1;
+    }
+    return false;
+}
+
+// Marks the instance header as disposed. Reclamation frees the header and ivar
+// storage once no root or reachable collection refers to it, but no host entry
+// may use the disposed handle in the meantime.
+fn state_mark_instance_disposed(pool: StatePool&, instance: MrbValue) -> bool {
+    let object, ok = state_object(pool, instance);
+    if !ok || object.kind != ArenaObjectKind.Instance {
+        return false;
+    }
+    let index = mrb_arena_index(instance)as i64;
+    pool.objects[index].disposed = true;
+    pool.objects[index].dirty_ivars = mask_clear();
+    return true;
+}
+
+fn state_instance_disposed(pool: StatePool&, value: MrbValue) -> bool {
+    if !mrb_is_state(value) {
+        return false;
+    }
+    let index = mrb_arena_index(value)as i64;
+    if index < 0 || index >= pool.objects.len {
+        return false;
+    }
+    if !pool.objects[index].allocated
+        || pool.objects[index].generation != mrb_arena_generation(value) {
+        // A reclaimed header is indistinguishable from a disposed instance to a
+        // host that kept the old handle. Treat it as disposed so stale unmounts
+        // and callbacks fail with the same diagnostic instead of aliasing.
+        return true;
+    }
+    let object = pool.objects[index];
+    return object.kind == ArenaObjectKind.Instance && object.disposed;
 }
 
 // Deep-promotes any scratch value into the state pool. Immediates and state
@@ -430,6 +706,9 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
         },
         Instance => {
             let promoted = state_alloc_instance(pool, object.class_index);
+            if !mrb_is_state(promoted) {
+                return mrb_nil();
+            }
             let index = mrb_arena_index(promoted);
             var slot_index = object.ivar_head_index;
             while slot_index >= 0 {
@@ -442,6 +721,9 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
         },
         Array => {
             let promoted = state_alloc_array(pool);
+            if !mrb_is_state(promoted) {
+                return mrb_nil();
+            }
             var slot_index = object.items_first_index;
             while slot_index >= 0 {
                 let slot = scratch.slots[slot_index];
@@ -453,6 +735,9 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
         },
         Hash => {
             let promoted = state_alloc_hash(pool);
+            if !mrb_is_state(promoted) {
+                return mrb_nil();
+            }
             var slot_index = object.items_first_index;
             while slot_index >= 0 {
                 let slot = scratch.slots[slot_index];

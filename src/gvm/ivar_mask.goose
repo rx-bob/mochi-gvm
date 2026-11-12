@@ -7,6 +7,7 @@
 // test and setting a bit only touches the owning word.
 namespace vm;
 
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -94,6 +95,7 @@ fn state_tracking_begin(pool: StatePool&, instance: MrbValue) -> bool {
         return false;
     }
     pool.tracking_instance_index = mrb_arena_index(instance);
+    pool.tracking_instance_generation = mrb_arena_generation(instance);
     pool.active_read_mask = mask_clear();
     return true;
 }
@@ -103,6 +105,7 @@ fn state_tracking_end(pool: StatePool&) -> IvarMask {
     let mask = pool.active_read_mask;
     pool.active_read_mask = mask_clear();
     pool.tracking_instance_index = -1;
+    pool.tracking_instance_generation = 0;
     return mask;
 }
 
@@ -151,19 +154,36 @@ fn state_ivar_bit_index(pool: StatePool&, instance: MrbValue, key: u32) -> i64 {
 fn state_append_ivar_slot(pool: StatePool&, object_index: i64, key: u32, value: MrbValue) -> i64 {
     assert(object_index >= 0);
     assert(object_index < pool.objects.len);
-    assert(pool.ivars.len < MAX_STATE_IVARS);
     let bit_index = pool.objects[object_index].ivar_count;
     if bit_index >= MAX_TRACKED_IVARS {
         pool.error = VmError.IvarCapacity;
         return -1;
     }
-    let slot_index = pool.ivars.len;
-    pool.ivars.push(IvarSlot {
-            key: key,
-            bit_index: bit_index as u8,
-            value: value,
-            next_index: pool.objects[object_index].ivar_head_index,
-        });
+    var slot_index = -1;
+    if pool.free_ivars.len > 0 {
+        slot_index = pool.free_ivars[pool.free_ivars.len - 1];
+        pool.free_ivars.pop();
+    } else {
+        if pool.ivars.len >= MAX_STATE_IVARS {
+            pool.error = VmError.StateCapacity;
+            return -1;
+        }
+        slot_index = pool.ivars.len;
+        pool.ivars.push(IvarSlot {
+                key: key,
+                bit_index: 0,
+                value: mrb_nil(),
+                next_index: -1,
+                allocated: true,
+            });
+    }
+    pool.ivars[slot_index] = IvarSlot {
+        key: key,
+        bit_index: bit_index as u8,
+        value: value,
+        next_index: pool.objects[object_index].ivar_head_index,
+        allocated: true,
+    };
     pool.objects[object_index].ivar_head_index = slot_index;
     pool.objects[object_index].ivar_count += 1;
     return slot_index;

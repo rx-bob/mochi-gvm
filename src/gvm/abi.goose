@@ -11,8 +11,10 @@ import.host_api;
 import.ivar_mask;
 import.json_args;
 import.rite_types;
+import.scratch_alloc;
 import.signals;
 import.state_pool;
+import.state_reclaim;
 import.value_arena;
 import.vm_core;
 import.vm_entry;
@@ -66,14 +68,28 @@ fn abi_format_error_context() -> u8[>..] {
     let class_id = g_abi_machine.error_context.class_id;
     if class_id < state_class_count(g_abi_pool)as u32 {
         text.append(symbol_name(state_class_name_symbol(g_abi_pool, class_id)));
-        text.append("#");
-        text.append(symbol_name(g_abi_machine.error_context.method_symbol));
+        if g_abi_machine.error_context.method_symbol != NULL_SYMBOL {
+            text.append("#");
+            text.append(symbol_name(g_abi_machine.error_context.method_symbol));
+        }
         if g_abi_machine.error_context.binding_id >= 0 {
             text.append(" (binding ");
             mrb_format_fixnum(text, g_abi_machine.error_context.binding_id);
             text.append(")");
         }
         text.append(": ");
+    }
+    if g_abi_machine.error_context.scratch_resource != ScratchResource.None {
+        text.append("scratch ");
+        text.append(scratch_resource_name(g_abi_machine.error_context.scratch_resource));
+        text.append(" exhausted (requested ");
+        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_requested);
+        text.append(", used ");
+        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_used);
+        text.append(" of ");
+        mrb_format_fixnum(text, g_abi_machine.error_context.scratch_capacity);
+        text.append(")");
+        return text;
     }
     text.append(vm_error_name(g_abi_machine.error));
     return text;
@@ -82,6 +98,20 @@ fn abi_format_error_context() -> u8[>..] {
 fn abi_record_vm_error(machine: Vm&) {
     if machine.error != VmError.Ok {
         abi_fail(abi_format_error_context());
+    }
+}
+
+// The innermost executing method already claimed the context while unwinding.
+// Only fall back to the ABI entry point when that did not happen, so an
+// `initialize` failure is not relabelled as the `mounted` handler that called
+// into it.
+fn abi_record_call_context(receiver: u64, method_symbol: u32) {
+    if g_abi_machine.error_context.class_id != NULL_CLASS_ID {
+        return;
+    }
+    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
+    if is_instance {
+        vm_set_error_context(g_abi_machine, class_id, method_symbol, -1);
     }
 }
 
@@ -104,8 +134,17 @@ fn abi_reset() {
     g_abi_pool.components.clear();
     g_abi_pool.bindings.clear();
     g_abi_pool.blob.clear();
+    g_abi_pool.free_objects.clear();
+    g_abi_pool.free_ivars.clear();
+    g_abi_pool.free_slots.clear();
+    g_abi_pool.free_bytes.clear();
+    g_abi_pool.marks.clear();
+    g_abi_pool.mark_epoch = 0;
+    g_abi_pool.mark_stack.clear();
+    g_abi_pool.allocations_since_collect = 0;
     g_abi_pool.active_read_mask = mask_clear();
     g_abi_pool.tracking_instance_index = -1;
+    g_abi_pool.tracking_instance_generation = 0;
     g_abi_pool.error = VmError.Ok;
 
     scratch_reset(g_abi_scratch);
@@ -117,6 +156,8 @@ fn abi_reset() {
     g_abi_machine.native_methods.clear();
     g_abi_machine.regs.clear();
     g_abi_machine.frames.clear();
+    g_abi_machine.entry_args.clear();
+    g_abi_machine.scratch_roots.clear();
     g_abi_machine.booted_roots = 0;
     g_abi_machine.error = VmError.Ok;
     vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
@@ -192,6 +233,11 @@ fn abi_has_error() -> bool {
 }
 
 fn abi_intern(name: const u8[:]) -> u32 {
+    // Interning allocates only in the symbol table. It must not inherit the
+    // previous entry's error, or the bridge's `has_method` check would skip a
+    // real `mounted` callback because of an unrelated earlier failure.
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
     return intern_symbol(name);
 }
 
@@ -280,10 +326,7 @@ fn abi_call(receiver: u64, method_symbol: u32, argc: i64) -> u64 {
         return mrb_nil();
     }
     let result = vm_call_args(g_abi_machine, receiver, method_symbol, g_abi_call_args[..argc]);
-    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
-    if is_instance {
-        vm_set_error_context(g_abi_machine, class_id, method_symbol, -1);
-    }
+    abi_record_call_context(receiver, method_symbol);
     abi_record_vm_error(g_abi_machine);
     return result;
 }
@@ -322,10 +365,7 @@ fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
         return mrb_nil();
     }
     let result = vm_call_args_prepared(g_abi_machine, receiver, method_symbol, args[..]);
-    let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
-    if is_instance {
-        vm_set_error_context(g_abi_machine, class_id, method_symbol, -1);
-    }
+    abi_record_call_context(receiver, method_symbol);
     abi_record_vm_error(g_abi_machine);
     return result;
 }
@@ -335,6 +375,9 @@ fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
 fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
+    if state_instance_disposed(g_abi_pool, receiver) {
+        return false;
+    }
     let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
     if !is_instance {
         return false;
@@ -350,11 +393,54 @@ fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
 fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
+    if state_instance_disposed(g_abi_pool, instance) {
+        abi_fail("disposed instance");
+        return -1;
+    }
     let result = binding_register(g_abi_pool, instance, binding_id, getter_symbol);
     if result != 0 {
-        abi_fail("bad binding registration");
+        let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
+        if is_instance {
+            vm_set_error_context(g_abi_machine, class_id, NULL_SYMBOL, binding_id);
+        }
+        g_abi_machine.error = VmError.StateCapacity;
+        abi_record_vm_error(g_abi_machine);
     }
     return result;
+}
+
+// Removes one instance's bindings and component root. Class and IREP records
+// stay loaded because other instances and later mounts still use them.
+fn abi_unregister_component(instance: u64) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    if !vm_dispose_instance(g_abi_machine, instance) {
+        abi_fail("bad component instance");
+        return 1;
+    }
+    return 0;
+}
+
+fn abi_binding_count() -> i64 {
+    return g_abi_pool.bindings.len;
+}
+
+fn abi_component_count() -> i64 {
+    return g_abi_pool.components.len;
+}
+
+// Test/debug inspection of reclamation. These counts are not telemetry: the
+// loader reads them only from `debugStats` in lifetime tests.
+fn abi_state_object_count() -> i64 {
+    return state_object_count(g_abi_pool);
+}
+
+fn abi_state_allocated_count() -> i64 {
+    return state_allocated_object_count(g_abi_pool);
+}
+
+fn abi_state_free_bytes() -> i64 {
+    return state_free_byte_count(g_abi_pool);
 }
 
 // Flushes the instance's dirty bindings into the module patch buffer. The buffer
@@ -362,6 +448,7 @@ fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i
 fn abi_flush_patches(instance: u64) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
+    vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
     g_abi_patch_bytes.clear();
     let count = vm_flush_dirty_bindings(g_abi_machine, instance, g_abi_patch_bytes);
     abi_record_vm_error(g_abi_machine);
@@ -372,10 +459,14 @@ fn abi_patch_bytes() -> const u8[:] {
     return g_abi_patch_bytes[..];
 }
 
+// Creates a state string for the host. It is durable while reachable from a
+// component, constant, active frame or binding registration. A host that keeps
+// a raw handle across entries must store it in a component (the loader does this
+// for props) rather than rely on the handle alone.
 fn abi_make_string(bytes: const u8[:]) -> u64 {
     abi_clear_error();
-    if state_object_count(g_abi_pool) >= MAX_STATE_OBJECTS
-        || state_bytes_used(g_abi_pool) + bytes.len > MAX_STATE_BYTES {
+    if !state_has_object_capacity(g_abi_pool)
+        || !state_has_byte_capacity(g_abi_pool, bytes.len) {
         abi_fail("state string capacity exceeded");
         return mrb_nil();
     }
@@ -520,10 +611,7 @@ fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:])
     }
     let args: MrbValue[1] = [response];
     vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
-    let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
-    if is_instance {
-        vm_set_error_context(g_abi_machine, class_id, callback_symbol, -1);
-    }
+    abi_record_call_context(instance, callback_symbol);
     abi_record_vm_error(g_abi_machine);
     if g_abi_machine.error != VmError.Ok {
         return -1;
@@ -599,6 +687,30 @@ export fn goose_vm_register_binding(instance: u64, binding_id: u32, getter_symbo
     return abi_register_binding(instance, binding_id, getter_symbol);
 }
 
+export fn goose_vm_unregister_component(instance: u64) -> i64 {
+    return abi_unregister_component(instance);
+}
+
+export fn goose_vm_binding_count() -> i64 {
+    return abi_binding_count();
+}
+
+export fn goose_vm_component_count() -> i64 {
+    return abi_component_count();
+}
+
+export fn goose_vm_state_object_count() -> i64 {
+    return abi_state_object_count();
+}
+
+export fn goose_vm_state_allocated_count() -> i64 {
+    return abi_state_allocated_count();
+}
+
+export fn goose_vm_state_free_bytes() -> i64 {
+    return abi_state_free_bytes();
+}
+
 export fn goose_vm_flush_patches(instance: u64) -> i64 {
     return abi_flush_patches(instance);
 }
@@ -655,12 +767,32 @@ export fn goose_vm_deliver_fetch(
     return abi_deliver_fetch(instance, callback_symbol, envelope);
 }
 
+// Collects only when no VM frame or entry argument is live. Host mutations run
+// quiescent in normal use; a reentrant native callback skips reclamation rather
+// than collecting over an in-flight expression.
+fn abi_reclaim_quiescent() {
+    if g_abi_machine.frames.len == 0 && g_abi_machine.regs.len == 0
+        && g_abi_machine.entry_args.len == 0 {
+        gc_maybe_collect(g_abi_machine);
+    }
+}
+
+// Host attribute -> component prop setter. `0` means success and `-1` means
+// failure; the host reads the message through `goose_vm_last_error`. Writing a
+// value identical to the stored one is still success and marks no dirty bit,
+// so a host that echoes the current attribute cannot create an update loop.
 export fn goose_vm_set_ivar_string(
     instance: u64, name: const u8[:], value: const u8[:]
 ) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
+    g_abi_pool.error = VmError.Ok;
+    if state_instance_disposed(g_abi_pool, instance) {
+        abi_fail("disposed instance");
+        return -1;
+    }
     if name.len == 0 {
+        abi_fail("empty ivar name");
         return -1;
     }
     var ivar_name: u8[>..] = [];
@@ -674,8 +806,18 @@ export fn goose_vm_set_ivar_string(
         return -1;
     }
     if !state_set_ivar(g_abi_pool, g_abi_scratch, instance, sym, str_val) {
+        if g_abi_pool.error == VmError.IvarCapacity {
+            abi_fail("ivar capacity exceeded");
+        } else if g_abi_pool.error == VmError.StateCapacity {
+            abi_fail("state capacity exceeded");
+        } else {
+            abi_fail("unknown component instance");
+        }
         return -1;
     }
+    // String replacement is a host mutation; the stored value is rooted by the
+    // component, and quiescent reclamation can return the previous bytes.
+    abi_reclaim_quiescent();
     return 0;
 }
 

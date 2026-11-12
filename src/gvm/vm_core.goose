@@ -4,6 +4,7 @@ namespace vm;
 import.rite_parser;
 import.rite_pool;
 import.rite_types;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_errors;
@@ -140,6 +141,12 @@ root struct Vm {
     native_methods: NativeMethod[>..] = [],
     regs: MrbValue[..MAX_VM_REGS] = [],
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],
+    // Arguments are durable roots while the VM boots class bodies, before they
+    // are copied into a callee's register window.
+    entry_args: MrbValue[>..] = [],
+    // Helper-owned tick values held outside a register window (block
+    // accumulators such as `map` results) are roots for scratch reclamation.
+    scratch_roots: MrbValue[>..] = [],
     booted_roots: i64 = 0,
     error: VmError = VmError.Ok,
     error_context: ErrorContext = ErrorContext {
@@ -222,9 +229,12 @@ fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError
 fn vm_begin_entry(machine: Vm&) {
     machine.error = VmError.Ok;
     vm_set_error_context(machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
+    vm_clear_scratch_failure(machine);
     machine.pool.error = VmError.Ok;
     machine.regs.clear();
     machine.frames.clear();
+    machine.entry_args.clear();
+    machine.scratch_roots.clear();
     scratch_reset(machine.scratch);
 }
 
@@ -232,6 +242,8 @@ fn vm_begin_entry(machine: Vm&) {
 fn vm_end_entry(machine: Vm&) {
     machine.regs.clear();
     machine.frames.clear();
+    machine.entry_args.clear();
+    machine.scratch_roots.clear();
     scratch_reset(machine.scratch);
 }
 

@@ -8,6 +8,7 @@ namespace vm;
 
 import.collection_arena;
 import.rite_types;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 

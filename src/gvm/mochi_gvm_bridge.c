@@ -61,6 +61,12 @@ extern uint8_t goose_vm_has_method(uint64_t receiver, uint32_t method);
 extern int64_t goose_vm_method_req_argc(uint64_t receiver, uint32_t method);
 extern int64_t goose_vm_register_binding(uint64_t instance, uint32_t binding_id,
                                          uint32_t getter_symbol);
+extern int64_t goose_vm_unregister_component(uint64_t instance);
+extern int64_t goose_vm_binding_count(void);
+extern int64_t goose_vm_component_count(void);
+extern int64_t goose_vm_state_object_count(void);
+extern int64_t goose_vm_state_allocated_count(void);
+extern int64_t goose_vm_state_free_bytes(void);
 extern int64_t goose_vm_flush_patches(uint64_t instance);
 extern const uint8_t *goose_vm_patch_bytes(int64_t *out_len);
 extern uint8_t goose_vm_is_class(uint64_t value);
@@ -358,7 +364,8 @@ uint64_t mochi_mount_component(const uint8_t *name, int32_t length) {
   symbol = goose_vm_intern(slice_of(name, (size_t)length));
   class_value = goose_vm_const_get(symbol);
   if (!goose_vm_is_class(class_value)) {
-    set_error_text("unknown component class");
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("unknown component class");
     return 0;
   }
   klass = mrb_class_ptr(class_value);
@@ -368,7 +375,8 @@ uint64_t mochi_mount_component(const uint8_t *name, int32_t length) {
   }
   instance = mrb_obj_new(g_mrb, klass, 0, NULL);
   if (g_mrb->exc) {
-    set_error_text("component mount failed");
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("component mount failed");
     return 0;
   }
   return (uint64_t)instance;
@@ -386,8 +394,56 @@ int32_t mochi_register_binding(uint64_t instance, uint32_t binding_id,
   int64_t result;
   clear_error();
   result = goose_vm_register_binding(instance, binding_id, getter_symbol);
-  if (result != 0) set_error_text("binding registration failed");
+  if (result != 0) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("binding registration failed");
+  }
   return result == 0 ? 0 : -1;
+}
+
+/* unmount_component(instance): drops every binding and the component root
+ * registered for this instance. Safe to call twice; classes and IREPs stay
+ * loaded for other instances. */
+MOCHI_EXPORT
+int32_t mochi_unmount_component(uint64_t instance) {
+  int64_t result;
+  clear_error();
+  result = goose_vm_unregister_component(instance);
+  if (result != 0) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("unmount failed");
+  }
+  return result == 0 ? 0 : -1;
+}
+
+/* Test/debug registration counts. The loader uses them to prove that ordinary
+ * navigation returns to the active-screen baseline instead of growing. */
+MOCHI_EXPORT
+int32_t mochi_binding_count(void) {
+  return (int32_t)goose_vm_binding_count();
+}
+
+MOCHI_EXPORT
+int32_t mochi_component_count(void) {
+  return (int32_t)goose_vm_component_count();
+}
+
+/* Test/debug reclamation counts. `state_objects` is the table high-water mark,
+ * `state_allocated` includes headers not yet swept, and `state_free_bytes` is the
+ * reclaimed string range still available for reuse. */
+MOCHI_EXPORT
+int32_t mochi_state_object_count(void) {
+  return (int32_t)goose_vm_state_object_count();
+}
+
+MOCHI_EXPORT
+int32_t mochi_state_allocated_count(void) {
+  return (int32_t)goose_vm_state_allocated_count();
+}
+
+MOCHI_EXPORT
+int32_t mochi_state_free_bytes(void) {
+  return (int32_t)goose_vm_state_free_bytes();
 }
 
 /* dispatch_event(instance, method_symbol): runs the handler with no args.
@@ -544,14 +600,29 @@ void mochi_set_route_state(const uint8_t *path, int32_t path_len) {
   goose_vm_set_route_state(slice_of(path, (size_t)path_len));
 }
 
+/* set_ivar_string(instance, name, value) -> 0 on success, -1 on failure.
+ * The loader writes live child attributes through this entry; any value other
+ * than 0 is a failure and the detail is read through mochi_last_error_*. An
+ * identical value is still reported as success because the VM marks no dirty
+ * ivar for it. */
 MOCHI_EXPORT
 int32_t mochi_set_ivar_string(uint64_t instance, const uint8_t *name,
                               int32_t name_len, const uint8_t *val,
                               int32_t val_len) {
-  if (!name || name_len <= 0 || val_len < 0) return -1;
-  return (int32_t)goose_vm_set_ivar_string(
+  int64_t result;
+  clear_error();
+  if (!name || name_len <= 0 || val_len < 0) {
+    set_error_text("invalid ivar assignment");
+    return -1;
+  }
+  result = goose_vm_set_ivar_string(
       instance, slice_of(name, (size_t)name_len),
       slice_of(val ? val : (const uint8_t *)"", (size_t)val_len));
+  if (result != 0) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("ivar assignment failed");
+  }
+  return result == 0 ? 0 : -1;
 }
 
 MOCHI_EXPORT

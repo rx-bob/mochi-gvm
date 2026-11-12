@@ -3,6 +3,7 @@ namespace vm;
 
 import.builtins;
 import.rite_types;
+import.scratch_alloc;
 import.signals;
 import.state_pool;
 import.value_arena;

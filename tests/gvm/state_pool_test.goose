@@ -34,6 +34,31 @@ fn test_state_classes_and_component_registration(t: goosetest::Test&) {
     t.assert_eq(instance, vm::state_component_at(pool, 0));
 }
 
+fn test_state_unregister_component_is_safe(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    let class_id = vm::state_define_class(pool, 30, vm::NULL_CLASS_ID);
+    let first = vm::state_alloc_instance(pool, class_id);
+    let second = vm::state_alloc_instance(pool, class_id);
+    let third = vm::state_alloc_instance(pool, class_id);
+    t.assert_true(vm::state_register_component(pool, first));
+    t.assert_true(vm::state_register_component(pool, second));
+    t.assert_true(vm::state_register_component(pool, third));
+
+    t.assert_true(vm::state_unregister_component(pool, second));
+    t.assert_eq(2, vm::state_component_count(pool));
+    t.assert_eq(first, vm::state_component_at(pool, 0));
+    t.assert_eq(third, vm::state_component_at(pool, 1));
+
+    t.assert_false(vm::state_unregister_component(pool, second));
+    t.assert_true(vm::state_mark_instance_disposed(pool, second));
+    t.assert_true(vm::state_instance_disposed(pool, second));
+    t.assert_false(vm::state_instance_disposed(pool, first));
+    t.assert_true(vm::state_mark_instance_disposed(pool, second));
+    t.assert_false(vm::state_mark_instance_disposed(pool, vm::mrb_nil()));
+}
+
 fn test_state_hash_updates_existing_symbol_key(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

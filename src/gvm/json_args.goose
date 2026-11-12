@@ -9,6 +9,7 @@ namespace vm;
 
 import.builtins;
 import.collection_arena;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 

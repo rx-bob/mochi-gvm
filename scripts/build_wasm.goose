@@ -43,7 +43,11 @@ fn compile_bridge() {
     command.append("-sEXPORTED_FUNCTIONS='[\"_main\",");
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
     command.append("\"_mochi_mount_component\",\"_mochi_intern\",");
-    command.append("\"_mochi_register_binding\",\"_mochi_dispatch_event\",");
+    command.append("\"_mochi_register_binding\",\"_mochi_unmount_component\",");
+    command.append("\"_mochi_binding_count\",\"_mochi_component_count\",");
+    command.append("\"_mochi_state_object_count\",\"_mochi_state_allocated_count\",");
+    command.append("\"_mochi_state_free_bytes\",");
+    command.append("\"_mochi_dispatch_event\",");
     command.append("\"_mochi_dispatch_event_args\",");
     command.append("\"_mochi_has_method\",\"_goose_vm_has_method\",");
     command.append("\"_goose_vm_method_req_argc\",");

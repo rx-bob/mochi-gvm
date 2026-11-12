@@ -3,6 +3,7 @@ namespace vm;
 
 import.builtins;
 import.collection_arena;
+import.scratch_reclaim;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -36,23 +37,34 @@ recursive fn vm_invoke_block_args(
 recursive fn vm_iterate_array(
     machine: Vm&, array: MrbValue, closure: MrbValue, self_value: MrbValue, collect: bool
 ) -> MrbValue {
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, array);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
     let length = builtin_array_length(machine.pool, machine.scratch, array);
-    let mapped = builtin_array_new(machine.scratch);
+    var mapped = mrb_nil();
+    if collect {
+        mapped = builtin_array_new(machine.scratch);
+        scratch_root(machine, mapped);
+    }
     var index = 0;
     while index < length {
         let element = builtin_array_get(machine.pool, machine.scratch, array, index);
         let result = vm_invoke_block(machine, closure, self_value, element);
         if machine.error != VmError.Ok {
+            scratch_root_end(machine, root_mark);
             return mrb_nil();
         }
         if collect {
             if !builtin_array_push(machine.pool, machine.scratch, mapped, result) {
                 machine.error = VmError.TypeMismatch;
+                scratch_root_end(machine, root_mark);
                 return mrb_nil();
             }
         }
         index += 1;
     }
+    scratch_root_end(machine, root_mark);
     if collect {
         return mapped;
     }
@@ -62,13 +74,19 @@ recursive fn vm_iterate_array(
 recursive fn vm_filter_array(
     machine: Vm&, array: MrbValue, closure: MrbValue, self_value: MrbValue, keep_truthy: bool
 ) -> MrbValue {
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, array);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
     let length = builtin_array_length(machine.pool, machine.scratch, array);
     let out = builtin_array_new(machine.scratch);
+    scratch_root(machine, out);
     var index = 0;
     while index < length {
         let element = builtin_array_get(machine.pool, machine.scratch, array, index);
         let result = vm_invoke_block(machine, closure, self_value, element);
         if machine.error != VmError.Ok {
+            scratch_root_end(machine, root_mark);
             return mrb_nil();
         }
         if mrb_truthy(result) == keep_truthy {
@@ -76,69 +94,97 @@ recursive fn vm_filter_array(
         }
         index += 1;
     }
+    scratch_root_end(machine, root_mark);
     return out;
+}
+
+recursive fn vm_array_each_with_index(
+    machine: Vm&, array: MrbValue, closure: MrbValue, self_value: MrbValue
+) -> MrbValue {
+    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    var i = 0;
+    while i < length {
+        let el = builtin_array_get(machine.pool, machine.scratch, array, i);
+        let pair: MrbValue[2] = [el, mrb_fixnum(i)];
+        vm_invoke_block_args(machine, closure, self_value, pair[..]);
+        if machine.error != VmError.Ok {
+            return mrb_nil();
+        }
+        i += 1;
+    }
+    return array;
+}
+
+recursive fn vm_array_find_block(
+    machine: Vm&, array: MrbValue, closure: MrbValue, self_value: MrbValue
+) -> MrbValue {
+    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    var i = 0;
+    while i < length {
+        let el = builtin_array_get(machine.pool, machine.scratch, array, i);
+        let res = vm_invoke_block(machine, closure, self_value, el);
+        if machine.error != VmError.Ok {
+            return mrb_nil();
+        }
+        if mrb_truthy(res) {
+            return el;
+        }
+        i += 1;
+    }
+    return mrb_nil();
+}
+
+recursive fn vm_array_match_block(
+    machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue, self_value: MrbValue
+) -> MrbValue {
+    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    var matched = 0;
+    var i = 0;
+    while i < length {
+        let el = builtin_array_get(machine.pool, machine.scratch, array, i);
+        let res = vm_invoke_block(machine, closure, self_value, el);
+        if machine.error != VmError.Ok {
+            return mrb_nil();
+        }
+        if mrb_truthy(res) {
+            matched += 1;
+            if name == "any?" {
+                return mrb_true();
+            }
+        } else if name == "all?" {
+            return mrb_false();
+        }
+        i += 1;
+    }
+    if name == "any?" {
+        return mrb_false();
+    }
+    if name == "all?" {
+        return mrb_true();
+    }
+    return mrb_fixnum(matched);
 }
 
 recursive fn vm_array_block_ext(
     machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue, self_value: MrbValue
 ) -> MrbValue, bool {
-    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, array);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
+    var result = mrb_nil();
+    var handled = true;
     if name == "each_with_index" {
-        var i = 0;
-        while i < length {
-            let el = builtin_array_get(machine.pool, machine.scratch, array, i);
-            let pair: MrbValue[2] = [el, mrb_fixnum(i)];
-            vm_invoke_block_args(machine, closure, self_value, pair[..]);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            i += 1;
-        }
-        return array, true;
+        result = vm_array_each_with_index(machine, array, closure, self_value);
+    } else if name == "find" || name == "detect" {
+        result = vm_array_find_block(machine, array, closure, self_value);
+    } else if name == "any?" || name == "all?" || name == "count" {
+        result = vm_array_match_block(machine, array, name, closure, self_value);
+    } else {
+        handled = false;
     }
-    if name == "find" || name == "detect" {
-        var i = 0;
-        while i < length {
-            let el = builtin_array_get(machine.pool, machine.scratch, array, i);
-            let res = vm_invoke_block(machine, closure, self_value, el);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            if mrb_truthy(res) {
-                return el, true;
-            }
-            i += 1;
-        }
-        return mrb_nil(), true;
-    }
-    if name == "any?" || name == "all?" || name == "count" {
-        var matched = 0;
-        var i = 0;
-        while i < length {
-            let el = builtin_array_get(machine.pool, machine.scratch, array, i);
-            let res = vm_invoke_block(machine, closure, self_value, el);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            if mrb_truthy(res) {
-                matched += 1;
-                if name == "any?" {
-                    return mrb_true(), true;
-                }
-            } else if name == "all?" {
-                return mrb_false(), true;
-            }
-            i += 1;
-        }
-        if name == "any?" {
-            return mrb_false(), true;
-        }
-        if name == "all?" {
-            return mrb_true(), true;
-        }
-        return mrb_fixnum(matched), true;
-    }
-    return mrb_nil(), false;
+    scratch_root_end(machine, root_mark);
+    return result, handled;
 }
 
 fn vm_collect_hash_pairs(
@@ -174,61 +220,120 @@ fn vm_collect_hash_pairs(
     return keys, vals;
 }
 
+recursive fn vm_hash_each_block(
+    machine: Vm&, hash: MrbValue, closure: MrbValue, self_value: MrbValue
+) -> MrbValue {
+    var slot_index = -1;
+    if mrb_is_scratch(hash) {
+        let obj, ok = scratch_object(machine.scratch, hash);
+        if ok && obj.kind == ArenaObjectKind.Hash {
+            slot_index = obj.items_first_index;
+        }
+    } else if mrb_is_state(hash) {
+        let obj, ok = state_object(machine.pool, hash);
+        if ok && obj.kind == ArenaObjectKind.Hash {
+            slot_index = obj.items_first_index;
+        }
+    }
+    while slot_index >= 0 {
+        var key = mrb_nil();
+        var value = mrb_nil();
+        var next_index = -1;
+        if mrb_is_scratch(hash) {
+            key = machine.scratch.slots[slot_index].key;
+            value = machine.scratch.slots[slot_index].value;
+            next_index = machine.scratch.slots[slot_index].next_index;
+        } else {
+            key = machine.pool.slots[slot_index].key;
+            value = machine.pool.slots[slot_index].value;
+            next_index = machine.pool.slots[slot_index].next_index;
+        }
+        let pair: MrbValue[2] = [key, value];
+        vm_invoke_block_args(machine, closure, self_value, pair[..]);
+        if machine.error != VmError.Ok {
+            return mrb_nil();
+        }
+        slot_index = next_index;
+    }
+    return hash;
+}
+
+recursive fn vm_hash_select_block(
+    machine: Vm&, hash: MrbValue, closure: MrbValue, self_value: MrbValue, keep_truthy: bool
+) -> MrbValue {
+    let root_mark = scratch_root_begin(machine);
+    let keys, vals = vm_collect_hash_pairs(machine, hash);
+    scratch_root(machine, keys);
+    scratch_root(machine, vals);
+    let out = builtin_hash_new(machine.scratch);
+    scratch_root(machine, out);
+    let len = builtin_array_length(machine.pool, machine.scratch, keys);
+    var i = 0;
+    while i < len {
+        let k = builtin_array_get(machine.pool, machine.scratch, keys, i);
+        let v = builtin_array_get(machine.pool, machine.scratch, vals, i);
+        let pair: MrbValue[2] = [k, v];
+        let res = vm_invoke_block_args(machine, closure, self_value, pair[..]);
+        if machine.error != VmError.Ok {
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        if mrb_truthy(res) == keep_truthy {
+            builtin_hash_set(machine.pool, machine.scratch, out, k, v);
+        }
+        i += 1;
+    }
+    scratch_root_end(machine, root_mark);
+    return out;
+}
+
+recursive fn vm_hash_map_block(
+    machine: Vm&, hash: MrbValue, closure: MrbValue, self_value: MrbValue
+) -> MrbValue {
+    let root_mark = scratch_root_begin(machine);
+    let keys, vals = vm_collect_hash_pairs(machine, hash);
+    scratch_root(machine, keys);
+    scratch_root(machine, vals);
+    let out = builtin_array_new(machine.scratch);
+    scratch_root(machine, out);
+    let len = builtin_array_length(machine.pool, machine.scratch, keys);
+    var i = 0;
+    while i < len {
+        let k = builtin_array_get(machine.pool, machine.scratch, keys, i);
+        let v = builtin_array_get(machine.pool, machine.scratch, vals, i);
+        let pair: MrbValue[2] = [k, v];
+        let res = vm_invoke_block_args(machine, closure, self_value, pair[..]);
+        if machine.error != VmError.Ok {
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        builtin_array_push(machine.pool, machine.scratch, out, res);
+        i += 1;
+    }
+    scratch_root_end(machine, root_mark);
+    return out;
+}
+
 recursive fn vm_dispatch_hash_block(
     machine: Vm&, hash: MrbValue, name: u8[:], closure: MrbValue, self_value: MrbValue
 ) -> MrbValue, bool {
-    let keys, vals = vm_collect_hash_pairs(machine, hash);
-    let len = builtin_array_length(machine.pool, machine.scratch, keys);
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, hash);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
+    var result = mrb_nil();
+    var handled = true;
     if name == "each" {
-        var i = 0;
-        while i < len {
-            let k = builtin_array_get(machine.pool, machine.scratch, keys, i);
-            let v = builtin_array_get(machine.pool, machine.scratch, vals, i);
-            let pair: MrbValue[2] = [k, v];
-            vm_invoke_block_args(machine, closure, self_value, pair[..]);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            i += 1;
-        }
-        return hash, true;
+        result = vm_hash_each_block(machine, hash, closure, self_value);
+    } else if name == "select" || name == "filter" || name == "reject" {
+        result = vm_hash_select_block(machine, hash, closure, self_value, name != "reject");
+    } else if name == "map" || name == "collect" {
+        result = vm_hash_map_block(machine, hash, closure, self_value);
+    } else {
+        handled = false;
     }
-    if name == "select" || name == "filter" || name == "reject" {
-        let keep_truthy = name != "reject";
-        let out = builtin_hash_new(machine.scratch);
-        var i = 0;
-        while i < len {
-            let k = builtin_array_get(machine.pool, machine.scratch, keys, i);
-            let v = builtin_array_get(machine.pool, machine.scratch, vals, i);
-            let pair: MrbValue[2] = [k, v];
-            let res = vm_invoke_block_args(machine, closure, self_value, pair[..]);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            if mrb_truthy(res) == keep_truthy {
-                builtin_hash_set(machine.pool, machine.scratch, out, k, v);
-            }
-            i += 1;
-        }
-        return out, true;
-    }
-    if name == "map" || name == "collect" {
-        let out = builtin_array_new(machine.scratch);
-        var i = 0;
-        while i < len {
-            let k = builtin_array_get(machine.pool, machine.scratch, keys, i);
-            let v = builtin_array_get(machine.pool, machine.scratch, vals, i);
-            let pair: MrbValue[2] = [k, v];
-            let res = vm_invoke_block_args(machine, closure, self_value, pair[..]);
-            if machine.error != VmError.Ok {
-                return mrb_nil(), true;
-            }
-            builtin_array_push(machine.pool, machine.scratch, out, res);
-            i += 1;
-        }
-        return out, true;
-    }
-    return mrb_nil(), false;
+    scratch_root_end(machine, root_mark);
+    return result, handled;
 }
 
 recursive fn vm_dispatch_block_method(

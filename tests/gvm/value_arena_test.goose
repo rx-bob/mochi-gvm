@@ -87,11 +87,12 @@ fn test_arena_handle_layout(t: goosetest::Test&) {
     t.assert_eq(vm::MRB_ARENA_SCRATCH, vm::mrb_arena_tag(scratch_handle));
     t.assert_eq(123, vm::mrb_arena_index(scratch_handle));
 
-    let state_handle = vm::mrb_arena_value(vm::MRB_ARENA_STATE, 2147483647);
+    let state_handle = vm::mrb_arena_value_versioned(vm::MRB_ARENA_STATE, 32767, 60000);
     t.assert_true(vm::mrb_is_state(state_handle));
     t.assert_false(vm::mrb_is_scratch(state_handle));
     t.assert_eq(vm::MRB_ARENA_STATE, vm::mrb_arena_tag(state_handle));
-    t.assert_eq(2147483647, vm::mrb_arena_index(state_handle));
+    t.assert_eq(32767, vm::mrb_arena_index(state_handle));
+    t.assert_eq(60000, vm::mrb_arena_generation(state_handle));
 }
 
 fn test_scratch_string_round_trips_and_reset(t: goosetest::Test&) {

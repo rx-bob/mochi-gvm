@@ -7,6 +7,7 @@
 namespace vm;
 
 import.ivar_mask;
+import.scratch_alloc;
 import.value_arena;
 
 fn scratch_slot_count(arena: ScratchArena&) -> i64 {
@@ -22,12 +23,10 @@ fn scratch_alloc_hash(arena: ScratchArena&) -> MrbValue {
 }
 
 fn scratch_alloc_collection(arena: ScratchArena&, kind: ArenaObjectKind) -> MrbValue {
-    if arena.objects.len >= SCRATCH_CAPACITY_OBJECTS {
-        arena.overflow = true;
+    let index = scratch_take_object(arena, kind);
+    if index < 0 {
         return mrb_nil();
     }
-    let index = arena.objects.len;
-    arena.objects.push(empty_arena_object(kind));
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);
 }
 
@@ -43,19 +42,36 @@ fn scratch_is_hash(arena: ScratchArena&, value: MrbValue) -> bool {
 
 // Appends one slot to `object_index`'s linked list and returns its index.
 fn scratch_append_slot(arena: ScratchArena&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
-    if object_index < 0 || object_index >= arena.objects.len
-        || arena.slots.len >= SCRATCH_CAPACITY_SLOTS {
+    if object_index < 0 || object_index >= arena.objects.len {
         arena.overflow = true;
         return false;
     }
-    let slot_index = arena.slots.len;
+    var slot_index = -1;
+    if arena.free_slots.len > 0 {
+        slot_index = arena.free_slots.pop();
+    } else {
+        if arena.slots.len >= SCRATCH_CAPACITY_SLOTS {
+            scratch_fail(arena, ScratchResource.Slots, 1, arena.slots.len,
+                SCRATCH_CAPACITY_SLOTS);
+            return false;
+        }
+        slot_index = arena.slots.len;
+        arena.slots.push(ArenaSlot {
+                key: key,
+                value: value,
+                previous_index: -1,
+                next_index: -1,
+                allocated: true,
+            });
+    }
     let previous = arena.objects[object_index].items_last_index;
-    arena.slots.push(ArenaSlot {
-            key: key,
-            value: value,
-            previous_index: previous,
-            next_index: -1,
-        });
+    arena.slots[slot_index] = ArenaSlot {
+        key: key,
+        value: value,
+        previous_index: previous,
+        next_index: -1,
+        allocated: true,
+    };
     if previous >= 0 {
         arena.slots[previous].next_index = slot_index;
     } else {

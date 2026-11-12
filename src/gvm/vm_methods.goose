@@ -5,6 +5,7 @@ import.builtins;
 import.builtins_ext;
 import.collection_arena;
 import.host_api;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_core;

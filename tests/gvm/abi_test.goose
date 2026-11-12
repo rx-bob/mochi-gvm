@@ -10,6 +10,7 @@ let COUNTER_CHI: const u8[:] = embed_file("../fixtures/counter.chi");
 let TODO_CHI: const u8[:] = embed_file("../fixtures/todo.chi");
 let USERS_CHI: const u8[:] = embed_file("../fixtures/users.chi");
 let FETCH_PROBE_CHI: const u8[:] = embed_file("../fixtures/fetch_probe.chi");
+let FAILING_INIT_CHI: const u8[:] = embed_file("../fixtures/failing_init.chi");
 let WIDE_COMPONENT_CHI: const u8[:] = embed_file("../fixtures/wide_component.chi");
 let COUNTER_HTML: const u8[:] = "<div class='counter'><h2>Click me</h2><span class='count'>1</span><div class='buttons'><button data-action='decrement'>-</button><button data-action='increment'>+</button><button data-action='reset'>Reset</button></div></div>";
 let TODO_HTML_EMPTY: const u8[:] = "<div class='todo'><h2>Todo List (0 items)</h2><ul></ul><div class='buttons'><button data-action='add_item'>Add</button><button data-action='toggle_last'>Toggle Last</button><button data-action='remove_last'>Remove Last</button></div></div>";
@@ -17,6 +18,7 @@ var g_counter_rite: u8[>..] = [];
 var g_todo_rite: u8[>..] = [];
 var g_users_rite: u8[>..] = [];
 var g_fetch_probe_rite: u8[>..] = [];
+var g_failing_init_rite: u8[>..] = [];
 var g_wide_component_rite: u8[>..] = [];
 
 fn counter_rite() -> u8[:] {
@@ -45,6 +47,13 @@ fn fetch_probe_rite() -> u8[:] {
         vm::vm_restore_rite_header(FETCH_PROBE_CHI, g_fetch_probe_rite);
     }
     return g_fetch_probe_rite[..];
+}
+
+fn failing_init_rite() -> u8[:] {
+    if g_failing_init_rite.len == 0 {
+        vm::vm_restore_rite_header(FAILING_INIT_CHI, g_failing_init_rite);
+    }
+    return g_failing_init_rite[..];
 }
 
 fn wide_component_rite() -> u8[:] {
@@ -121,6 +130,11 @@ fn test_abi_failed_call_does_not_stick(t: goosetest::Test&) {
     vm::abi_call(counter, vm::intern_symbol("missing_handler"), 0);
     t.assert_true(vm::abi_has_error());
     t.assert_eq("Counter#missing_handler: unknown method", vm::abi_last_error());
+    // Interning a method name starts a fresh entry: a previous call failure
+    // must not make the host skip a real `mounted` callback.
+    let html_symbol = vm::abi_intern("html");
+    t.assert_false(vm::abi_has_error());
+    t.assert_true(vm::abi_has_method(counter, html_symbol));
 
     t.assert_eq(1, vm::abi_flush_patches(counter));
     t.assert_false(vm::abi_has_error());
@@ -322,6 +336,73 @@ fn test_abi_mounts_component_with_100_ivars(t: goosetest::Test&) {
     vm::abi_close();
 }
 
+fn test_abi_failed_initialize_rolls_back_mount(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(failing_init_rite()));
+    t.assert_false(vm::abi_has_error());
+    let failing_class = vm::abi_const_get(vm::intern_symbol("FailingInit"));
+    t.assert_true(vm::abi_is_class(failing_class));
+
+    let failed = vm::abi_obj_new(vm::mrb_class_id(failing_class));
+    t.assert_true(vm::mrb_is_nil(failed));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("FailingInit#initialize: unknown method", vm::abi_last_error());
+    t.assert_eq(0, vm::abi_binding_count());
+    t.assert_eq(0, vm::abi_component_count());
+
+    // The class and its bytecode survive the rollback, so a later valid mount
+    // in the same runtime still works.
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_true(vm::mrb_is_state(counter));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(1, vm::abi_component_count());
+    vm::abi_close();
+}
+
+fn test_abi_unregister_releases_stale_handle(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let first = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_eq(0, vm::abi_register_binding(first, 0, vm::intern_symbol("html")));
+    t.assert_eq(0, vm::abi_register_binding(first, 1, vm::intern_symbol("increment")));
+    t.assert_eq(2, vm::abi_binding_count());
+    t.assert_eq(1, vm::abi_component_count());
+
+    t.assert_eq(0, vm::abi_unregister_component(first));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(0, vm::abi_binding_count());
+    t.assert_eq(0, vm::abi_component_count());
+    // Repeated disposal is safe and does not report an error.
+    t.assert_eq(0, vm::abi_unregister_component(first));
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq(-1, vm::abi_register_binding(first, 2, vm::intern_symbol("html")));
+    t.assert_true(vm::abi_has_error());
+    t.assert_true(vm::abi_last_error() == "disposed instance");
+    t.assert_eq(-1, vm::abi_flush_patches(first));
+    t.assert_true(vm::abi_has_error());
+    t.assert_true(vm::abi_last_error() == "disposed instance");
+    vm::abi_call(first, vm::intern_symbol("increment"), 0);
+    t.assert_true(vm::abi_has_error());
+    t.assert_true(vm::abi_last_error() == "disposed instance");
+    t.assert_eq(-1, vm::abi_deliver_fetch(first, vm::intern_symbol("html"),
+        "{\"status\":200,\"ok\":true}"));
+    t.assert_true(vm::abi_has_error());
+
+    // A fresh mount gets new registrations and the shared class still runs.
+    let second = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_true(vm::mrb_is_state(second));
+    t.assert_false(vm::mrb_value_identical(first, second));
+    t.assert_eq(0, vm::abi_register_binding(second, 0, vm::intern_symbol("html")));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(1, vm::abi_binding_count());
+    t.assert_eq(1, vm::abi_component_count());
+    vm::abi_close();
+}
+
 fn test_abi_fetch_callback_hash(t: goosetest::Test&) {
     vm::abi_open();
     t.assert_eq(0, vm::abi_load_irep(fetch_probe_rite()));
@@ -374,5 +455,77 @@ fn test_abi_fetch_callback_hash(t: goosetest::Test&) {
     t.assert_eq(-1, vm::abi_deliver_fetch(probe, vm::intern_symbol("missing_callback"),
         "{\"status\":500,\"ok\":false}"));
     t.assert_true(vm::abi_has_error());
+    vm::abi_close();
+}
+
+fn test_abi_thousand_ivar_writes_stay_bounded(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(counter_rite()));
+    let counter_class = vm::abi_const_get(vm::intern_symbol("Counter"));
+    let counter = vm::abi_obj_new(vm::mrb_class_id(counter_class));
+    t.assert_false(vm::abi_has_error());
+    var update = 0;
+    while update < 1000 {
+        t.assert_eq(0, vm::goose_vm_set_ivar_string(counter, "label", "replacement"));
+        update += 1;
+    }
+    t.assert_false(vm::abi_has_error());
+    t.assert_true(vm::state_object_count(vm::g_abi_pool)
+        <= 2 + vm::GC_ALLOCATION_INTERVAL);
+    vm::gc_collect(vm::g_abi_machine);
+    t.assert_eq(2, vm::state_allocated_object_count(vm::g_abi_pool));
+    let stored, found = vm::state_get_ivar(vm::g_abi_pool, counter, vm::intern_symbol("@label"));
+    t.assert_true(found);
+    t.assert_true(vm::abi_string_bytes(stored) == "replacement");
+    vm::abi_close();
+}
+
+// Pins the setter convention used by the loader: 0 is success, -1 is failure,
+// and an identical replacement is still success without emitting a patch.
+fn test_abi_set_ivar_string_return_codes(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(wide_component_rite()));
+    let wide_class = vm::abi_const_get(vm::intern_symbol("WideComponent"));
+    let wide = vm::abi_obj_new(vm::mrb_class_id(wide_class));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(0, vm::abi_register_binding(wide, 0, vm::intern_symbol("late")));
+
+    t.assert_eq(0, vm::goose_vm_set_ivar_string(wide, "v70", "alpha"));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(1, vm::abi_flush_patches(wide));
+    t.assert_false(vm::abi_has_error());
+    let patches = vm::abi_patch_bytes();
+    t.assert_eq(11, patches.len);
+    t.assert_eq(0, patches[0]);
+    t.assert_eq(0, patches[1]);
+    t.assert_eq(5, patches[2]);
+    t.assert_eq(0x61, patches[6]);
+
+    // Identical replacement: success, no dirty bit, no patch.
+    t.assert_eq(0, vm::goose_vm_set_ivar_string(wide, "v70", "alpha"));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(0, vm::abi_flush_patches(wide));
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq(0, vm::goose_vm_set_ivar_string(wide, "v70", "beta"));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(1, vm::abi_flush_patches(wide));
+    let changed = vm::abi_patch_bytes();
+    t.assert_eq(0x62, changed[6]);
+
+    t.assert_eq(-1, vm::goose_vm_set_ivar_string(wide, "", "beta"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("empty ivar name", vm::abi_last_error());
+
+    let not_instance = vm::abi_make_string("not an instance");
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq(-1, vm::goose_vm_set_ivar_string(not_instance, "v70", "beta"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("unknown component instance", vm::abi_last_error());
+
+    t.assert_eq(0, vm::abi_unregister_component(wide));
+    t.assert_eq(-1, vm::goose_vm_set_ivar_string(wide, "v70", "gone"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("disposed instance", vm::abi_last_error());
     vm::abi_close();
 }

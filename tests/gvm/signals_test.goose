@@ -421,6 +421,49 @@ fn test_binding_text_serializes_collections_as_json(t: goosetest::Test&) {
 
     let expected_quoted: const u8[:] = "[\"line\\n\\\"quoted\\\"\"]";
     t.assert_eq(expected_quoted, vm::binding_text(machine, quoted_items));
+
+    // Nil travels as a private-use marker so the loader can remove an
+    // attribute while rendering empty text. The empty string stays empty.
+    t.assert_eq(vm::NIL_BINDING_TEXT, vm::binding_text(machine, vm::mrb_nil()));
+    t.assert_eq("", vm::binding_text(machine, vm::state_alloc_string(pool, "")));
+}
+
+fn test_binding_unregister_disposed_instance(t: goosetest::Test&) {
+    let count_symbol = vm::intern_symbol("@count");
+    let label_symbol = vm::intern_symbol("@label");
+    var code: u8[>..] = [];
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    build_simple_getter_file(file, code, count_symbol, label_symbol);
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let instance = prepare_simple_widget(machine, pool, scratch, count_symbol, label_symbol);
+    let other = vm::state_alloc_instance(pool, 0);
+    t.assert_eq(0, vm::binding_register(pool, other, 0, vm::intern_symbol("label_text")));
+    t.assert_eq(3, pool.bindings.len);
+
+    t.assert_eq(2, vm::binding_unregister_all(pool, instance));
+    t.assert_eq(1, pool.bindings.len);
+    t.assert_eq(other, pool.bindings[0].instance);
+    t.assert_eq(0, vm::binding_unregister_all(pool, instance));
+
+    t.assert_true(vm::state_mark_instance_disposed(pool, instance));
+    t.assert_eq(-1, vm::binding_register(pool, instance, 4, vm::intern_symbol("label_text")));
+
+    var patches: u8[>..] = [];
+    t.assert_eq(-1, vm::vm_flush_dirty_bindings(machine, instance, patches));
+    t.assert_eq(vm::VmError.Disposed, machine.error);
 }
 
 fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
@@ -450,7 +493,10 @@ fn test_conditional_binding_resubscribes(t: goosetest::Test&) {
 
     var patches: u8[>..] = [];
     t.assert_eq(1, vm::vm_flush_dirty_bindings(machine, instance, patches));
-    t.assert_eq(6, patches.len);
+    t.assert_eq(9, patches.len);
+    t.assert_eq(0xEE, patches[6]);
+    t.assert_eq(0x80, patches[7]);
+    t.assert_eq(0x84, patches[8]);
     t.assert_true(vm::mask_equal(show_bit, pool.bindings[0].dep_mask));
     t.assert_true(pool.bindings[0].initialized);
 

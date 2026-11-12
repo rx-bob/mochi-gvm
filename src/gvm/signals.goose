@@ -21,6 +21,7 @@ namespace vm;
 
 import.collection_arena;
 import.ivar_mask;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -29,6 +30,12 @@ import.vm_entry;
 let MAX_SIGNAL_DEPTH = 32;
 let MAX_BINDINGS = 2048;
 let MAX_JSON_DEPTH = 16;
+
+// A nil binding result travels as one private-use code point. The loader maps
+// it to empty text, removes a single-placeholder attribute, and clears a form
+// property. Empty strings stay empty strings so a present-but-empty textual
+// attribute remains distinct from an absent one.
+let NIL_BINDING_TEXT: const u8[:] = "\xEE\x80\x84";
 
 // One DOM binding: which instance owns it, which getter produces its text, and
 // the ivar mask recorded the last time the getter ran. `initialized` is false
@@ -46,7 +53,7 @@ struct BindingEntry {
 // replaces the getter and forces a fresh dependency scan.
 fn binding_register(pool: StatePool&, instance: MrbValue, binding_id: u32, getter_symbol: u32) -> i64 {
     let object, ok = state_object(pool, instance);
-    if !ok || object.kind != ArenaObjectKind.Instance || binding_id > 0xFFFF {
+    if !ok || object.kind != ArenaObjectKind.Instance || object.disposed || binding_id > 0xFFFF {
         return -1;
     }
     for index in 0..pool.bindings.len {
@@ -69,6 +76,28 @@ fn binding_register(pool: StatePool&, instance: MrbValue, binding_id: u32, gette
             initialized: false,
         });
     return 0;
+}
+
+// Removes every binding owned by `instance`, compacting the flat table in
+// place. A disposed instance keeps no getter rows, so its capacity is returned
+// immediately and a reused binding id can never retarget a different object.
+fn binding_unregister_all(pool: StatePool&, instance: MrbValue) -> i64 {
+    var removed = 0;
+    var write = 0;
+    for read in 0..pool.bindings.len {
+        if mrb_value_identical(pool.bindings[read].instance, instance) {
+            removed += 1;
+            continue;
+        }
+        if write != read {
+            pool.bindings[write] = pool.bindings[read];
+        }
+        write += 1;
+    }
+    while pool.bindings.len > write {
+        pool.bindings.pop();
+    }
+    return removed;
 }
 
 // Appends one little-endian u16. The DOM loader decodes patch headers without
@@ -296,7 +325,7 @@ recursive fn binding_json_append_value(machine: Vm&, out: u8[>..]&, value: MrbVa
 // rows. The view stays valid until the next top-level entry resets the arena.
 fn binding_text(machine: Vm&, value: MrbValue) -> const u8[:] {
     if mrb_is_nil(value) {
-        return "";
+        return NIL_BINDING_TEXT;
     }
     if binding_value_is_array(machine, value) || binding_value_is_hash(machine, value) {
         var json: u8[>..] = [];
@@ -337,6 +366,10 @@ fn vm_eval_binding(machine: Vm&, entry: BindingEntry&) -> const u8[:] {
 // `[binding_id u16 LE][byte_len u32 LE][utf8 bytes]`. The dirty mask is cleared
 // once the pass finishes, and -1 reports a getter failure.
 fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..]&) -> i64 {
+    if state_instance_disposed(machine.pool, instance) {
+        machine.error = VmError.Disposed;
+        return -1;
+    }
     if !mrb_is_state(instance) {
         return 0;
     }
@@ -354,6 +387,11 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
         var entry = stored;
         let text = vm_eval_binding(machine, entry);
         machine.pool.bindings[index] = entry;
+        if machine.error == VmError.Ok && machine.pool.error != VmError.Ok {
+            // State allocation can fail inside a getter without touching the
+            // VM error slot. Promote it before it is cleared by the next entry.
+            machine.error = machine.pool.error;
+        }
         if machine.error != VmError.Ok {
             if first_error == VmError.Ok {
                 first_error = machine.error;
@@ -375,6 +413,12 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
     return emitted;
 }
 
+// Reports whether `instance` is the one whose binding getter is running.
+fn state_is_tracked(pool: StatePool&, instance: MrbValue) -> bool {
+    return pool.tracking_instance_index == mrb_arena_index(instance)
+        && pool.tracking_instance_generation == mrb_arena_generation(instance);
+}
+
 // Reads an ivar, recording the slot bit whenever `instance` is the tracked one.
 // Missed ivars are allocated as nil during tracking so that later conditional
 // reads keep a stable bit instead of shifting other slots.
@@ -388,7 +432,7 @@ fn state_get_ivar(pool: StatePool&, instance: MrbValue, key: u32) -> MrbValue, b
     while slot_index >= 0 {
         let slot = pool.ivars[slot_index];
         if slot.key == key {
-            if pool.tracking_instance_index == instance_index {
+            if state_is_tracked(pool, instance) {
                 var mask = pool.active_read_mask;
                 mask_set_bit(mask, slot.bit_index);
                 pool.active_read_mask = mask;
@@ -397,7 +441,7 @@ fn state_get_ivar(pool: StatePool&, instance: MrbValue, key: u32) -> MrbValue, b
         }
         slot_index = slot.next_index;
     }
-    if pool.tracking_instance_index == instance_index {
+    if state_is_tracked(pool, instance) {
         let created = state_append_ivar_slot(pool, instance_index, key, mrb_nil());
         if created >= 0 {
             var mask = pool.active_read_mask;
@@ -439,9 +483,13 @@ fn state_mark_collection_mutated(pool: StatePool&, collection: MrbValue) {
     if pool.components.len == 0 {
         return;
     }
-    for component_index in pool.components {
-        let instance_index = component_index as i64;
-        var slot_index = pool.objects[instance_index].ivar_head_index;
+    for component in pool.components {
+        let object, ok = state_object(pool, component);
+        if !ok || object.kind != ArenaObjectKind.Instance {
+            continue;
+        }
+        let instance_index = mrb_arena_index(component)as i64;
+        var slot_index = object.ivar_head_index;
         while slot_index >= 0 {
             if state_value_contains(pool, pool.ivars[slot_index].value, collection, 0) {
                 state_mark_ivar_dirty(pool, instance_index, pool.ivars[slot_index].bit_index);

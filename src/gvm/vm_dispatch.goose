@@ -2,6 +2,7 @@
 namespace vm;
 
 import.builtins;
+import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_blocks;
@@ -95,6 +96,9 @@ fn vm_op_setconst(
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }
     state_set_const(machine.pool, machine.scratch, symbol, value);
+    if machine.pool.error != VmError.Ok {
+        return vm_fail(machine, machine.pool.error, pc + 2);
+    }
     return vm_step_continue(pc + 2);
 }
 

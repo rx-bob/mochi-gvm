@@ -3,12 +3,14 @@
 // `vm_exec` owns the register-window and frame-stack discipline, while each
 // `vm_op_*` helper decodes one family of instructions and returns a `Step` that
 // tells the loop whether to continue, return, stop, or recurse into a child
-// IREP. Keeping the handlers out of `vm_core.goose` holds both files under the
-// style guide's 500-line limit and keeps every function below 70 lines.
+// IREP. Keeping the handlers out of `vm_core.goose` keeps every function small.
 namespace vm;
 
 import.rite_types;
+import.scratch_alloc;
+import.scratch_reclaim;
 import.state_pool;
+import.state_reclaim;
 import.value_arena;
 import.vm_core;
 import.vm_dispatch;
@@ -52,13 +54,29 @@ recursive fn vm_exec_with_args(
     return vm_exec_frame(machine, record_index, self_value, dst_register, args, -1);
 }
 
-// Executes one IREP frame with positional arguments and optional lexical parent.
+fn vm_finish_frame(machine: Vm&, base: i64, dst_register: i64, result: MrbValue) -> MrbValue {
+    machine.frames.pop();
+    while machine.regs.len > base {
+        machine.regs.pop();
+    }
+    if dst_register >= 0 && dst_register >= machine.regs.len {
+        machine.error = VmError.Registers;
+        return result;
+    }
+    if dst_register >= 0 {
+        machine.regs[dst_register] = result;
+    }
+    return result;
+}
+
+// Executes one IREP frame with arguments and an optional lexical parent.
 recursive fn vm_exec_frame(
     machine: Vm&, record_index: i64, self_value: MrbValue,
     dst_register: i64, args: MrbValue[:], env_frame: i64
 ) -> MrbValue {
     if machine.frames.len >= MAX_VM_CALL_DEPTH {
         machine.error = VmError.CallDepth;
+        vm_absorb_method_context(machine, record_index);
         return mrb_nil();
     }
     assert(record_index >= 0);
@@ -66,11 +84,13 @@ recursive fn vm_exec_frame(
     let record = machine.file.records[record_index];
     let iseq = record_iseq(machine.file, record);
     if env_frame < 0 && !vm_entry_arity_ok(machine, iseq, args) {
+        vm_absorb_method_context(machine, record_index);
         return mrb_nil();
     }
     let base = machine.regs.len;
     if base + record.nregs > MAX_VM_REGS {
         machine.error = VmError.Registers;
+        vm_absorb_method_context(machine, record_index);
         return mrb_nil();
     }
     for _ in record.nregs {
@@ -103,6 +123,7 @@ recursive fn vm_exec_frame(
         machine.frames[frame_index].pc = pc;
         if machine.scratch.overflow && machine.error == VmError.Ok {
             machine.error = VmError.ScratchFull;
+            vm_absorb_scratch_failure(machine, record_index);
             running = false;
         } else if step.kind == StepKind.Execute {
             vm_exec(machine, step.child_index, step.value, step.dst_register);
@@ -115,26 +136,22 @@ recursive fn vm_exec_frame(
         } else if step.kind != StepKind.Continue {
             running = false;
         }
-    }
-
-    machine.frames.pop();
-    while machine.regs.len > base {
-        machine.regs.pop();
-    }
-    if dst_register >= 0 {
-        if dst_register >= machine.regs.len {
-            machine.error = VmError.Registers;
-        } else {
-            machine.regs[dst_register] = result;
+        if machine.error != VmError.Ok {
+            vm_absorb_method_context(machine, record_index);
         }
     }
-    return result;
+
+    return vm_finish_frame(machine, base, dst_register, result);
 }
 
 // Routes one opcode byte to its handler family.
 fn vm_exec_step(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
+    // Between instructions every live value is in a register window, so a
+    // collection here cannot invalidate an in-flight expression.
+    gc_maybe_collect(machine);
+    scratch_maybe_collect(machine);
     let dispatched, handled = vm_dispatch_step(machine, frame, record, iseq, pc, op);
     if handled {
         return dispatched;

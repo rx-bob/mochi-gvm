@@ -4,6 +4,7 @@ namespace vm;
 import.builtins;
 import.collection_arena;
 import.rite_types;
+import.scratch_alloc;
 import.signals;
 import.state_pool;
 import.value_arena;
