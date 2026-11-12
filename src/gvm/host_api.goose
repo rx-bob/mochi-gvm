@@ -2,6 +2,7 @@
 namespace vm;
 
 import.builtins;
+import.json_args;
 import.rite_types;
 import.scratch_alloc;
 import.signals;
@@ -20,6 +21,7 @@ struct HostStorageEntry {
 var g_host_storage: HostStorageEntry[>..] = [];
 var g_host_blob: u8[>..] = [];
 var g_host_route: u8[..1024] = [];
+var g_host_route_info: u8[..8192] = [];
 var g_host_outbox: u8[>..] = [];
 var g_host_next_timer_id: i64 = 1;
 
@@ -27,6 +29,7 @@ fn host_reset() {
     g_host_storage.clear();
     g_host_blob.clear();
     g_host_route.clear();
+    g_host_route_info.clear();
     g_host_outbox.clear();
     g_host_next_timer_id = 1;
 }
@@ -107,6 +110,20 @@ fn host_set_route_raw(path: const u8[:]) {
     if path.len <= 1024 {
         g_host_route.append(path);
     }
+}
+
+fn host_set_route_info_raw(info: const u8[:]) {
+    g_host_route_info.clear();
+    if info.len <= 8192 {
+        g_host_route_info.append(info);
+    }
+}
+
+fn host_current_instance(machine: Vm&) -> MrbValue, bool {
+    if machine.frames.len == 0 {
+        return mrb_nil(), false;
+    }
+    return machine.frames[machine.frames.len - 1].self_value, true;
 }
 
 fn host_outbox_bytes() -> const u8[:] {
@@ -254,6 +271,17 @@ fn vm_call_mochi_builtin(
     if name == "route" {
         return scratch_alloc_string(machine.scratch, g_host_route[..]), true;
     }
+    if name == "route_info" {
+        if g_host_route_info.len == 0 {
+            return builtin_hash_new(machine.scratch), true;
+        }
+        let info, parsed = json_parse_document(
+            machine.pool, machine.scratch, g_host_route_info[..]);
+        if parsed {
+            return info, true;
+        }
+        return builtin_hash_new(machine.scratch), true;
+    }
     if (name == "set_route" || name == "navigate") && args.len >= 1 {
         var pbuf: u8[>..] = [];
         let path = host_arg_text(machine, args[0], pbuf);
@@ -262,6 +290,25 @@ fn vm_call_mochi_builtin(
         host_append_json_escaped(g_host_outbox, path);
         g_host_outbox.append("}\n");
         return args[0], true;
+    }
+    if name == "replace_route" && args.len >= 1 {
+        var rbuf: u8[>..] = [];
+        let replacement = host_arg_text(machine, args[0], rbuf);
+        host_set_route_raw(replacement);
+        g_host_outbox.append("{\"__host\":\"replace_route\",\"path\":");
+        host_append_json_escaped(g_host_outbox, replacement);
+        g_host_outbox.append("}\n");
+        return args[0], true;
+    }
+    if name == "route_subscribe" {
+        let instance, has_instance = host_current_instance(machine);
+        if !has_instance {
+            return mrb_false(), true;
+        }
+        g_host_outbox.append("{\"__host\":\"route_subscribe\",\"instance\":\"");
+        mrb_format_fixnum(g_host_outbox, instance as!i64);
+        g_host_outbox.append("\"}\n");
+        return mrb_true(), true;
     }
     if name == "get_attr" && args.len >= 1 {
         var abuf: u8[>..] = [];
@@ -293,6 +340,10 @@ export fn goose_vm_seed_storage(key: const u8[:], value: const u8[:]) {
 
 export fn goose_vm_set_route_state(path: const u8[:]) {
     host_set_route_raw(path);
+}
+
+export fn goose_vm_set_route_info(info: const u8[:]) {
+    host_set_route_info_raw(info);
 }
 
 export fn goose_vm_host_outbox() -> const u8[:] {

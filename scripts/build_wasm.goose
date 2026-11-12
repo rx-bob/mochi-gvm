@@ -66,6 +66,7 @@ fn compile_bridge() {
     command.append("\"_mochi_host_inbox_capacity\",");
     command.append("\"_mochi_deliver_fetch\",\"_mochi_deliver_host_result\",");
     command.append("\"_mochi_seed_storage\",\"_mochi_set_route_state\",");
+    command.append("\"_mochi_set_route_info\",");
     command.append("\"_mochi_set_ivar_string\",\"_mochi_eval_each_expr\",");
     command.append("\"_mochi_eval_buffer_offset\",\"_mochi_eval_buffer_len\",");
     command.append("\"_malloc\",\"_free\"]' ");

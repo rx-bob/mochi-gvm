@@ -88,6 +88,7 @@ extern int64_t goose_vm_deliver_host_result(uint64_t instance, uint32_t callback
                                             goose_u8_slice envelope);
 extern void goose_vm_seed_storage(goose_u8_slice key, goose_u8_slice value);
 extern void goose_vm_set_route_state(goose_u8_slice path);
+extern void goose_vm_set_route_info(goose_u8_slice info);
 extern const uint8_t *goose_vm_host_outbox(int64_t *out_len);
 extern void goose_vm_clear_host_outbox(void);
 extern void goose_vm_set_host_error(goose_u8_slice text);
@@ -965,6 +966,12 @@ MOCHI_EXPORT
 void mochi_set_route_state(const uint8_t *path, int32_t path_len) {
   if (!path || path_len < 0) return;
   goose_vm_set_route_state(slice_of(path, (size_t)path_len));
+}
+
+MOCHI_EXPORT
+void mochi_set_route_info(const uint8_t *info, int32_t info_len) {
+  if (!info || info_len < 0) return;
+  goose_vm_set_route_info(slice_of(info, (size_t)info_len));
 }
 
 /* set_ivar_string(instance, name, value) -> 0 on success, -1 on failure.

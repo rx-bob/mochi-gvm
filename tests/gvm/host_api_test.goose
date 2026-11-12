@@ -111,15 +111,36 @@ fn test_host_route_timer_and_get_attr(t: goosetest::Test&) {
     };
 
     vm::goose_vm_set_route_state("/queues");
+    vm::goose_vm_set_route_info(
+        "{\"path\":\"/logs/a b\",\"segments\":[\"logs\",\"a b\"],\"query\":{\"level\":\"warn\"},\"search\":\"level=warn\",\"hash\":false,\"href\":\"http://localhost/logs/a%20b?level=warn\"}");
     let empty: vm::MrbValue[0] = [];
     let route_val, route_ok = vm::vm_call_mochi_builtin(machine, "route", empty[..]);
     t.assert_true(route_ok);
     t.assert_eq("/queues", vm::builtin_string_bytes(pool, scratch, route_val));
 
+    let info_val, info_ok = vm::vm_call_mochi_builtin(machine, "route_info", empty[..]);
+    t.assert_true(info_ok);
+    let path_key = vm::scratch_alloc_string(scratch, "path");
+    t.assert_eq("/logs/a b", vm::builtin_string_bytes(
+        pool, scratch, vm::builtin_hash_get(pool, scratch, info_val, path_key)));
+    let query_key = vm::scratch_alloc_string(scratch, "query");
+    let query = vm::builtin_hash_get(pool, scratch, info_val, query_key);
+    let level_key = vm::scratch_alloc_string(scratch, "level");
+    t.assert_eq("warn", vm::builtin_string_bytes(
+        pool, scratch, vm::builtin_hash_get(pool, scratch, query, level_key)));
+
     let nav_args: vm::MrbValue[1] = [vm::scratch_alloc_string(scratch, "/costs")];
-    let nav_val, nav_ok = vm::vm_call_mochi_builtin(machine, "set_route", nav_args[..]);
+    let nav_val, nav_ok = vm::vm_call_mochi_builtin(machine, "navigate", nav_args[..]);
     t.assert_true(nav_ok);
     t.assert_eq("/costs", vm::builtin_string_bytes(pool, scratch, nav_val));
+    t.assert_true(vm::goose_vm_host_outbox().len > 0);
+    vm::goose_vm_clear_host_outbox();
+
+    let replace_val, replace_ok = vm::vm_call_mochi_builtin(machine, "replace_route", nav_args[..]);
+    t.assert_true(replace_ok);
+    t.assert_eq("/costs", vm::builtin_string_bytes(pool, scratch, replace_val));
+    t.assert_true(vm::goose_vm_host_outbox().len > 0);
+    vm::goose_vm_clear_host_outbox();
 
     let timer_args: vm::MrbValue[2] = [
         vm::mrb_fixnum(250),
