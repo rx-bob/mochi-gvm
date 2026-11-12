@@ -6,6 +6,7 @@
 // are addressed through the same 31-bit state handles used by `MrbValue`.
 namespace vm;
 
+import.capacity_config;
 import.ivar_mask;
 import.scratch_alloc;
 import.signals;
@@ -14,14 +15,6 @@ import.vm_core;
 import.vm_errors;
 
 // The state pool is long-lived, so its limits are larger but still enforced.
-let MAX_STATE_CLASSES = 512;
-let MAX_STATE_OBJECTS = 32768;
-let MAX_STATE_IVARS = 65536;
-let MAX_STATE_SLOTS = 131072;
-let MAX_STATE_BYTES = 8388608;
-let MAX_STATE_COMPONENTS = 1024;
-let MAX_PROMOTION_DEPTH = 32;
-
 let NULL_CLASS_ID: u32 = 0xFFFFFFFF;
 
 // A class definition. The class value itself is an immediate class ID.

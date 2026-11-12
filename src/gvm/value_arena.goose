@@ -16,6 +16,7 @@
 // strings and nested instances so they survive the next tick reset.
 namespace vm;
 
+import.capacity_config;
 import.ivar_mask;
 
 let MRB_TAG_SHIFT: u64 = 32;
@@ -52,11 +53,6 @@ let MRB_FIXNUM_MAX: i64 = 2147483647;
 // nested row builds; a workload whose live temporaries exceed these ceilings
 // fails with a named, recoverable resource error instead of growing the
 // process. The ceilings leave the WASM data-stack reserve intact.
-let SCRATCH_CAPACITY_BYTES = 131072;
-let SCRATCH_CAPACITY_OBJECTS = 2048;
-let SCRATCH_CAPACITY_IVARS = 2048;
-let SCRATCH_CAPACITY_SLOTS = 4096;
-
 type MrbValue = u64;
 
 // The kinds the arena can own. Strings live in the zone byte blob; instances

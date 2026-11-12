@@ -19,6 +19,7 @@
 // Goose resolves because a program is compiled as one translation unit.
 namespace vm;
 
+import.capacity_config;
 import.collection_arena;
 import.ivar_mask;
 import.scratch_alloc;
@@ -29,7 +30,6 @@ import.vm_entry;
 import.vm_num;
 
 let MAX_SIGNAL_DEPTH = 32;
-let MAX_BINDINGS = 2048;
 let MAX_JSON_DEPTH = 16;
 
 // A nil binding result travels as one private-use code point. The loader maps

@@ -7,6 +7,7 @@
 namespace vm;
 
 import.builtins;
+import.capacity_config;
 import.host_api;
 import.ivar_mask;
 import.json_args;
@@ -22,8 +23,6 @@ import.vm_methods;
 import.vm_ops;
 
 let ABI_OBJECT_CLASS_ID: u32 = 0xFFFFFF00;
-let ABI_MAX_CALL_ARGS = 8;
-let ABI_MAX_BYTECODE = 4194304;
 
 var g_abi_file: RiteFile = RiteFile {
     ..

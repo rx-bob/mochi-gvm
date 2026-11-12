@@ -15,6 +15,8 @@ let WASM_OPT_BIN: const u8[:] = "dist/mochi-gvm.opt.wasm";
 // Provided by scripts/toolchain.c: the script's sidecar.
 extern fn mochi_prepare_toolchain() -> i64;
 
+extern fn mochi_write_capacity_profile() -> i64;
+
 extern fn mochi_run(command: const u8[:]) -> i64;
 
 fn run(command: const u8[:]) {
@@ -31,7 +33,7 @@ fn generate_goose_c() {
     command.append(GOOSE_C);
     command.append(" --standalone --header ");
     command.append(GOOSE_H);
-    command.append(" --stack-reserve 512K -O2 ");
+    command.append(" --stack-reserve 64K -O2 ");
     command.append(ENTRY);
     run(command[..]);
 }
@@ -40,7 +42,7 @@ fn compile_bridge() {
     var command: u8[>..] = [];
     command.append("emcc -Oz -fwasm-exceptions -sSUPPORT_LONGJMP=wasm ");
     command.append("-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE ");
-    command.append("-sEXPORTED_FUNCTIONS='[\"_main\",");
+    command.append("-sEXPORTED_FUNCTIONS='[\"_main\",\"_mochi_capacity_fingerprint\",\"_mochi_capacity_profile\",");
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
     command.append("\"_mochi_mount_component\",\"_mochi_mount_component_props\",");
     command.append("\"_mochi_set_props_json\",\"_mochi_intern\",");
@@ -78,6 +80,7 @@ fn compile_bridge() {
         "\"stringToUTF8\",\"lengthBytesUTF8\",\"setValue\",\"getValue\"]' "
     );
     command.append("-sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=4194304 ");
+    command.append("-sMAXIMUM_MEMORY=100663296 ");
     command.append("-sSTACK_SIZE=1048576 -sMODULARIZE=1 ");
     command.append("-sEXPORT_NAME=MochiModule -sNO_EXIT_RUNTIME=1 ");
     command.append("--no-entry -I src/gvm/include ");
@@ -118,6 +121,10 @@ fn main() {
     optimize_wasm();
     if !file_exists(WASM_JS) || !file_exists(WASM_BIN) {
         print("build_wasm failed: artifact is missing");
+        exit(1);
+    }
+    if mochi_write_capacity_profile() != 0 {
+        print("build_wasm failed: cannot write capacity profile identity");
         exit(1);
     }
     print("built ", WASM_JS, " and ", WASM_BIN);

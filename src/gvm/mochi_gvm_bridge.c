@@ -13,6 +13,7 @@
 #include <mruby.h>
 #include <mruby/class.h>
 #include <mruby/string.h>
+#include "mochi_capacity_profile.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +26,14 @@
 #else
 #define MOCHI_EXPORT __attribute__((used))
 #endif
+
+MOCHI_EXPORT const char *mochi_capacity_fingerprint(void) {
+  return MOCHI_CAPACITY_FINGERPRINT;
+}
+
+MOCHI_EXPORT const char *mochi_capacity_profile(void) {
+  return MOCHI_CAPACITY_PROFILE_JSON;
+}
 
 /* Offset accessors return wasm32 addresses, matching the loader's memory
  * model; a native host test for these must run in a 32-bit process. */
