@@ -84,6 +84,9 @@ extern void goose_vm_seed_storage(goose_u8_slice key, goose_u8_slice value);
 extern void goose_vm_set_route_state(goose_u8_slice path);
 extern const uint8_t *goose_vm_host_outbox(int64_t *out_len);
 extern void goose_vm_clear_host_outbox(void);
+extern void goose_vm_set_host_error(goose_u8_slice text);
+extern void goose_vm_clear_host_error(void);
+extern void mochi_abi_set_error(mrb_state *mrb, const char *text);
 extern int64_t goose_vm_set_ivar_string(uint64_t instance, goose_u8_slice name,
                                         goose_u8_slice value);
 extern uint64_t goose_vm_obj_new_with_props(uint32_t class_id,
@@ -107,6 +110,11 @@ static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
 static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
 static int32_t g_error_len = 0;
+#define MOCHI_FORMAT_CAPACITY 8192
+static uint8_t g_format_output[MOCHI_FORMAT_CAPACITY];
+static char g_format_error[MOCHI_ERROR_CAPACITY];
+static char g_format_value[512];
+static char g_format_options[2048];
 
 static goose_u8_slice slice_of(const void *data, size_t length) {
   goose_u8_slice slice;
@@ -157,6 +165,125 @@ static void capture_vm_error(void) {
   memcpy(g_error_text, bytes, (size_t)length);
   g_error_text[length] = '\0';
   g_error_len = (int32_t)length;
+}
+
+#ifdef __EMSCRIPTEN__
+/* The loader installs Module.__mochiFormatHost before a formatting-dependent
+ * component mounts. This is a synchronous WASM-to-JS call, so Ruby can format
+ * from initialize, binding getters, event handlers, and each rows. */
+EM_JS(int, mochi_host_format_js,
+      (const char *kind, const char *value, const char *options, char *out,
+       int cap, char *err, int err_cap), {
+  try {
+    var host = Module.__mochiFormatHost;
+    if (!host || typeof host.format !== "function") {
+      throw new Error("formatting host is not loaded");
+    }
+    var result = host.format(UTF8ToString(kind), UTF8ToString(value),
+                             UTF8ToString(options));
+    if (typeof result !== "string") {
+      throw new Error("formatting host returned no text");
+    }
+    if (lengthBytesUTF8(result) + 1 > cap) {
+      throw new Error("formatting result is too long");
+    }
+    stringToUTF8(result, out, cap);
+    return 0;
+  } catch (error) {
+    var message = String(error && error.message ? error.message : error);
+    if (message.length + 1 > err_cap) message = message.substring(0, err_cap - 1);
+    stringToUTF8(message, err, err_cap);
+    return -1;
+  }
+});
+#else
+static int mochi_host_format_js(const char *kind, const char *value,
+                                const char *options, char *out, int cap,
+                                char *err, int err_cap) {
+  (void)kind;
+  (void)value;
+  (void)options;
+  (void)out;
+  (void)cap;
+  if (err && err_cap > 0) {
+    snprintf(err, (size_t)err_cap, "formatting host is unavailable");
+  }
+  return -1;
+}
+#endif
+
+static mrb_value mochi_format_error(mrb_state *mrb) {
+  if (g_format_error[0] == '\0') {
+    snprintf(g_format_error, sizeof(g_format_error), "formatting failed");
+  }
+  goose_vm_set_host_error(slice_of(g_format_error, strlen(g_format_error)));
+  mochi_abi_set_error(mrb, g_format_error);
+  return mrb_nil_value();
+}
+
+static mrb_value mochi_format_native(mrb_state *mrb, mrb_value self,
+                                     const char *kind) {
+  mrb_value value = mrb_nil_value();
+  mrb_value options = mrb_nil_value();
+  mrb_int argc;
+  const uint8_t *json;
+  int64_t json_len = 0;
+  int status;
+  (void)self;
+
+  argc = mrb_get_args(mrb, "oo", &value, &options);
+  if (argc < 1) {
+    snprintf(g_format_error, sizeof(g_format_error), "format value is required");
+    return mochi_format_error(mrb);
+  }
+  goose_vm_clear_host_error();
+  g_format_error[0] = '\0';
+
+  json = goose_vm_value_json(value, &json_len);
+  if (!json || json_len <= 0 || json_len >= (int64_t)sizeof(g_format_value)) {
+    snprintf(g_format_error, sizeof(g_format_error), "format value is too large");
+    return mochi_format_error(mrb);
+  }
+  memcpy(g_format_value, json, (size_t)json_len);
+  g_format_value[json_len] = '\0';
+
+  if (argc >= 2) {
+    json = goose_vm_value_json(options, &json_len);
+    if (!json || json_len <= 0 || json_len >= (int64_t)sizeof(g_format_options)) {
+      snprintf(g_format_error, sizeof(g_format_error), "format options are too large");
+      return mochi_format_error(mrb);
+    }
+    memcpy(g_format_options, json, (size_t)json_len);
+    g_format_options[json_len] = '\0';
+  } else {
+    memcpy(g_format_options, "{}", 2);
+    g_format_options[2] = '\0';
+  }
+
+  status = mochi_host_format_js(kind, g_format_value, g_format_options,
+                                (char *)g_format_output,
+                                (int)sizeof(g_format_output), g_format_error,
+                                (int)sizeof(g_format_error));
+  if (status != 0) return mochi_format_error(mrb);
+
+  {
+    uint64_t text = goose_vm_make_scratch_string(
+        slice_of(g_format_output, strlen((const char *)g_format_output)));
+    if (text == 0) {
+      snprintf(g_format_error, sizeof(g_format_error),
+               "format result allocation failed");
+      return mochi_format_error(mrb);
+    }
+    return text;
+  }
+}
+
+static mrb_value mochi_format_number_native(mrb_state *mrb, mrb_value self) {
+  return mochi_format_native(mrb, self, "number");
+}
+
+static mrb_value mochi_format_date_native(mrb_state *mrb, mrb_value self) {
+  return mochi_format_native(mrb, self, "date");
 }
 
 /* Ruby-callable: Mochi.fetch(url, callback, options = {}).
@@ -410,6 +537,12 @@ int32_t mochi_init_runtime(void) {
   mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   mrb_define_module_function(g_mrb, mochi, "emit_child", mochi_emit_child_native,
+                             MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "format_number",
+                             mochi_format_number_native,
+                             MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "format_date",
+                             mochi_format_date_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   if (g_mrb->exc) {
     set_error_text("Mochi module registration failed");

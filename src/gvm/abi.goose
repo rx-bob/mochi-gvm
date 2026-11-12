@@ -46,6 +46,9 @@ var g_abi_call_args: MrbValue[..ABI_MAX_CALL_ARGS] = [];
 var g_abi_bytecode: u8[>..] = [];
 var g_abi_error: bool = false;
 var g_abi_error_text: u8[>..] = [];
+// Set by a native host adapter before it returns NATIVE_FAIL. It makes a
+// native failure actionable instead of only reporting "native method failed".
+var g_abi_host_error: u8[>..] = [];
 var g_abi_patch_bytes: u8[>..] = [];
 var g_abi_json: u8[>..] = [];
 var g_abi_fetch_json: u8[>..] = [];
@@ -53,6 +56,7 @@ var g_abi_fetch_json: u8[>..] = [];
 fn abi_clear_error() {
     g_abi_error = false;
     g_abi_error_text.clear();
+    g_abi_host_error.clear();
 }
 
 fn abi_fail(text: u8[:]) {
@@ -92,6 +96,10 @@ fn abi_format_error_context() -> u8[>..] {
         return text;
     }
     text.append(vm_error_name(g_abi_machine.error));
+    if g_abi_machine.error == VmError.NativeError && g_abi_host_error.len > 0 {
+        text.append(": ");
+        text.append(g_abi_host_error[..]);
+    }
     return text;
 }
 
@@ -656,6 +664,15 @@ export fn goose_vm_has_error() -> bool {
 
 export fn goose_vm_intern(name: const u8[:]) -> u32 {
     return abi_intern(name);
+}
+
+export fn goose_vm_set_host_error(text: const u8[:]) {
+    g_abi_host_error.clear();
+    g_abi_host_error.append(text);
+}
+
+export fn goose_vm_clear_host_error() {
+    g_abi_host_error.clear();
 }
 
 export fn goose_vm_define_module(name_symbol: u32) -> u32 {

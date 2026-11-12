@@ -150,6 +150,12 @@ static void set_exc(mrb_state *mrb, const char *fallback) {
   shim->error_text[copy] = '\0';
 }
 
+// Native bridge helpers use this to fail the current VM entry with a message.
+// Goose formats the actionable text from goose_vm_set_host_error.
+void mochi_abi_set_error(mrb_state *mrb, const char *text) {
+  set_exc(mrb, text ? text : "native method failed");
+}
+
 static struct RClass *class_for_id(mrb_state *mrb, uint32_t class_id) {
   mrb_shim *shim = shim_of(mrb);
   int index = 0;
