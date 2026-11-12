@@ -34,10 +34,51 @@ fn vm_dispose_instance(machine: Vm&, instance: MrbValue) -> bool {
     return true;
 }
 
+// Installs declared props through the component's generated
+// `__mochi_apply_props` method. A component without declarations has no such
+// method and ignores the payload. A missing or failed generated method leaves
+// `machine.error` set so the mount transaction can roll back.
+fn vm_apply_component_props(
+    machine: Vm&, instance: MrbValue, props: MrbValue, initial: bool
+) -> bool {
+    let class_id, is_instance = vm_owner_class_id(machine, instance);
+    if !is_instance {
+        machine.error = VmError.BadReceiver;
+        return false;
+    }
+    let apply_symbol = intern_symbol("__mochi_apply_props");
+    let irep, found = vm_lookup_method(machine, class_id, apply_symbol);
+    if !found {
+        return true;
+    }
+    vm_set_error_context(machine, class_id, apply_symbol, -1);
+    let args: MrbValue[2] = [props, mrb_bool(initial)];
+    vm_exec_with_args(machine, irep, instance, -1, args[..]);
+    if machine.error != VmError.Ok {
+        return false;
+    }
+    if machine.pool.error != VmError.Ok {
+        machine.error = machine.pool.error;
+        return false;
+    }
+    return true;
+}
+
 // Creates a state instance of `class_sym` and runs its `initialize` method with
 // no arguments. The returned instance is durable state, so the tick arena is
 // released before returning.
 fn vm_instantiate(machine: Vm&, class_sym: u32) -> MrbValue {
+    return vm_instantiate_with_props(machine, class_sym, "");
+}
+
+// Mounts one component with a JSON object of declared props. Props are
+// installed before `initialize` so declared defaults and supplied values are
+// readable there. A second copy of the payload is installed afterwards so an
+// `initialize` assignment or in-place collection mutation cannot clobber the
+// parent's input.
+fn vm_instantiate_with_props(
+    machine: Vm&, class_sym: u32, props_json: const u8[:]
+) -> MrbValue {
     vm_begin_entry(machine);
     vm_ensure_booted(machine);
     if machine.error != VmError.Ok {
@@ -63,11 +104,63 @@ fn vm_instantiate(machine: Vm&, class_sym: u32) -> MrbValue {
         return mrb_nil();
     }
     assert(state_register_component(machine.pool, instance));
+
+    var props = builtin_hash_new(machine.scratch);
+    var restore_props = props;
+    if props_json.len > 0 {
+        let parsed, parsed_ok = json_parse_document(machine.pool, machine.scratch, props_json);
+        if !parsed_ok || !vm_is_hash_value(machine, parsed) {
+            machine.error = VmError.TypeMismatch;
+            vm_end_entry(machine);
+            vm_dispose_instance(machine, instance);
+            return mrb_nil();
+        }
+        props = promote_to_state(machine.pool, machine.scratch, parsed);
+        if !mrb_is_state(props) || machine.pool.error != VmError.Ok {
+            machine.error = VmError.StateCapacity;
+            if machine.pool.error != VmError.Ok {
+                machine.error = machine.pool.error;
+            }
+            vm_end_entry(machine);
+            vm_dispose_instance(machine, instance);
+            return mrb_nil();
+        }
+        // Promote an independent second copy from the untouched scratch hash.
+        // `initialize` may mutate the arrays/hashes reached through the first
+        // copy in place, so restoring the same handle would not undo it.
+        restore_props = promote_to_state(machine.pool, machine.scratch, parsed);
+        if !mrb_is_state(restore_props) || machine.pool.error != VmError.Ok {
+            machine.error = VmError.StateCapacity;
+            if machine.pool.error != VmError.Ok {
+                machine.error = machine.pool.error;
+            }
+            vm_end_entry(machine);
+            vm_dispose_instance(machine, instance);
+            return mrb_nil();
+        }
+    }
+
+    if !vm_apply_component_props(machine, instance, props, true) {
+        vm_end_entry(machine);
+        vm_dispose_instance(machine, instance);
+        return mrb_nil();
+    }
+
     let initialize_symbol = intern_symbol("initialize");
     let irep, has_initialize = vm_lookup_method(machine, class_id, initialize_symbol);
     if has_initialize {
         vm_set_error_context(machine, class_id, initialize_symbol, -1);
         vm_exec(machine, irep, instance, -1);
+    }
+    // Declared props are read-only inputs. Reinstalling defaults and supplied
+    // values discards any `initialize` assignment or in-place collection
+    // mutation, so a mount always starts from the resolved snapshot.
+    if machine.error == VmError.Ok {
+        if !vm_apply_component_props(machine, instance, restore_props, true) {
+            vm_end_entry(machine);
+            vm_dispose_instance(machine, instance);
+            return mrb_nil();
+        }
     }
     vm_end_entry(machine);
     if machine.error != VmError.Ok {

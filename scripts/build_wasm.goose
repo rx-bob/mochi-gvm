@@ -42,7 +42,8 @@ fn compile_bridge() {
     command.append("-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE ");
     command.append("-sEXPORTED_FUNCTIONS='[\"_main\",");
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
-    command.append("\"_mochi_mount_component\",\"_mochi_intern\",");
+    command.append("\"_mochi_mount_component\",\"_mochi_mount_component_props\",");
+    command.append("\"_mochi_set_props_json\",\"_mochi_intern\",");
     command.append("\"_mochi_register_binding\",\"_mochi_unmount_component\",");
     command.append("\"_mochi_binding_count\",\"_mochi_component_count\",");
     command.append("\"_mochi_state_object_count\",\"_mochi_state_allocated_count\",");

@@ -309,6 +309,21 @@ fn abi_obj_new(class_id: u32) -> u64 {
     return value;
 }
 
+// Mounts a component after resolving its declared props. The JSON object is
+// parsed and installed before `initialize`, then a fresh copy is restored
+// after it so initialization cannot overwrite a parent-supplied input.
+fn abi_obj_new_with_props(class_id: u32, props_json: const u8[:]) -> u64 {
+    abi_clear_error();
+    if class_id >= BUILTIN_ARRAY_CLASS_ID || class_id >= state_class_count(g_abi_pool)as u32 {
+        abi_fail("unknown class");
+        return mrb_nil();
+    }
+    let name_symbol = state_class_name_symbol(g_abi_pool, class_id);
+    let value = vm_instantiate_with_props(g_abi_machine, name_symbol, props_json);
+    abi_record_vm_error(g_abi_machine);
+    return value;
+}
+
 fn abi_set_arg(index: i64, value: u64) {
     if index >= 0 && index < ABI_MAX_CALL_ARGS {
         while g_abi_call_args.len <= index {
@@ -663,6 +678,10 @@ export fn goose_vm_obj_new(class_id: u32) -> u64 {
     return abi_obj_new(class_id);
 }
 
+export fn goose_vm_obj_new_with_props(class_id: u32, props_json: const u8[:]) -> u64 {
+    return abi_obj_new_with_props(class_id, props_json);
+}
+
 export fn goose_vm_set_arg(index: i64, value: u64) {
     abi_set_arg(index, value);
 }
@@ -817,6 +836,38 @@ export fn goose_vm_set_ivar_string(
     }
     // String replacement is a host mutation; the stored value is rooted by the
     // component, and quiescent reclamation can return the previous bytes.
+    abi_reclaim_quiescent();
+    return 0;
+}
+
+// Host typed-prop update. The JSON object may contain any subset of the
+// component's declared props. All values are installed by one call to the
+// generated `__mochi_apply_props` before the host flushes patches, which keeps
+// related inputs consistent for observers.
+export fn goose_vm_set_props_json(instance: u64, json: const u8[:]) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    g_abi_pool.error = VmError.Ok;
+    if state_instance_disposed(g_abi_pool, instance) {
+        abi_fail("disposed instance");
+        return -1;
+    }
+    vm_begin_entry(g_abi_machine);
+    let props, parsed = json_parse_document(g_abi_pool, g_abi_scratch, json);
+    if !parsed || !vm_is_hash_value(g_abi_machine, props) {
+        abi_fail("bad props payload");
+        vm_end_entry(g_abi_machine);
+        return -1;
+    }
+    if !vm_apply_component_props(g_abi_machine, instance, props, false) {
+        abi_record_vm_error(g_abi_machine);
+        vm_end_entry(g_abi_machine);
+        return -1;
+    }
+    vm_end_entry(g_abi_machine);
+    // Replacing a prop snapshot is a host mutation. Running reclaim here lets
+    // repeated parent updates return the previous array/hash before the next
+    // allocation needs the space.
     abi_reclaim_quiescent();
     return 0;
 }

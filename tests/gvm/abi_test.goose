@@ -12,6 +12,7 @@ let USERS_CHI: const u8[:] = embed_file("../fixtures/users.chi");
 let FETCH_PROBE_CHI: const u8[:] = embed_file("../fixtures/fetch_probe.chi");
 let FAILING_INIT_CHI: const u8[:] = embed_file("../fixtures/failing_init.chi");
 let WIDE_COMPONENT_CHI: const u8[:] = embed_file("../fixtures/wide_component.chi");
+let PROPS_COMPONENT_CHI: const u8[:] = embed_file("../fixtures/props_component.chi");
 let COUNTER_HTML: const u8[:] = "<div class='counter'><h2>Click me</h2><span class='count'>1</span><div class='buttons'><button data-action='decrement'>-</button><button data-action='increment'>+</button><button data-action='reset'>Reset</button></div></div>";
 let TODO_HTML_EMPTY: const u8[:] = "<div class='todo'><h2>Todo List (0 items)</h2><ul></ul><div class='buttons'><button data-action='add_item'>Add</button><button data-action='toggle_last'>Toggle Last</button><button data-action='remove_last'>Remove Last</button></div></div>";
 var g_counter_rite: u8[>..] = [];
@@ -20,6 +21,7 @@ var g_users_rite: u8[>..] = [];
 var g_fetch_probe_rite: u8[>..] = [];
 var g_failing_init_rite: u8[>..] = [];
 var g_wide_component_rite: u8[>..] = [];
+var g_props_component_rite: u8[>..] = [];
 
 fn counter_rite() -> u8[:] {
     if g_counter_rite.len == 0 {
@@ -61,6 +63,114 @@ fn wide_component_rite() -> u8[:] {
         vm::vm_restore_rite_header(WIDE_COMPONENT_CHI, g_wide_component_rite);
     }
     return g_wide_component_rite[..];
+}
+
+fn props_component_rite() -> u8[:] {
+    if g_props_component_rite.len == 0 {
+        vm::vm_restore_rite_header(PROPS_COMPONENT_CHI, g_props_component_rite);
+    }
+    return g_props_component_rite[..];
+}
+
+fn call_string(instance: u64, name: u8[:]) -> const u8[:] {
+    let value = vm::abi_call(instance, vm::intern_symbol(name), 0);
+    return vm::abi_string_bytes(value);
+}
+
+fn call_fixnum(instance: u64, name: u8[:]) -> i64 {
+    let value = vm::abi_call(instance, vm::intern_symbol(name), 0);
+    return vm::mrb_fixnum_value(value);
+}
+
+fn call_json(instance: u64, name: u8[:]) -> const u8[:] {
+    let value = vm::abi_call(instance, vm::intern_symbol(name), 0);
+    return vm::abi_value_json(value);
+}
+
+fn test_abi_mounts_typed_props_with_defaults(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
+    let klass = vm::abi_const_get(vm::intern_symbol("PropsComponent"));
+    let instance = vm::abi_obj_new_with_props(vm::mrb_class_id(klass), "{}");
+    t.assert_true(vm::mrb_is_state(instance));
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq("default", call_string(instance, "label"));
+    t.assert_eq(3, call_fixnum(instance, "count"));
+    t.assert_eq("false", call_json(instance, "flag"));
+    t.assert_eq("null", call_json(instance, "note"));
+    t.assert_eq("[]", call_json(instance, "rows"));
+    t.assert_eq("{}", call_json(instance, "meta"));
+    // initialize runs after the defaults are installed.
+    t.assert_eq("default", call_string(instance, "init_label"));
+    t.assert_eq(3, call_fixnum(instance, "init_count"));
+    t.assert_eq("null", call_json(instance, "init_note"));
+    vm::abi_close();
+}
+
+fn test_abi_mounts_typed_props_before_initialize(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
+    let klass = vm::abi_const_get(vm::intern_symbol("PropsComponent"));
+    let payload: const u8[:] = "{\"label\":\"from-parent\",\"count\":7,\"flag\":true,\"note\":\"\",\"rows\":[{\"id\":1}],\"meta\":{\"currency\":\"USD\"}}";
+    let instance = vm::abi_obj_new_with_props(vm::mrb_class_id(klass), payload);
+    t.assert_true(vm::mrb_is_state(instance));
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq("from-parent", call_string(instance, "label"));
+    t.assert_eq(7, call_fixnum(instance, "count"));
+    t.assert_eq("true", call_json(instance, "flag"));
+    t.assert_eq("\"\"", call_json(instance, "note"));
+    t.assert_eq("[{\"id\":1}]", call_json(instance, "rows"));
+    t.assert_eq("{\"currency\":\"USD\"}", call_json(instance, "meta"));
+    // initialize observed the resolved inputs, and its later clobbering
+    // assignments were restored from the independent second snapshot.
+    t.assert_eq("from-parent", call_string(instance, "init_label"));
+    t.assert_eq(7, call_fixnum(instance, "init_count"));
+    t.assert_eq("\"\"", call_json(instance, "init_note"));
+    t.assert_eq("[{\"id\":1}]", call_json(instance, "rows"));
+    vm::abi_close();
+}
+
+fn test_abi_updates_typed_props_together(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
+    let klass = vm::abi_const_get(vm::intern_symbol("PropsComponent"));
+    let instance = vm::abi_obj_new_with_props(vm::mrb_class_id(klass), "{}");
+
+    t.assert_eq(0, vm::goose_vm_set_props_json(instance, "{\"label\":\"next\",\"count\":8}"));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq("next", call_string(instance, "label"));
+    t.assert_eq(8, call_fixnum(instance, "count"));
+    // Omitted props keep their last value.
+    t.assert_eq("false", call_json(instance, "flag"));
+    t.assert_eq("[]", call_json(instance, "rows"));
+
+    t.assert_eq(-1, vm::goose_vm_set_props_json(instance, "[1,2]"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("next", call_string(instance, "label"));
+
+    t.assert_eq(0, vm::abi_unregister_component(instance));
+    t.assert_eq(-1, vm::goose_vm_set_props_json(instance, "{\"label\":\"gone\"}"));
+    vm::abi_close();
+}
+
+fn test_abi_reclaims_replaced_prop_snapshots(t: goosetest::Test&) {
+    let payload: const u8[:] = "{\"rows\":[1,2,3],\"meta\":{\"key\":\"value\"}}";
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(props_component_rite()));
+    let klass = vm::abi_const_get(vm::intern_symbol("PropsComponent"));
+    let instance = vm::abi_obj_new_with_props(vm::mrb_class_id(klass), "{}");
+
+    var update = 0;
+    while update < 300 {
+        t.assert_eq(0, vm::goose_vm_set_props_json(instance, payload));
+        update += 1;
+    }
+    vm::gc_collect(vm::g_abi_machine);
+    t.assert_true(vm::abi_state_allocated_count() < 30, "old prop snapshots reclaimed");
+    t.assert_eq("[1,2,3]", call_json(instance, "rows"));
+    vm::abi_close();
 }
 
 fn test_abi_loads_and_calls_counter(t: goosetest::Test&) {

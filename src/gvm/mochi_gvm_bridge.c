@@ -86,6 +86,9 @@ extern const uint8_t *goose_vm_host_outbox(int64_t *out_len);
 extern void goose_vm_clear_host_outbox(void);
 extern int64_t goose_vm_set_ivar_string(uint64_t instance, goose_u8_slice name,
                                         goose_u8_slice value);
+extern uint64_t goose_vm_obj_new_with_props(uint32_t class_id,
+                                             goose_u8_slice props_json);
+extern int64_t goose_vm_set_props_json(uint64_t instance, goose_u8_slice json);
 extern const uint8_t *goose_vm_eval_each_expr(uint64_t receiver,
                                               uint32_t method_symbol,
                                               goose_u8_slice json,
@@ -382,6 +385,48 @@ uint64_t mochi_mount_component(const uint8_t *name, int32_t length) {
   return (uint64_t)instance;
 }
 
+/* mount_component_props(class_name, props_json) -> opaque instance handle.
+ * The props object is parsed and installed before `initialize`, then restored
+ * after it so a child's initialization cannot overwrite a parent-supplied
+ * input. A malformed payload fails the mount before any instance is returned. */
+MOCHI_EXPORT
+uint64_t mochi_mount_component_props(const uint8_t *name, int32_t length,
+                                     const uint8_t *json, int32_t json_length) {
+  uint32_t symbol;
+  uint64_t class_value;
+  struct RClass *klass;
+  uint64_t instance;
+  if (!g_mrb || !name || length <= 0) {
+    set_error_text("runtime is not open");
+    return 0;
+  }
+  if (!json || json_length < 0) {
+    set_error_text("invalid props payload");
+    return 0;
+  }
+  clear_error();
+  symbol = goose_vm_intern(slice_of(name, (size_t)length));
+  class_value = goose_vm_const_get(symbol);
+  if (!goose_vm_is_class(class_value)) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("unknown component class");
+    return 0;
+  }
+  klass = mrb_class_ptr(class_value);
+  if (!klass) {
+    set_error_text("unknown component class");
+    return 0;
+  }
+  instance = goose_vm_obj_new_with_props(
+      klass->class_id, slice_of(json, (size_t)json_length));
+  if (goose_vm_has_error()) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("component mount failed");
+    return 0;
+  }
+  return instance;
+}
+
 MOCHI_EXPORT
 uint32_t mochi_intern(const uint8_t *name, int32_t length) {
   if (!name || length <= 0) return 0;
@@ -621,6 +666,26 @@ int32_t mochi_set_ivar_string(uint64_t instance, const uint8_t *name,
   if (result != 0) {
     capture_vm_error();
     if (g_error_len == 0) set_error_text("ivar assignment failed");
+  }
+  return result == 0 ? 0 : -1;
+}
+
+/* set_props_json(instance, json) -> 0 on success, -1 on failure.
+ * The loader batches every changed declared prop into one JSON object so one
+ * VM entry installs them together before the caller's single patch flush. */
+MOCHI_EXPORT
+int32_t mochi_set_props_json(uint64_t instance, const uint8_t *json,
+                             int32_t json_len) {
+  int64_t result;
+  clear_error();
+  if (!json || json_len <= 0) {
+    set_error_text("empty props payload");
+    return -1;
+  }
+  result = goose_vm_set_props_json(instance, slice_of(json, (size_t)json_len));
+  if (result != 0) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("props update failed");
   }
   return result == 0 ? 0 : -1;
 }
