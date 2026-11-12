@@ -143,6 +143,9 @@ fn test_abi_repeat_prop_mounts(t: goosetest::Test&) {
         }
         t.assert_true(vm::mrb_is_state(instance), "every repeated typed-prop mount succeeds");
         t.assert_false(vm::abi_has_error());
+        // Repeated instances must keep both their class method table and
+        // per-instance typed values after reclaiming temporary prop snapshots.
+        vm::gc_collect(vm::g_abi_machine);
         t.assert_eq(label, call_string(instance, "label"));
         t.assert_eq(20 + index, call_fixnum(instance, "count"));
         instances[index] = instance;
