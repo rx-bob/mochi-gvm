@@ -215,3 +215,38 @@ fn test_state_rejects_non_instance_receivers(t: goosetest::Test&) {
     t.assert_eq(0, vm::state_ivar_count(pool));
     t.assert_true(vm::mrb_is_state(instance));
 }
+
+fn test_logs_ring_1000_bounded_updates(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    let retained = vm::state_alloc_array(pool);
+    var sequence = 1;
+    var initialized = true;
+    while sequence <= 2000 {
+        initialized = vm::state_array_push(pool, retained, vm::mrb_fixnum(sequence)) && initialized;
+        sequence += 1;
+    }
+    t.assert_true(initialized);
+    let object_count = vm::state_object_count(pool);
+
+    var cursor = 0;
+    var step = 0;
+    var updated = true;
+    while step < 1000 {
+        updated = vm::state_array_set(
+            pool, retained, cursor, vm::mrb_fixnum(2001 + step)) && updated;
+        cursor = (cursor + 1) % 2000;
+        step += 1;
+    }
+
+    t.assert_true(updated);
+    t.assert_eq(2000, vm::state_array_length(pool, retained));
+    t.assert_eq(object_count, vm::state_object_count(pool));
+    let oldest, oldest_found = vm::state_array_get(pool, retained, cursor);
+    let newest, newest_found = vm::state_array_get(pool, retained, cursor - 1);
+    t.assert_true(oldest_found);
+    t.assert_true(newest_found);
+    t.assert_eq(1001, vm::mrb_fixnum_value(oldest));
+    t.assert_eq(3000, vm::mrb_fixnum_value(newest));
+}
