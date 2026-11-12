@@ -12,6 +12,7 @@ import.vm_blocks;
 import.vm_core;
 import.vm_dispatch;
 import.vm_methods;
+import.vm_num;
 
 fn builtin_to_s(machine: Vm&, value: MrbValue) -> MrbValue {
     if vm_is_string_value(machine, value) {
@@ -23,8 +24,21 @@ fn builtin_to_s(machine: Vm&, value: MrbValue) -> MrbValue {
 }
 
 fn builtin_to_i(machine: Vm&, value: MrbValue) -> MrbValue {
-    if mrb_is_fixnum(value) {
+    let kind = num_kind(machine.scratch, machine.pool, value);
+    if kind == NumKind.Integer {
         return value;
+    }
+    if kind == NumKind.Float {
+        let integer, ok = num_to_i64(machine.scratch, machine.pool, value);
+        if !ok {
+            machine.error = VmError.FloatDomain;
+            return mrb_nil();
+        }
+        let converted = num_from_i64(machine.scratch, integer);
+        if mrb_is_nil(converted) {
+            machine.error = VmError.ScratchFull;
+        }
+        return converted;
     }
     if !vm_is_string_value(machine, value) {
         return mrb_fixnum(0);
@@ -39,89 +53,133 @@ fn builtin_to_i(machine: Vm&, value: MrbValue) -> MrbValue {
         negative = bytes[at] == 45;
         at += 1;
     }
-    var acc: i64 = 0;
+    let digits_start = at;
     while at < bytes.len && bytes[at] >= 48 && bytes[at] <= 57 {
-        acc = acc * 10 + (bytes[at] - 48);
-        if acc > MRB_FIXNUM_MAX {
-            acc = MRB_FIXNUM_MAX;
-        }
         at += 1;
     }
-    if negative {
-        acc = -acc;
+    if at == digits_start {
+        return mrb_fixnum(0);
     }
-    return mrb_fixnum(acc);
+    let integer, ok = num_parse_i64_bytes(bytes[digits_start..at], 10, negative);
+    if !ok {
+        machine.error = VmError.IntegerOverflow;
+        return mrb_nil();
+    }
+    let converted = num_from_i64(machine.scratch, integer);
+    if mrb_is_nil(converted) {
+        machine.error = VmError.ScratchFull;
+    }
+    return converted;
 }
 
-fn builtin_fixnum_method(
+fn numeric_method_fault(fault: NumFault) -> VmError {
+    return match fault {
+        Overflow => VmError.IntegerOverflow,
+        DivisionByZero => VmError.DivisionByZero,
+        Scratch => VmError.ScratchFull,
+        _ => VmError.TypeMismatch,
+    };
+}
+
+fn builtin_number_method(
     machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
-    let left = mrb_fixnum_value(receiver);
+    if name == "zero?" {
+        return mrb_bool(num_zero(machine.scratch, machine.pool, receiver)), true;
+    }
     if name == "abs" {
-        return mrb_fixnum(if left < 0 {
-                -left
+        let value, fault = num_abs(machine.scratch, machine.pool, receiver);
+        if fault != NumFault.Ok {
+            machine.error = numeric_method_fault(fault);
+        }
+        return value, true;
+    }
+    if name == "to_f" {
+        let float, ok = num_to_f64(machine.scratch, machine.pool, receiver);
+        if !ok {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        let value = num_from_f64(machine.scratch, float);
+        if mrb_is_nil(value) {
+            machine.error = VmError.ScratchFull;
+        }
+        return value, true;
+    }
+    if name == "even?" || name == "odd?" {
+        let integer, ok = num_integer_value(machine.scratch, machine.pool, receiver);
+        if !ok {
+            return mrb_nil(), false;
+        }
+        let even = integer % 2 == 0;
+        return mrb_bool(if name == "even?" {
+                even
             } else {
-                left
+                !even
             }), true;
     }
-    if name == "zero?" {
-        return mrb_bool(left == 0), true;
-    }
-    if name == "even?" {
-        return mrb_bool(left % 2 == 0), true;
-    }
-    if name == "odd?" {
-        return mrb_bool(left % 2 != 0), true;
-    }
-    if name == "clamp" && args.len >= 2 && mrb_is_fixnum(args[0]) && mrb_is_fixnum(args[1]) {
-        let lo = mrb_fixnum_value(args[0]);
-        let hi = mrb_fixnum_value(args[1]);
-        var clamped = left;
-        if clamped < lo {
-            clamped = lo;
+    if name == "clamp" && args.len >= 2
+        && num_is_number(machine.scratch, machine.pool, args[0])
+        && num_is_number(machine.scratch, machine.pool, args[1]) {
+        let below, below_ok = num_compare(machine.scratch, machine.pool, receiver, args[0]);
+        let above, above_ok = num_compare(machine.scratch, machine.pool, receiver, args[1]);
+        if !below_ok || !above_ok {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
         }
-        if clamped > hi {
-            clamped = hi;
+        if below < 0 {
+            return args[0], true;
         }
-        return mrb_fixnum(clamped), true;
+        if above > 0 {
+            return args[1], true;
+        }
+        return receiver, true;
     }
-    if args.len < 1 || !mrb_is_fixnum(args[0]) {
+    if name == "-@" {
+        let value, fault = num_neg(machine.scratch, machine.pool, receiver);
+        if fault != NumFault.Ok {
+            machine.error = numeric_method_fault(fault);
+        }
+        return value, true;
+    }
+    if args.len < 1 || !num_is_number(machine.scratch, machine.pool, args[0]) {
         return mrb_nil(), false;
     }
-    let right = mrb_fixnum_value(args[0]);
+    let right = args[0];
     if name == "+" || name == "-" || name == "*" || name == "/" || name == "%" {
-        if (name == "/" || name == "%") && right == 0 {
-            machine.error = VmError.TypeMismatch;
-            return mrb_nil(), true;
-        }
-        let res = if name == "+" {
-            left + right
+        var result: MrbValue = mrb_nil();
+        var fault: NumFault = NumFault.Ok;
+        if name == "+" {
+            result, fault = num_add(machine.scratch, machine.pool, receiver, right);
         } else if name == "-" {
-            left - right
+            result, fault = num_sub(machine.scratch, machine.pool, receiver, right);
         } else if name == "*" {
-            left * right
+            result, fault = num_mul(machine.scratch, machine.pool, receiver, right);
         } else if name == "/" {
-            vm_div_floor(left, right)
+            result, fault = num_div(machine.scratch, machine.pool, receiver, right);
         } else {
-            vm_mod_floor(left, right)
-        };
-        if res < MRB_FIXNUM_MIN || res > MRB_FIXNUM_MAX {
-            machine.error = VmError.TypeMismatch;
-            return mrb_nil(), true;
+            result, fault = num_mod(machine.scratch, machine.pool, receiver, right);
         }
-        return mrb_fixnum(res), true;
+        if fault != NumFault.Ok {
+            machine.error = numeric_method_fault(fault);
+        }
+        return result, true;
     }
     if name == "<" || name == "<=" || name == ">" || name == ">=" {
-        let cmp = if name == "<" {
-            left < right
-        } else if name == "<=" {
-            left <= right
-        } else if name == ">" {
-            left > right
-        } else {
-            left >= right
-        };
-        return mrb_bool(cmp), true;
+        let order, comparable = num_compare(machine.scratch, machine.pool, receiver, right);
+        var comparison = false;
+        if comparable {
+            if name == "<" {
+                comparison = order < 0;
+            } else if name == "<=" {
+                comparison = order <= 0;
+            } else if name == ">" {
+                comparison = order > 0;
+            } else {
+                comparison = order >= 0;
+            }
+        }
+        return mrb_bool(comparison), true;
     }
     return mrb_nil(), false;
 }
@@ -288,8 +346,10 @@ fn builtin_string_ext(
 }
 
 fn builtin_array_order_less(machine: Vm&, a: MrbValue, b: MrbValue) -> bool {
-    if mrb_is_fixnum(a) && mrb_is_fixnum(b) {
-        return mrb_fixnum_value(a) < mrb_fixnum_value(b);
+    if num_is_number(machine.scratch, machine.pool, a)
+        && num_is_number(machine.scratch, machine.pool, b) {
+        let order, comparable = num_compare(machine.scratch, machine.pool, a, b);
+        return comparable && order < 0;
     }
     let sa = builtin_string_bytes(machine.pool, machine.scratch, a);
     let sb = builtin_string_bytes(machine.pool, machine.scratch, b);

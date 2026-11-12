@@ -157,7 +157,7 @@ fn gc_reclaim_object(pool: StatePool&, index: i64) -> bool {
         state_blob_free(pool, object.text_offset_bytes, object.text_length_bytes);
     } else if object.kind == ArenaObjectKind.Instance {
         gc_release_ivars(pool, object.ivar_head_index);
-    } else {
+    } else if object.kind == ArenaObjectKind.Array || object.kind == ArenaObjectKind.Hash {
         gc_release_slots(pool, object.items_first_index);
     }
     let generation = ((object.generation as u32 + 1) & 0xFFFF)as u16;

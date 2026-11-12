@@ -87,6 +87,34 @@ fn test_parse_string_escapes_and_unicode(t: goosetest::Test&) {
     t.assert_true(emoji[3] == 128);
 }
 
+fn test_parse_wide_numbers_and_wrappers(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var args: vm::MrbValue[>..] = [];
+    let json = "[9007199254740993,1.5,1e-7,{\"__mochi_number\":\"i64\",\"value\":\"9223372036854775807\"},{\"__mochi_number\":\"f64\",\"value\":\"0.5\"}]";
+    t.assert_true(vm::json_parse_args(pool, scratch, json, args));
+    t.assert_eq(5, args.len);
+    let wide, wide_ok = vm::num_integer_value(scratch, pool, args[0]);
+    t.assert_true(wide_ok);
+    t.assert_eq(9007199254740993, wide);
+    let fraction, fraction_ok = vm::num_float_value(scratch, pool, args[1]);
+    t.assert_true(fraction_ok);
+    t.assert_eq(1.5, fraction);
+    let exponent, exponent_ok = vm::num_float_value(scratch, pool, args[2]);
+    t.assert_true(exponent_ok);
+    t.assert_eq(0.0000001, exponent);
+    let maximum, maximum_ok = vm::num_integer_value(scratch, pool, args[3]);
+    t.assert_true(maximum_ok);
+    t.assert_eq(vm::NUM_I64_MAX, maximum);
+    let wrapper_float, wrapper_float_ok = vm::num_float_value(scratch, pool, args[4]);
+    t.assert_true(wrapper_float_ok);
+    t.assert_eq(0.5, wrapper_float);
+}
+
 fn test_rejects_malformed_json(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..
@@ -98,7 +126,9 @@ fn test_rejects_malformed_json(t: goosetest::Test&) {
     t.assert_false(vm::json_parse_args(pool, scratch, "", args));
     t.assert_false(vm::json_parse_args(pool, scratch, "[1,]", args));
     t.assert_false(vm::json_parse_args(pool, scratch, "[\"unterminated]", args));
-    t.assert_false(vm::json_parse_args(pool, scratch, "[1.5]", args));
+    t.assert_false(vm::json_parse_args(pool, scratch, "[01]", args));
+    t.assert_false(vm::json_parse_args(pool, scratch, "[1e]", args));
+    t.assert_false(vm::json_parse_args(pool, scratch, "[9223372036854775808]", args));
     t.assert_false(vm::json_parse_args(pool, scratch, "[true] trailing", args));
     t.assert_false(vm::json_parse_args(pool, scratch,
         "[1,2,3,4,5,6,7,8,9]", args));

@@ -74,7 +74,8 @@ fn scratch_mark_payload(machine: Vm&, object: ArenaObject) {
         }
         return;
     }
-    if object.kind == ArenaObjectKind.String {
+    if object.kind == ArenaObjectKind.String
+        || object.kind == ArenaObjectKind.Int64 || object.kind == ArenaObjectKind.Float {
         return;
     }
     var slot_index = object.items_first_index;
@@ -162,7 +163,7 @@ fn scratch_reclaim_object(arena: ScratchArena&, index: i64) -> bool {
         scratch_release_bytes(arena, object.text_offset_bytes, object.text_length_bytes);
     } else if object.kind == ArenaObjectKind.Instance {
         scratch_release_ivars(arena, object.ivar_head_index);
-    } else {
+    } else if object.kind == ArenaObjectKind.Array || object.kind == ArenaObjectKind.Hash {
         scratch_release_slots(arena, object.items_first_index);
     }
     arena.objects[index] = empty_arena_object(ArenaObjectKind.String);

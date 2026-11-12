@@ -53,29 +53,29 @@ fn test_fixnum_method_dispatch(t: goosetest::Test&) {
         ..
     };
     let args_one: vm::MrbValue[1] = [vm::mrb_fixnum(5)];
-    let prod, prod_ok = vm::builtin_fixnum_method(machine, vm::mrb_fixnum(6), "*", args_one[..]);
+    let prod, prod_ok = vm::builtin_number_method(machine, vm::mrb_fixnum(6), "*", args_one[..]);
     t.assert_true(prod_ok);
     t.assert_eq(30, vm::mrb_fixnum_value(prod));
 
-    let quot, quot_ok = vm::builtin_fixnum_method(machine, vm::mrb_fixnum(-7), "/", args_one[..]);
+    let quot, quot_ok = vm::builtin_number_method(machine, vm::mrb_fixnum(-7), "/", args_one[..]);
     t.assert_true(quot_ok);
     t.assert_eq(-2, vm::mrb_fixnum_value(quot));
 
-    let rem, rem_ok = vm::builtin_fixnum_method(machine, vm::mrb_fixnum(-7), "%", args_one[..]);
+    let rem, rem_ok = vm::builtin_number_method(machine, vm::mrb_fixnum(-7), "%", args_one[..]);
     t.assert_true(rem_ok);
     t.assert_eq(3, vm::mrb_fixnum_value(rem));
 
     let empty: vm::MrbValue[0] = [];
-    let abs_v, abs_ok = vm::builtin_fixnum_method(machine, vm::mrb_fixnum(-9), "abs", empty[..]);
+    let abs_v, abs_ok = vm::builtin_number_method(machine, vm::mrb_fixnum(-9), "abs", empty[..]);
     t.assert_true(abs_ok);
     t.assert_eq(9, vm::mrb_fixnum_value(abs_v));
 
-    let even_v, even_ok = vm::builtin_fixnum_method(machine, vm::mrb_fixnum(4), "even?", empty[..]);
+    let even_v, even_ok = vm::builtin_number_method(machine, vm::mrb_fixnum(4), "even?", empty[..]);
     t.assert_true(even_ok);
     t.assert_true(vm::mrb_is_true(even_v));
 
     let clamp_args: vm::MrbValue[2] = [vm::mrb_fixnum(0), vm::mrb_fixnum(10)];
-    let clamped, clamp_ok = vm::builtin_fixnum_method(
+    let clamped, clamp_ok = vm::builtin_number_method(
         machine, vm::mrb_fixnum(15), "clamp", clamp_args[..]
     );
     t.assert_true(clamp_ok);

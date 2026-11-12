@@ -26,6 +26,7 @@ import.state_pool;
 import.value_arena;
 import.vm_core;
 import.vm_entry;
+import.vm_num;
 
 let MAX_SIGNAL_DEPTH = 32;
 let MAX_BINDINGS = 2048;
@@ -305,6 +306,28 @@ recursive fn binding_json_append_value(machine: Vm&, out: u8[>..]&, value: MrbVa
         mrb_format_fixnum(out, mrb_fixnum_value(value));
         return;
     }
+    if mrb_is_int64(value) {
+        let number, ok = num_integer_value(machine.scratch, machine.pool, value);
+        if ok {
+            out.append("{\"__mochi_number\":\"i64\",\"value\":\"");
+            mrb_format_fixnum(out, number);
+            out.append("\"}");
+        } else {
+            out.append("null");
+        }
+        return;
+    }
+    if mrb_is_float(value) {
+        let number, ok = num_float_value(machine.scratch, machine.pool, value);
+        if ok {
+            out.append("{\"__mochi_number\":\"f64\",\"value\":\"");
+            num_format_float(out, number);
+            out.append("\"}");
+        } else {
+            out.append("null");
+        }
+        return;
+    }
     if mrb_is_symbol(value) {
         out.push(34);
         binding_json_escape(out, symbol_name(mrb_symbol_id(value)));
@@ -331,6 +354,12 @@ fn binding_text(machine: Vm&, value: MrbValue) -> const u8[:] {
         var json: u8[>..] = [];
         binding_json_append_value(machine, json, value, 0);
         let handle = scratch_alloc_string(machine.scratch, json[..]);
+        return scratch_string_bytes(machine.scratch, handle);
+    }
+    if mrb_is_int64(value) || mrb_is_float(value) {
+        var text: u8[>..] = [];
+        vm_append_value_text(machine, text, value);
+        let handle = scratch_alloc_string(machine.scratch, text[..]);
         return scratch_string_bytes(machine.scratch, handle);
     }
     if mrb_is_scratch(value) || mrb_is_state(value) {

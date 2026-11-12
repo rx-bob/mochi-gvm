@@ -10,6 +10,7 @@ import.state_pool;
 import.value_arena;
 import.vm_core;
 import.vm_dispatch;
+import.vm_num;
 import.vm_ops;
 
 // Reserved class IDs for constants that have no state-pool class definition.
@@ -241,8 +242,8 @@ fn vm_call_builtin(
     if name == "to_i" {
         return builtin_to_i(machine, receiver), true;
     }
-    if mrb_is_fixnum(receiver) {
-        return builtin_fixnum_method(machine, receiver, name, args);
+    if num_is_number(machine.scratch, machine.pool, receiver) {
+        return builtin_number_method(machine, receiver, name, args);
     }
     if mrb_is_class(receiver) {
         let class_id = mrb_class_id(receiver);

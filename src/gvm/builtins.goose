@@ -11,6 +11,7 @@ import.rite_types;
 import.scratch_alloc;
 import.state_pool;
 import.value_arena;
+import.vm_num;
 
 fn builtin_not(value: MrbValue) -> MrbValue {
     if mrb_truthy(value) {
@@ -209,12 +210,26 @@ fn builtin_array_set(
 }
 
 fn builtin_append_text(pool: StatePool&, scratch: ScratchArena&, out: u8[>..]&, value: MrbValue) {
-    if mrb_is_scratch(value) || mrb_is_state(value) {
-        out.append(builtin_string_bytes(pool, scratch, value));
-        return;
-    }
     if mrb_is_fixnum(value) {
         mrb_format_fixnum(out, mrb_fixnum_value(value));
+        return;
+    }
+    if mrb_is_int64(value) {
+        let number, ok = num_integer_value(scratch, pool, value);
+        if ok {
+            mrb_format_fixnum(out, number);
+        }
+        return;
+    }
+    if mrb_is_float(value) {
+        let number, ok = num_float_value(scratch, pool, value);
+        if ok {
+            num_format_float(out, number);
+        }
+        return;
+    }
+    if mrb_is_scratch(value) || mrb_is_state(value) {
+        out.append(builtin_string_bytes(pool, scratch, value));
         return;
     }
     if mrb_is_true(value) {
@@ -306,6 +321,9 @@ fn builtin_hash_key_equal(
 ) -> bool {
     if mrb_value_identical(left, right) {
         return true;
+    }
+    if num_is_number(scratch, pool, left) || num_is_number(scratch, pool, right) {
+        return num_eql(scratch, pool, left, right);
     }
     let left_text, left_ok = builtin_hash_key_text(pool, scratch, left);
     if !left_ok {

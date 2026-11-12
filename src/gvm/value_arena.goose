@@ -28,6 +28,12 @@ let MRB_TAG_SYMBOL: u64 = 4;
 let MRB_TAG_CLASS: u64 = 5;
 let MRB_TAG_ARENA: u64 = 6;
 let MRB_TAG_BLOCK: u64 = 7;
+// Boxed numbers keep the same 32-bit arena-handle payload as `MRB_TAG_ARENA`.
+// The distinct tag lets predicates and diagnostics identify the kind without
+// looking up the object; the payload still names the scratch or state zone,
+// object index and generation.
+let MRB_TAG_INT64: u64 = 9;
+let MRB_TAG_FLOAT: u64 = 10;
 
 let MRB_ARENA_TAG_SHIFT: u64 = 31;
 // State object indices stop at `MAX_STATE_OBJECTS` (32768), which fits in 15
@@ -61,6 +67,10 @@ enum ArenaObjectKind {
     Instance,
     Array,
     Hash,
+    // Boxed numeric leaves. `integer_value` is exact across the signed 64-bit
+    // range; `float_value` holds one binary64 value.
+    Int64,
+    Float,
 }
 
 // One object header. `text_offset_bytes` and `text_length_bytes` view the
@@ -81,6 +91,9 @@ struct ArenaObject {
     items_first_index: i64,
     items_last_index: i64,
     item_count: i64,
+    // Numeric leaves use exactly one of these fields according to `kind`.
+    integer_value: i64,
+    float_value: f64,
     // Instances keep their header so shared references stay valid after
     // disposal. Every host entry checks this flag before touching the object.
     disposed: bool,
@@ -194,8 +207,9 @@ fn mrb_bool(value: bool) -> MrbValue {
     return mrb_false();
 }
 
-// Encodes a signed 32-bit immediate. Values outside the fixnum range belong in
-// a future heap object, so this rejects them rather than silently truncating.
+// Encodes a signed 32-bit immediate. Values outside the fixnum range use an
+// arena object through `num_from_i64`; this entry point rejects them instead
+// of silently truncating.
 fn mrb_fixnum(value: i64) -> MrbValue {
     assert(value >= MRB_FIXNUM_MIN);
     assert(value <= MRB_FIXNUM_MAX);
@@ -215,6 +229,10 @@ fn mrb_fixnum_value(value: MrbValue) -> i64 {
 // Appends the decimal form of `number`. Integers render without touching an
 // arena, which keeps `to_s` and `Array#join` allocation-free for scalars.
 fn mrb_format_fixnum(out: u8[>..]&, number: i64) {
+    if number == -9223372036854775808 {
+        out.append("-9223372036854775808");
+        return;
+    }
     var magnitude = number;
     if magnitude < 0 {
         out.push(45);
@@ -295,8 +313,16 @@ fn mrb_arena_value(arena_tag: u8, index: u32) -> MrbValue {
 // use the current header generation so a freed slot cannot answer to an old
 // handle. The fixed scratch arena always uses generation zero.
 fn mrb_arena_value_versioned(arena_tag: u8, index: u32, generation: u16) -> MrbValue {
+    return mrb_typed_arena_value(MRB_TAG_ARENA, arena_tag, index, generation);
+}
+
+// Packs a boxed-number tag with the same zone/index/generation payload used by
+// ordinary arena handles.
+fn mrb_typed_arena_value(
+    tag: u64, arena_tag: u8, index: u32, generation: u16
+) -> MrbValue {
     assert(index <= MRB_ARENA_INDEX_MASK as u32);
-    return (MRB_TAG_ARENA << MRB_TAG_SHIFT)
+    return (tag << MRB_TAG_SHIFT)
         | ((arena_tag as u64) << MRB_ARENA_TAG_SHIFT)
         | ((generation as u64) << MRB_ARENA_GENERATION_SHIFT)
         | index;
@@ -349,8 +375,19 @@ fn mrb_is_block(value: MrbValue) -> bool {
     return mrb_value_tag(value) == MRB_TAG_BLOCK;
 }
 
+fn mrb_is_int64(value: MrbValue) -> bool {
+    return mrb_value_tag(value) == MRB_TAG_INT64;
+}
+
+fn mrb_is_float(value: MrbValue) -> bool {
+    return mrb_value_tag(value) == MRB_TAG_FLOAT;
+}
+
+// Boxed numbers are arena handles too, so shared lookup, promotion and
+// reclamation code addresses every heap value through one path.
 fn mrb_is_arena(value: MrbValue) -> bool {
-    return mrb_value_tag(value) == MRB_TAG_ARENA;
+    let tag = mrb_value_tag(value);
+    return tag == MRB_TAG_ARENA || tag == MRB_TAG_INT64 || tag == MRB_TAG_FLOAT;
 }
 
 fn mrb_is_scratch(value: MrbValue) -> bool {
@@ -396,6 +433,12 @@ fn mrb_value_kind_name(value: MrbValue) -> u8[:] {
     if tag == MRB_TAG_BLOCK {
         return "block";
     }
+    if tag == MRB_TAG_INT64 {
+        return "int64";
+    }
+    if tag == MRB_TAG_FLOAT {
+        return "float";
+    }
     if tag == MRB_TAG_ARENA {
         if ((value >> MRB_ARENA_TAG_SHIFT) & 1) != 0 {
             return "state";
@@ -417,6 +460,8 @@ fn empty_arena_object(kind: ArenaObjectKind) -> ArenaObject {
         items_first_index: -1,
         items_last_index: -1,
         item_count: 0,
+        integer_value: 0,
+        float_value: 0.0,
         disposed: false,
         allocated: true,
         generation: 0,

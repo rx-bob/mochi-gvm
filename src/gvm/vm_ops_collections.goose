@@ -8,6 +8,27 @@ import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_core;
+import.vm_num;
+
+fn vm_bigint_literal(file: RiteFile&, entry: PoolEntry) -> i64, bool {
+    let start = entry.text_offset_bytes;
+    let stop = start + entry.text_length_bytes;
+    if start < 0 || stop > file.data.len || stop - start < 3 {
+        return 0, false;
+    }
+    let blob = file.data[start..stop];
+    let digits = blob[0]as i64;
+    if blob.len != digits + 2 {
+        return 0, false;
+    }
+    let signed_base = blob[1]as!i8;
+    var base = signed_base as i64;
+    let negative = base < 0;
+    if negative {
+        base = -base;
+    }
+    return num_parse_i64_bytes(blob[2..2 + digits], base, negative);
+}
 
 fn vm_op_load_literal(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
@@ -50,18 +71,24 @@ fn vm_op_load_literal(
     if !entry_ok {
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }
-    var number: i64 = 0;
+    var value = mrb_nil();
     if entry.tag == 1 || entry.tag == 3 {
-        number = entry.int_value;
+        value = num_from_i64(machine.scratch, entry.int_value);
     } else if entry.tag == 5 {
-        number = entry.float_value as i64;
+        value = num_from_f64(machine.scratch, entry.float_value);
+    } else if entry.tag == 7 {
+        let number, number_ok = vm_bigint_literal(machine.file, entry);
+        if !number_ok {
+            return vm_fail(machine, VmError.IntegerOverflow, pc + 2);
+        }
+        value = num_from_i64(machine.scratch, number);
     } else {
         return vm_fail(machine, VmError.TypeMismatch, pc + 2);
     }
-    if number < MRB_FIXNUM_MIN || number > MRB_FIXNUM_MAX {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 2);
+    if mrb_is_nil(value) {
+        return vm_fail(machine, VmError.ScratchFull, pc + 2);
     }
-    if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(number)) {
+    if !vm_write_register(machine, record, frame.base, ops.a, value) {
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }
     return vm_step_continue(pc + 2);

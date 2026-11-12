@@ -237,6 +237,32 @@ fn scratch_alloc_string(arena: ScratchArena&, text: u8[:]) -> MrbValue {
     return mrb_arena_value(MRB_ARENA_SCRATCH, index as u32);
 }
 
+fn scratch_alloc_int64(arena: ScratchArena&, value: i64) -> MrbValue {
+    let index = scratch_take_object(arena, ArenaObjectKind.Int64);
+    if index < 0 {
+        return mrb_nil();
+    }
+    var object = empty_arena_object(ArenaObjectKind.Int64);
+    object.integer_value = value;
+    arena.objects[index] = object;
+    arena.allocated_objects_total += 1;
+    return mrb_typed_arena_value(
+        MRB_TAG_INT64, MRB_ARENA_SCRATCH, index as u32, 0);
+}
+
+fn scratch_alloc_float(arena: ScratchArena&, value: f64) -> MrbValue {
+    let index = scratch_take_object(arena, ArenaObjectKind.Float);
+    if index < 0 {
+        return mrb_nil();
+    }
+    var object = empty_arena_object(ArenaObjectKind.Float);
+    object.float_value = value;
+    arena.objects[index] = object;
+    arena.allocated_objects_total += 1;
+    return mrb_typed_arena_value(
+        MRB_TAG_FLOAT, MRB_ARENA_SCRATCH, index as u32, 0);
+}
+
 // Allocates a scratch instance bound to a state-pool class ID.
 fn scratch_alloc_instance(arena: ScratchArena&, class_id: u32) -> MrbValue {
     let index = scratch_take_object(arena, ArenaObjectKind.Instance);

@@ -14,6 +14,7 @@ import.state_reclaim;
 import.value_arena;
 import.vm_core;
 import.vm_dispatch;
+import.vm_num;
 import.vm_ops_collections;
 
 // Runs the root IREP once per loaded program. Each root advances `booted_roots`
@@ -341,22 +342,32 @@ fn vm_op_arith(
         return vm_fail(machine, VmError.BadOperand, pc);
     }
     let value, value_ok = vm_read_register(machine, record, frame.base, ops.a);
-    if !value_ok || !mrb_is_fixnum(value) {
+    if !value_ok || !num_is_number(machine.scratch, machine.pool, value) {
         return vm_fail(machine, VmError.TypeMismatch, pc + count);
     }
-    var delta = if is_ilv {
+    let delta = if is_ilv {
         ops.c
     } else {
         ops.b
     };
+    var updated: MrbValue = mrb_nil();
+    var fault: NumFault = NumFault.Ok;
     if op == OP_SUBI || op == OP_SUBILV {
-        delta = -delta;
+        updated, fault = num_sub(machine.scratch, machine.pool, value, mrb_fixnum(delta));
+    } else {
+        updated, fault = num_add(machine.scratch, machine.pool, value, mrb_fixnum(delta));
     }
-    let updated = mrb_fixnum_value(value) + delta;
-    if updated < MRB_FIXNUM_MIN || updated > MRB_FIXNUM_MAX {
-        return vm_fail(machine, VmError.TypeMismatch, pc + count);
+    if fault != NumFault.Ok {
+        let error = if fault == NumFault.Overflow {
+            VmError.IntegerOverflow
+        } else if fault == NumFault.Scratch {
+            VmError.ScratchFull
+        } else {
+            VmError.TypeMismatch
+        };
+        return vm_fail(machine, error, pc + count);
     }
-    if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(updated)) {
+    if !vm_write_register(machine, record, frame.base, ops.a, updated) {
         return vm_fail(machine, VmError.BadOperand, pc + count);
     }
     return vm_step_continue(pc + count);

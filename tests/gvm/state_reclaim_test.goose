@@ -330,3 +330,52 @@ fn test_gc_reuses_ivar_and_slot_storage(t: goosetest::Test&) {
     t.assert_true(found);
     t.assert_eq(100, vm::mrb_fixnum_value(last));
 }
+
+fn test_gc_marks_boxed_numbers_in_ivars(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let class_id = vm::state_define_class(pool, 1, vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(pool, class_id);
+    t.assert_true(vm::state_register_component(pool, instance));
+    let wide = vm::promote_to_state(pool, scratch, vm::scratch_alloc_int64(scratch, 9007199254740993));
+    let fraction = vm::promote_to_state(pool, scratch, vm::scratch_alloc_float(scratch, 0.125));
+    t.assert_true(vm::state_store_ivar_raw(pool, vm::mrb_arena_index(instance), 1, wide));
+    t.assert_true(vm::state_store_ivar_raw(pool, vm::mrb_arena_index(instance), 2, fraction));
+
+    t.assert_eq(0, reclaim_machine(machine));
+    let stored_wide, wide_found = vm::state_get_ivar(pool, instance, 1);
+    let stored_fraction, fraction_found = vm::state_get_ivar(pool, instance, 2);
+    t.assert_true(wide_found);
+    t.assert_true(fraction_found);
+    t.assert_eq(wide, stored_wide);
+    t.assert_eq(fraction, stored_fraction);
+    let integer, integer_ok = vm::num_integer_value(scratch, pool, stored_wide);
+    let float, float_ok = vm::num_float_value(scratch, pool, stored_fraction);
+    t.assert_true(integer_ok);
+    t.assert_true(float_ok);
+    t.assert_eq(9007199254740993, integer);
+    t.assert_eq(0.125, float);
+
+    let replacement = vm::promote_to_state(pool, scratch, vm::scratch_alloc_int64(scratch, 7));
+    t.assert_true(vm::state_store_ivar_raw(pool, vm::mrb_arena_index(instance), 1, replacement));
+    t.assert_eq(1, reclaim_machine(machine));
+    let _, old_ok = vm::state_object(pool, wide);
+    t.assert_false(old_ok);
+    t.assert_false(vm::mrb_is_fixnum(replacement));
+    let replacement_value, replacement_ok = vm::num_integer_value(scratch, pool, replacement);
+    t.assert_true(replacement_ok);
+    t.assert_eq(7, replacement_value);
+}

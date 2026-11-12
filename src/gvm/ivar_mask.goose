@@ -197,12 +197,85 @@ fn state_mark_ivar_dirty(pool: StatePool&, object_index: i64, bit_index: u8) {
     pool.objects[object_index].dirty_ivars = mask;
 }
 
-// Value equality for dirtiness: identical handles, or equal state string bytes.
-// Distinct containers stay distinct even when their contents match, matching
-// Ruby's reference semantics for `@ivar` assignment.
+// Classifies a live numeric value for dirtiness checks without importing the
+// arithmetic core, which would create another state-pool dependency cycle.
+fn state_number_kind(pool: StatePool&, value: MrbValue) -> u8 {
+    if mrb_is_fixnum(value) || mrb_is_int64(value) {
+        return 1;
+    }
+    if mrb_is_float(value) {
+        return 2;
+    }
+    if !mrb_is_state(value) {
+        return 0;
+    }
+    let object, ok = state_object(pool, value);
+    if !ok {
+        return 0;
+    }
+    if object.kind == ArenaObjectKind.Int64 {
+        return 1;
+    }
+    if object.kind == ArenaObjectKind.Float {
+        return 2;
+    }
+    return 0;
+}
+
+// Compares same-kind numbers by value. Cross-kind equality is deliberately not
+// folded in: a type change is still an observable assignment and must dirty.
+fn state_number_equal(pool: StatePool&, left: MrbValue, right: MrbValue) -> bool {
+    if mrb_is_fixnum(left) && mrb_is_fixnum(right) {
+        return mrb_fixnum_value(left) == mrb_fixnum_value(right);
+    }
+    if mrb_is_float(left) || mrb_is_float(right) {
+        if !mrb_is_float(left) || !mrb_is_float(right) {
+            return false;
+        }
+        let left_object, left_ok = state_object(pool, left);
+        let right_object, right_ok = state_object(pool, right);
+        if !left_ok || !right_ok {
+            return false;
+        }
+        let left_value = left_object.float_value;
+        let right_value = right_object.float_value;
+        if left_value != left_value || right_value != right_value {
+            return left_value != left_value && right_value != right_value;
+        }
+        return left_value == right_value;
+    }
+    if mrb_is_fixnum(left) {
+        let right_object, right_ok = state_object(pool, right);
+        return right_ok && right_object.kind == ArenaObjectKind.Int64
+            && mrb_fixnum_value(left) == right_object.integer_value;
+    }
+    if mrb_is_fixnum(right) {
+        let left_object, left_ok = state_object(pool, left);
+        return left_ok && left_object.kind == ArenaObjectKind.Int64
+            && left_object.integer_value == mrb_fixnum_value(right);
+    }
+    let left_object, left_ok = state_object(pool, left);
+    let right_object, right_ok = state_object(pool, right);
+    return left_ok && right_ok
+        && left_object.kind == ArenaObjectKind.Int64
+        && right_object.kind == ArenaObjectKind.Int64
+        && left_object.integer_value == right_object.integer_value;
+}
+
+// Value equality for dirtiness: identical handles, same-kind numeric values, or
+// equal state string bytes. Distinct containers stay distinct even when their
+// contents match, matching Ruby's reference semantics for `@ivar` assignment.
 fn state_value_equal(pool: StatePool&, left: MrbValue, right: MrbValue) -> bool {
     if mrb_value_identical(left, right) {
         return true;
+    }
+    let left_number = state_number_kind(pool, left);
+    let right_number = state_number_kind(pool, right);
+    if left_number != 0 || right_number != 0 {
+        if left_number != right_number {
+            return false;
+        }
+        return state_number_equal(pool, left, right);
     }
     if !mrb_is_state(left) || !mrb_is_state(right) {
         return false;

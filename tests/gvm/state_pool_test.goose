@@ -168,6 +168,35 @@ fn test_promotion_keeps_state_and_immediates(t: goosetest::Test&) {
     t.assert_eq(state_bytes, vm::state_bytes_used(pool));
 }
 
+fn test_promotion_copies_boxed_numbers(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let wide = vm::scratch_alloc_int64(scratch, 9007199254740993);
+    let fraction = vm::scratch_alloc_float(scratch, 0.25);
+    let array = vm::scratch_alloc_array(scratch);
+    t.assert_true(vm::scratch_array_push(scratch, array, wide));
+    t.assert_true(vm::scratch_array_push(scratch, array, fraction));
+
+    let durable = vm::promote_to_state(pool, scratch, array);
+    t.assert_true(vm::mrb_is_state(durable));
+    let stored_wide = vm::state_array_get(pool, durable, 0);
+    let stored_fraction = vm::state_array_get(pool, durable, 1);
+    t.assert_eq(vm::MRB_TAG_INT64, vm::mrb_value_tag(stored_wide));
+    t.assert_eq(vm::MRB_TAG_FLOAT, vm::mrb_value_tag(stored_fraction));
+    vm::scratch_reset(scratch);
+
+    let integer, integer_ok = vm::num_integer_value(scratch, pool, stored_wide);
+    let float, float_ok = vm::num_float_value(scratch, pool, stored_fraction);
+    t.assert_true(integer_ok);
+    t.assert_true(float_ok);
+    t.assert_eq(9007199254740993, integer);
+    t.assert_eq(0.25, float);
+}
+
 fn test_state_rejects_non_instance_receivers(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

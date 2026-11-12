@@ -216,7 +216,38 @@ fn test_control_flow_steps(t: goosetest::Test&) {
     t.assert_eq(vm::StepKind.Stop, stopped.kind);
 }
 
-fn test_arith_overflow_reports_type_mismatch(t: goosetest::Test&) {
+fn test_bigint_literals_keep_sign(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    let positive: u8[4] = [2, 10, 53, 55];
+    file.data = positive[..];
+    let positive_entry = vm::PoolEntry {
+        tag: 7,
+        text_offset_bytes: 0,
+        text_length_bytes: 4,
+        int_value: 0,
+        float_value: 0.0,
+    };
+    let value, ok = vm::vm_bigint_literal(file, positive_entry);
+    t.assert_true(ok);
+    t.assert_eq(57, value);
+
+    let negative: u8[4] = [2, 246, 53, 55];
+    file.data = negative[..];
+    let negative_entry = vm::PoolEntry {
+        tag: 7,
+        text_offset_bytes: 0,
+        text_length_bytes: 4,
+        int_value: 0,
+        float_value: 0.0,
+    };
+    let signed, signed_ok = vm::vm_bigint_literal(file, negative_entry);
+    t.assert_true(signed_ok);
+    t.assert_eq(-57, signed);
+}
+
+fn test_arith_widens_and_overflows(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..
     };
@@ -243,6 +274,12 @@ fn test_arith_overflow_reports_type_mismatch(t: goosetest::Test&) {
     machine.regs.push(vm::mrb_nil());
     let bytes: u8[2] = [0, 1];
     let step = vm::vm_op_arith(machine, frame, record, bytes[..], 0, vm::OP_ADDI);
-    t.assert_eq(vm::StepKind.Stop, step.kind);
-    t.assert_eq(vm::VmError.TypeMismatch, machine.error);
+    t.assert_eq(vm::StepKind.Continue, step.kind);
+    let widened, widened_ok = vm::num_integer_value(scratch, pool, machine.regs[0]);
+    t.assert_true(widened_ok);
+    t.assert_eq(2147483648, widened);
+    machine.regs[0] = vm::scratch_alloc_int64(scratch, vm::NUM_I64_MAX);
+    let overflow = vm::vm_op_arith(machine, frame, record, bytes[..], 0, vm::OP_ADDI);
+    t.assert_eq(vm::StepKind.Stop, overflow.kind);
+    t.assert_eq(vm::VmError.IntegerOverflow, machine.error);
 }

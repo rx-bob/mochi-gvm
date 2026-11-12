@@ -8,6 +8,7 @@ import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_errors;
+import.vm_num;
 
 let MAX_VM_REGS = 1024;
 let MAX_VM_CALL_DEPTH = 64;
@@ -265,16 +266,30 @@ fn vm_string_equals(machine: Vm&, value: MrbValue, expected: u8[:]) -> bool {
 // Appends the text form of `value`, matching Ruby's `to_s` for the scalar kinds
 // this slice can produce. Integers render without arena allocation.
 fn vm_append_value_text(machine: Vm&, out: u8[>..]&, value: MrbValue) {
+    if mrb_is_fixnum(value) {
+        mrb_format_fixnum(out, mrb_fixnum_value(value));
+        return;
+    }
+    if mrb_is_int64(value) {
+        let number, ok = num_integer_value(machine.scratch, machine.pool, value);
+        if ok {
+            mrb_format_fixnum(out, number);
+        }
+        return;
+    }
+    if mrb_is_float(value) {
+        let number, ok = num_float_value(machine.scratch, machine.pool, value);
+        if ok {
+            num_format_float(out, number);
+        }
+        return;
+    }
     if mrb_is_scratch(value) {
         out.append(scratch_string_bytes(machine.scratch, value));
         return;
     }
     if mrb_is_state(value) {
         out.append(state_string_bytes(machine.pool, value));
-        return;
-    }
-    if mrb_is_fixnum(value) {
-        mrb_format_fixnum(out, mrb_fixnum_value(value));
         return;
     }
     if mrb_is_symbol(value) {

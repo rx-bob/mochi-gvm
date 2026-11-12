@@ -8,6 +8,7 @@ import.value_arena;
 import.vm_blocks;
 import.vm_core;
 import.vm_methods;
+import.vm_num;
 import.vm_ops_collections;
 
 // Handles the extended opcode set and reports whether `op` belongs here.
@@ -144,6 +145,10 @@ fn vm_op_cond_jump(
 }
 
 fn vm_values_equal(machine: Vm&, left: MrbValue, right: MrbValue) -> bool {
+    if num_is_number(machine.scratch, machine.pool, left)
+        && num_is_number(machine.scratch, machine.pool, right) {
+        return num_equal(machine.scratch, machine.pool, left, right);
+    }
     if vm_is_string_value(machine, left) && vm_is_string_value(machine, right) {
         return builtin_string_bytes(machine.pool, machine.scratch, left)
             == builtin_string_bytes(machine.pool, machine.scratch, right);
@@ -151,17 +156,13 @@ fn vm_values_equal(machine: Vm&, left: MrbValue, right: MrbValue) -> bool {
     return mrb_value_identical(left, right);
 }
 
-fn vm_div_floor(left: i64, right: i64) -> i64 {
-    let q = left / right;
-    let rem = left - q * right;
-    if rem != 0 && ((rem < 0) != (right < 0)) {
-        return q - 1;
-    }
-    return q;
-}
-
-fn vm_mod_floor(left: i64, right: i64) -> i64 {
-    return left - vm_div_floor(left, right) * right;
+fn vm_num_error(fault: NumFault) -> VmError {
+    return match fault {
+        Overflow => VmError.IntegerOverflow,
+        DivisionByZero => VmError.DivisionByZero,
+        Scratch => VmError.ScratchFull,
+        _ => VmError.TypeMismatch,
+    };
 }
 
 fn vm_op_binary_non_fixnum(
@@ -221,7 +222,8 @@ fn vm_op_binary(
         }
         return vm_step_continue(pc + 1);
     }
-    if !mrb_is_fixnum(left) || !mrb_is_fixnum(right) {
+    if !num_is_number(machine.scratch, machine.pool, left)
+        || !num_is_number(machine.scratch, machine.pool, right) {
         let non_fix, ok = vm_op_binary_non_fixnum(machine, left, right, op);
         if !ok {
             return vm_fail(machine, VmError.TypeMismatch, pc + 1);
@@ -231,39 +233,40 @@ fn vm_op_binary(
         }
         return vm_step_continue(pc + 1);
     }
-    let left_number = mrb_fixnum_value(left);
-    let right_number = mrb_fixnum_value(right);
     if op == OP_LT || op == OP_LE || op == OP_GT || op == OP_GE {
-        let comparison = if op == OP_LT {
-            left_number < right_number
-        } else if op == OP_LE {
-            left_number <= right_number
-        } else if op == OP_GT {
-            left_number > right_number
-        } else {
-            left_number >= right_number
-        };
+        let order, comparable = num_compare(machine.scratch, machine.pool, left, right);
+        var comparison = false;
+        if comparable {
+            if op == OP_LT {
+                comparison = order < 0;
+            } else if op == OP_LE {
+                comparison = order <= 0;
+            } else if op == OP_GT {
+                comparison = order > 0;
+            } else {
+                comparison = order >= 0;
+            }
+        }
         if !vm_write_register(machine, record, frame.base, ops.a, mrb_bool(comparison)) {
             return vm_fail(machine, VmError.BadOperand, pc + 1);
         }
         return vm_step_continue(pc + 1);
     }
-    if op == OP_DIV && right_number == 0 {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 1);
-    }
-    let result = if op == OP_SUB {
-        left_number - right_number
+    var result: MrbValue = mrb_nil();
+    var fault: NumFault = NumFault.Ok;
+    if op == OP_SUB {
+        result, fault = num_sub(machine.scratch, machine.pool, left, right);
     } else if op == OP_MUL {
-        left_number * right_number
+        result, fault = num_mul(machine.scratch, machine.pool, left, right);
     } else if op == OP_DIV {
-        vm_div_floor(left_number, right_number)
+        result, fault = num_div(machine.scratch, machine.pool, left, right);
     } else {
-        left_number + right_number
-    };
-    if result < MRB_FIXNUM_MIN || result > MRB_FIXNUM_MAX {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 1);
+        result, fault = num_add(machine.scratch, machine.pool, left, right);
     }
-    if !vm_write_register(machine, record, frame.base, ops.a, mrb_fixnum(result)) {
+    if fault != NumFault.Ok {
+        return vm_fail(machine, vm_num_error(fault), pc + 1);
+    }
+    if !vm_write_register(machine, record, frame.base, ops.a, result) {
         return vm_fail(machine, VmError.BadOperand, pc + 1);
     }
     return vm_step_continue(pc + 1);

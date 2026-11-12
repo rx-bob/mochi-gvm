@@ -95,6 +95,45 @@ fn test_arena_handle_layout(t: goosetest::Test&) {
     t.assert_eq(60000, vm::mrb_arena_generation(state_handle));
 }
 
+fn test_boxed_numeric_handles_roundtrip(t: goosetest::Test&) {
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let low = vm::scratch_alloc_int64(scratch, vm::NUM_I64_MIN);
+    let high = vm::scratch_alloc_int64(scratch, vm::NUM_I64_MAX);
+    let fraction = vm::scratch_alloc_float(scratch, -0.5);
+    let negative_zero = vm::scratch_alloc_float(scratch, -0.0);
+
+    t.assert_eq(vm::MRB_TAG_INT64, vm::mrb_value_tag(low));
+    t.assert_eq(vm::MRB_TAG_FLOAT, vm::mrb_value_tag(fraction));
+    t.assert_true(vm::mrb_is_arena(low));
+    t.assert_true(vm::mrb_is_scratch(low));
+    t.assert_false(vm::mrb_is_state(low));
+    t.assert_true(vm::mrb_value_kind_name(high) == "int64");
+    t.assert_true(vm::mrb_value_kind_name(fraction) == "float");
+
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    let minimum, minimum_ok = vm::num_integer_value(scratch, pool, low);
+    let maximum, maximum_ok = vm::num_integer_value(scratch, pool, high);
+    let decimal, decimal_ok = vm::num_float_value(scratch, pool, fraction);
+    let zero, zero_ok = vm::num_float_value(scratch, pool, negative_zero);
+    t.assert_true(minimum_ok);
+    t.assert_true(maximum_ok);
+    t.assert_true(decimal_ok);
+    t.assert_true(zero_ok);
+    t.assert_eq(vm::NUM_I64_MIN, minimum);
+    t.assert_eq(vm::NUM_I64_MAX, maximum);
+    t.assert_eq(-0.5, decimal);
+    t.assert_true(zero == 0.0);
+    t.assert_eq(4, vm::scratch_object_count(scratch));
+    t.assert_eq(0, vm::scratch_bytes_used(scratch));
+
+    vm::scratch_reset(scratch);
+    t.assert_eq(0, vm::scratch_object_count(scratch));
+}
+
 fn test_scratch_string_round_trips_and_reset(t: goosetest::Test&) {
     var scratch: vm::ScratchArena = vm::ScratchArena {
         ..

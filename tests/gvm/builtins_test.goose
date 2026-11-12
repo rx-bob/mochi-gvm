@@ -203,6 +203,35 @@ fn test_hash_keys_are_indifferent(t: goosetest::Test&) {
         vm::builtin_hash_get(pool, scratch, stored_hash, updated_key)) == "tr_1");
 }
 
+fn test_hash_numeric_keys_compare_by_value(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let hash = vm::builtin_hash_new(scratch);
+    let wide_key = vm::scratch_alloc_int64(scratch, 9007199254740993);
+    let same_wide_key = vm::scratch_alloc_int64(scratch, 9007199254740993);
+    let value = vm::scratch_alloc_string(scratch, "exact");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, hash, wide_key, value));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, hash, same_wide_key)) == "exact");
+
+    let integer_one = vm::mrb_fixnum(1);
+    let float_one = vm::scratch_alloc_float(scratch, 1.0);
+    let integer_value = vm::scratch_alloc_string(scratch, "integer");
+    let float_value = vm::scratch_alloc_string(scratch, "float");
+    t.assert_true(vm::builtin_hash_set(pool, scratch, hash, integer_one, integer_value));
+    t.assert_true(vm::builtin_hash_set(pool, scratch, hash, float_one, float_value));
+    t.assert_eq(3, vm::builtin_hash_length(pool, scratch, hash));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, hash, vm::mrb_fixnum(1))) == "integer");
+    t.assert_true(vm::builtin_string_bytes(pool, scratch,
+        vm::builtin_hash_get(pool, scratch, hash,
+        vm::scratch_alloc_float(scratch, 1.0))) == "float");
+}
+
 fn test_state_hash_promotes_keys_and_values(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

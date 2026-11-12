@@ -7,11 +7,15 @@
 // matching Ruby symbols.
 namespace vm;
 
+import math;
+import std;
+
 import.builtins;
 import.collection_arena;
 import.scratch_alloc;
 import.state_pool;
 import.value_arena;
+import.vm_num;
 
 let JSON_MAX_ARGS = 8;
 let JSON_MAX_DEPTH = 16;
@@ -187,7 +191,25 @@ fn json_parse_string(scratch: ScratchArena&, data: const u8[:], cursor: JsonCurs
     return mrb_nil();
 }
 
-fn json_parse_number(data: const u8[:], cursor: JsonCursor&) -> MrbValue {
+fn json_parse_float_text(scratch: ScratchArena&, text: u8[:]) -> MrbValue, bool {
+    if text == "Infinity" {
+        return scratch_alloc_float(scratch, INF), true;
+    }
+    if text == "-Infinity" {
+        return scratch_alloc_float(scratch, -INF), true;
+    }
+    if text == "NaN" {
+        return scratch_alloc_float(scratch, NAN), true;
+    }
+    let value, ok = parse_flt(text);
+    if !ok || value != value || value - value != 0.0 {
+        return mrb_nil(), false;
+    }
+    return scratch_alloc_float(scratch, value), true;
+}
+
+fn json_parse_number(scratch: ScratchArena&, data: const u8[:], cursor: JsonCursor&) -> MrbValue {
+    let start = cursor.at;
     var negative = false;
     if cursor.at < data.len && data[cursor.at] == 45 {
         negative = true;
@@ -197,7 +219,7 @@ fn json_parse_number(data: const u8[:], cursor: JsonCursor&) -> MrbValue {
         cursor.failed = true;
         return mrb_nil();
     }
-    var magnitude: i64 = 0;
+    var is_float = false;
     if data[cursor.at] == 48 {
         cursor.at += 1;
         if cursor.at < data.len && json_digit(data[cursor.at]) {
@@ -206,34 +228,110 @@ fn json_parse_number(data: const u8[:], cursor: JsonCursor&) -> MrbValue {
         }
     } else {
         while cursor.at < data.len && json_digit(data[cursor.at]) {
-            let digit = (data[cursor.at] - 48)as i64;
-            if magnitude > 214748364 {
-                cursor.failed = true;
-                return mrb_nil();
-            }
-            magnitude = magnitude * 10 + digit;
-            if magnitude > 2147483648 {
-                cursor.failed = true;
-                return mrb_nil();
-            }
             cursor.at += 1;
         }
     }
-    if cursor.at < data.len {
-        let suffix = data[cursor.at];
-        if suffix == 46 || suffix == 101 || suffix == 69 {
+    if cursor.at < data.len && data[cursor.at] == 46 {
+        is_float = true;
+        cursor.at += 1;
+        if cursor.at >= data.len || !json_digit(data[cursor.at]) {
             cursor.failed = true;
             return mrb_nil();
         }
+        while cursor.at < data.len && json_digit(data[cursor.at]) {
+            cursor.at += 1;
+        }
     }
-    if negative {
-        return mrb_fixnum(-magnitude);
+    if cursor.at < data.len && (data[cursor.at] == 101 || data[cursor.at] == 69) {
+        is_float = true;
+        cursor.at += 1;
+        if cursor.at < data.len && (data[cursor.at] == 43 || data[cursor.at] == 45) {
+            cursor.at += 1;
+        }
+        if cursor.at >= data.len || !json_digit(data[cursor.at]) {
+            cursor.failed = true;
+            return mrb_nil();
+        }
+        while cursor.at < data.len && json_digit(data[cursor.at]) {
+            cursor.at += 1;
+        }
     }
-    if magnitude > 2147483647 {
+    if is_float {
+        let value, ok = json_parse_float_text(scratch, data[start..cursor.at]);
+        if !ok {
+            cursor.failed = true;
+            return mrb_nil();
+        }
+        return value;
+    }
+    let digits_start = if negative {
+        start + 1
+    } else {
+        start
+    };
+    let value, ok = num_parse_i64_bytes(data[digits_start..cursor.at], 10, negative);
+    if !ok {
         cursor.failed = true;
         return mrb_nil();
     }
-    return mrb_fixnum(magnitude);
+    let result = num_from_i64(scratch, value);
+    if mrb_is_nil(result) {
+        cursor.failed = true;
+    }
+    return result;
+}
+
+// Recognizes the reserved `{"__mochi_number":"i64|f64","value":"..."}` object.
+// The loader uses it for integers outside JavaScript's exact range and for
+// non-finite floats, where raw JSON numbers would lose information.
+fn json_number_wrapper(scratch: ScratchArena&, value: MrbValue) -> MrbValue, bool, bool {
+    let object, object_ok = scratch_object(scratch, value);
+    if !object_ok || object.kind != ArenaObjectKind.Hash {
+        return mrb_nil(), false, true;
+    }
+    var kind: MrbValue = mrb_nil();
+    var text: MrbValue = mrb_nil();
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        let slot = scratch.slots[slot_index];
+        if scratch_is_string(scratch, slot.key) {
+            let key_text = scratch_string_bytes(scratch, slot.key);
+            if key_text == "__mochi_number" {
+                kind = slot.value;
+            } else if key_text == "value" {
+                text = slot.value;
+            }
+        }
+        slot_index = slot.next_index;
+    }
+    if mrb_is_nil(kind) {
+        return mrb_nil(), false, true;
+    }
+    if scratch_hash_length(scratch, value) != 2
+        || !scratch_is_string(scratch, kind) || !scratch_is_string(scratch, text) {
+        return mrb_nil(), true, false;
+    }
+    let kind_text = scratch_string_bytes(scratch, kind);
+    let number_text = scratch_string_bytes(scratch, text);
+    if kind_text == "i64" {
+        var negative = false;
+        var digits = number_text;
+        if number_text.len > 0 && number_text[0] == 45 {
+            negative = true;
+            digits = number_text[1..];
+        }
+        let integer, integer_ok = num_parse_i64_bytes(digits, 10, negative);
+        if !integer_ok {
+            return mrb_nil(), true, false;
+        }
+        let decoded = num_from_i64(scratch, integer);
+        return decoded, true, !mrb_is_nil(decoded);
+    }
+    if kind_text == "f64" {
+        let decoded, decoded_ok = json_parse_float_text(scratch, number_text);
+        return decoded, true, decoded_ok;
+    }
+    return mrb_nil(), true, false;
 }
 
 recursive fn json_parse_value(
@@ -250,7 +348,19 @@ recursive fn json_parse_value(
     }
     if byte == JSON_OPEN_OBJECT {
         cursor.at += 1;
-        return json_parse_object(pool, scratch, data, cursor, depth + 1);
+        let object = json_parse_object(pool, scratch, data, cursor, depth + 1);
+        if cursor.failed {
+            return mrb_nil();
+        }
+        let decoded, wrapped, wrapper_ok = json_number_wrapper(scratch, object);
+        if wrapped {
+            if !wrapper_ok {
+                cursor.failed = true;
+                return mrb_nil();
+            }
+            return decoded;
+        }
+        return object;
     }
     if byte == JSON_OPEN_ARRAY {
         cursor.at += 1;
@@ -266,7 +376,7 @@ recursive fn json_parse_value(
         return mrb_nil();
     }
     if byte == 45 || json_digit(byte) {
-        return json_parse_number(data, cursor);
+        return json_parse_number(scratch, data, cursor);
     }
     cursor.failed = true;
     return mrb_nil();

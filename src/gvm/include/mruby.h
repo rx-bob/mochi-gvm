@@ -59,6 +59,8 @@ struct mrb_state {
 #define MRB_TAG_ARENA 6
 #define MRB_TAG_BLOCK 7
 #define MRB_TAG_EXCEPTION 8
+#define MRB_TAG_INT64 9
+#define MRB_TAG_FLOAT 10
 
 #define MRB_ARGS_REQ(n) ((mrb_aspec)(((n) & 0x1f) << 18))
 #define MRB_ARGS_OPT(n) ((mrb_aspec)(((n) & 0x1f) << 13))

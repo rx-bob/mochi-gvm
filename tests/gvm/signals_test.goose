@@ -86,6 +86,33 @@ fn test_noop_assignment_keeps_dirty_mask_empty(t: goosetest::Test&) {
     t.assert_true(vm::mask_equal(vm::state_ivar_bit(0), vm::state_dirty_mask(pool, instance)));
 }
 
+fn test_boxed_number_assignments_compare_values(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let class_id = vm::state_define_class(pool, 1, vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(pool, class_id);
+    t.assert_true(vm::state_set_ivar(pool, scratch, instance,
+        COUNT_KEY, vm::scratch_alloc_int64(scratch, 9007199254740993)));
+    t.assert_true(vm::state_clear_dirty_mask(pool, instance));
+    t.assert_true(vm::state_set_ivar(pool, scratch, instance,
+        COUNT_KEY, vm::scratch_alloc_int64(scratch, 9007199254740993)));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
+
+    t.assert_true(vm::state_set_ivar(pool, scratch, instance,
+        LABEL_KEY, vm::scratch_alloc_float(scratch, 0.25)));
+    t.assert_true(vm::state_clear_dirty_mask(pool, instance));
+    t.assert_true(vm::state_set_ivar(pool, scratch, instance,
+        LABEL_KEY, vm::scratch_alloc_float(scratch, 0.25)));
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, instance)));
+    t.assert_true(vm::state_set_ivar(pool, scratch, instance,
+        LABEL_KEY, vm::scratch_alloc_float(scratch, 0.5)));
+    t.assert_true(vm::mask_equal(vm::state_ivar_bit(1), vm::state_dirty_mask(pool, instance)));
+}
+
 fn test_string_assignments_compare_state_bytes(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

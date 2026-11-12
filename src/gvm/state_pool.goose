@@ -338,6 +338,26 @@ fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
     return state_object_handle(pool, index);
 }
 
+fn state_alloc_int64(pool: StatePool&, value: i64) -> MrbValue {
+    let index = state_take_object(pool, ArenaObjectKind.Int64);
+    if index < 0 {
+        return mrb_nil();
+    }
+    pool.objects[index].integer_value = value;
+    return mrb_typed_arena_value(
+        MRB_TAG_INT64, MRB_ARENA_STATE, index as u32, pool.objects[index].generation);
+}
+
+fn state_alloc_float(pool: StatePool&, value: f64) -> MrbValue {
+    let index = state_take_object(pool, ArenaObjectKind.Float);
+    if index < 0 {
+        return mrb_nil();
+    }
+    pool.objects[index].float_value = value;
+    return mrb_typed_arena_value(
+        MRB_TAG_FLOAT, MRB_ARENA_STATE, index as u32, pool.objects[index].generation);
+}
+
 fn state_alloc_array(pool: StatePool&) -> MrbValue {
     return state_alloc_collection(pool, ArenaObjectKind.Array);
 }
@@ -703,6 +723,12 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
     match object.kind {
         String => {
             return state_alloc_string(pool, scratch_string_bytes(scratch, value));
+        },
+        Int64 => {
+            return state_alloc_int64(pool, object.integer_value);
+        },
+        Float => {
+            return state_alloc_float(pool, object.float_value);
         },
         Instance => {
             let promoted = state_alloc_instance(pool, object.class_index);
