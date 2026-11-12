@@ -80,6 +80,12 @@ extern const uint8_t *goose_vm_fetch_request_json(
     uint64_t options, int64_t *out_len);
 extern int64_t goose_vm_deliver_fetch(uint64_t instance, uint32_t callback_symbol,
                                       goose_u8_slice envelope);
+extern const uint8_t *goose_vm_capability_request_json(
+    int64_t request_id, uint64_t instance, uint64_t capability, uint64_t operation,
+    uint64_t args, uint64_t callback, int64_t *out_len);
+extern uint64_t goose_vm_host_result(goose_u8_slice envelope);
+extern int64_t goose_vm_deliver_host_result(uint64_t instance, uint32_t callback_symbol,
+                                            goose_u8_slice envelope);
 extern void goose_vm_seed_storage(goose_u8_slice key, goose_u8_slice value);
 extern void goose_vm_set_route_state(goose_u8_slice path);
 extern const uint8_t *goose_vm_host_outbox(int64_t *out_len);
@@ -110,11 +116,15 @@ static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
 static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
 static int32_t g_error_len = 0;
-#define MOCHI_FORMAT_CAPACITY 8192
-static uint8_t g_format_output[MOCHI_FORMAT_CAPACITY];
-static char g_format_error[MOCHI_ERROR_CAPACITY];
-static char g_format_value[512];
-static char g_format_options[2048];
+#define MOCHI_HOST_CAPACITY 8192
+static uint8_t g_host_output[MOCHI_HOST_CAPACITY];
+static char g_host_args[MOCHI_HOST_CAPACITY];
+static char g_host_error[MOCHI_ERROR_CAPACITY];
+static uint8_t g_host_inbox[MOCHI_FETCH_CAPACITY];
+static int32_t g_host_next_id = 1;
+
+static int append_text_piece(
+    char *buffer, size_t capacity, size_t *at, const void *data, size_t length);
 
 static goose_u8_slice slice_of(const void *data, size_t length) {
   goose_u8_slice slice;
@@ -168,26 +178,39 @@ static void capture_vm_error(void) {
 }
 
 #ifdef __EMSCRIPTEN__
-/* The loader installs Module.__mochiFormatHost before a formatting-dependent
- * component mounts. This is a synchronous WASM-to-JS call, so Ruby can format
- * from initialize, binding getters, event handlers, and each rows. */
-EM_JS(int, mochi_host_format_js,
-      (const char *kind, const char *value, const char *options, char *out,
+/* The loader installs Module.__mochiHostCapabilities before a dependent
+ * component mounts. This is a synchronous WASM-to-JS call, so Ruby can use a
+ * declared host capability from initialize, binding getters, event handlers,
+ * and each rows. The adapter operation returns one typed JSON value. */
+EM_JS(int, mochi_host_dispatch_js,
+      (const char *capability, const char *operation, const char *args, char *out,
        int cap, char *err, int err_cap), {
   try {
-    var host = Module.__mochiFormatHost;
-    if (!host || typeof host.format !== "function") {
-      throw new Error("formatting host is not loaded");
+    var hosts = Module.__mochiHostCapabilities;
+    var name = UTF8ToString(capability);
+    var op = UTF8ToString(operation);
+    var adapter = hosts && hosts[name];
+    if (!adapter) {
+      throw new Error("host capability '" + name + "' is not registered");
     }
-    var result = host.format(UTF8ToString(kind), UTF8ToString(value),
-                             UTF8ToString(options));
-    if (typeof result !== "string") {
-      throw new Error("formatting host returned no text");
+    var operationFn = adapter.sync && adapter.sync[op];
+    if (typeof operationFn !== "function") {
+      throw new Error("host capability '" + name + "' has no sync operation '" + op + "'");
     }
-    if (lengthBytesUTF8(result) + 1 > cap) {
-      throw new Error("formatting result is too long");
+    var result = operationFn.call(adapter.sync, UTF8ToString(args));
+    if (result && typeof result.then === "function") {
+      throw new Error("host capability '" + name + "' operation '" + op +
+                      "' returned a promise from a synchronous operation");
     }
-    stringToUTF8(result, out, cap);
+    var envelope = JSON.stringify({ ok: true, value: result === undefined ? null : result });
+    if (typeof envelope !== "string") {
+      throw new Error("host capability '" + name + "' operation '" + op +
+                      "' returned a non-serializable value");
+    }
+    if (lengthBytesUTF8(envelope) + 1 > cap) {
+      throw new Error("host capability result is too long");
+    }
+    stringToUTF8(envelope, out, cap);
     return 0;
   } catch (error) {
     var message = String(error && error.message ? error.message : error);
@@ -197,85 +220,111 @@ EM_JS(int, mochi_host_format_js,
   }
 });
 #else
-static int mochi_host_format_js(const char *kind, const char *value,
-                                const char *options, char *out, int cap,
-                                char *err, int err_cap) {
-  (void)kind;
-  (void)value;
-  (void)options;
+static int mochi_host_dispatch_js(const char *capability, const char *operation,
+                                  const char *args, char *out, int cap,
+                                  char *err, int err_cap) {
+  (void)capability;
+  (void)operation;
+  (void)args;
   (void)out;
   (void)cap;
   if (err && err_cap > 0) {
-    snprintf(err, (size_t)err_cap, "formatting host is unavailable");
+    snprintf(err, (size_t)err_cap, "host capability is unavailable");
   }
   return -1;
 }
 #endif
 
-static mrb_value mochi_format_error(mrb_state *mrb) {
-  if (g_format_error[0] == '\0') {
-    snprintf(g_format_error, sizeof(g_format_error), "formatting failed");
+static mrb_value mochi_host_failure(mrb_state *mrb, const char *text) {
+  if (!text || text[0] == '\0') text = "host capability failed";
+  if (text != g_host_error) {
+    snprintf(g_host_error, sizeof(g_host_error), "%s", text);
   }
-  goose_vm_set_host_error(slice_of(g_format_error, strlen(g_format_error)));
-  mochi_abi_set_error(mrb, g_format_error);
+  goose_vm_set_host_error(slice_of(g_host_error, strlen(g_host_error)));
+  mochi_abi_set_error(mrb, g_host_error);
   return mrb_nil_value();
+}
+
+/* Serializes one synchronous capability call as a JSON argument array. A
+ * literal first argument carries protocol selectors such as the formatting
+ * kind; every other argument keeps its typed Ruby/VM representation. */
+static mrb_value mochi_capability_sync(
+    mrb_state *mrb, const char *capability, const char *operation,
+    const char *literal_first, mrb_value *values, int value_count) {
+  size_t at = 0;
+  int status;
+  int index;
+  const uint8_t *json;
+  int64_t json_len = 0;
+  uint64_t result;
+
+  goose_vm_clear_host_error();
+  g_host_error[0] = '\0';
+  if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "[", 1)) {
+    return mochi_host_failure(mrb, "host capability arguments are too large");
+  }
+  if (literal_first) {
+    if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "\"", 1) ||
+        !append_text_piece(g_host_args, sizeof(g_host_args), &at, literal_first,
+                           strlen(literal_first)) ||
+        !append_text_piece(g_host_args, sizeof(g_host_args), &at, "\"", 1)) {
+      return mochi_host_failure(mrb, "host capability arguments are too large");
+    }
+  }
+  for (index = 0; index < value_count; index++) {
+    if (index > 0 || literal_first) {
+      if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, ",", 1)) {
+        return mochi_host_failure(mrb, "host capability arguments are too large");
+      }
+    }
+    json = goose_vm_value_json(values[index], &json_len);
+    if (!json || json_len <= 0) {
+      return mochi_host_failure(mrb, "host capability argument is not serializable");
+    }
+    if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, json,
+                           (size_t)json_len)) {
+      return mochi_host_failure(mrb, "host capability arguments are too large");
+    }
+  }
+  if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "]", 1)) {
+    return mochi_host_failure(mrb, "host capability arguments are too large");
+  }
+  g_host_args[at] = '\0';
+
+  status = mochi_host_dispatch_js(capability, operation, g_host_args,
+                                  (char *)g_host_output,
+                                  (int)sizeof(g_host_output), g_host_error,
+                                  (int)sizeof(g_host_error));
+  if (status != 0) return mochi_host_failure(mrb, g_host_error);
+
+  result = goose_vm_host_result(
+      slice_of(g_host_output, strlen((const char *)g_host_output)));
+  if (goose_vm_has_error()) {
+    capture_vm_error();
+    if (g_error_len == 0) {
+      return mochi_host_failure(mrb, "host capability result failed");
+    }
+    goose_vm_set_host_error(slice_of(g_error_text, (size_t)g_error_len));
+    mochi_abi_set_error(mrb, g_error_text);
+    return mrb_nil_value();
+  }
+  return result;
 }
 
 static mrb_value mochi_format_native(mrb_state *mrb, mrb_value self,
                                      const char *kind) {
   mrb_value value = mrb_nil_value();
   mrb_value options = mrb_nil_value();
+  mrb_value args[2];
   mrb_int argc;
-  const uint8_t *json;
-  int64_t json_len = 0;
-  int status;
   (void)self;
 
   argc = mrb_get_args(mrb, "oo", &value, &options);
-  if (argc < 1) {
-    snprintf(g_format_error, sizeof(g_format_error), "format value is required");
-    return mochi_format_error(mrb);
-  }
-  goose_vm_clear_host_error();
-  g_format_error[0] = '\0';
-
-  json = goose_vm_value_json(value, &json_len);
-  if (!json || json_len <= 0 || json_len >= (int64_t)sizeof(g_format_value)) {
-    snprintf(g_format_error, sizeof(g_format_error), "format value is too large");
-    return mochi_format_error(mrb);
-  }
-  memcpy(g_format_value, json, (size_t)json_len);
-  g_format_value[json_len] = '\0';
-
-  if (argc >= 2) {
-    json = goose_vm_value_json(options, &json_len);
-    if (!json || json_len <= 0 || json_len >= (int64_t)sizeof(g_format_options)) {
-      snprintf(g_format_error, sizeof(g_format_error), "format options are too large");
-      return mochi_format_error(mrb);
-    }
-    memcpy(g_format_options, json, (size_t)json_len);
-    g_format_options[json_len] = '\0';
-  } else {
-    memcpy(g_format_options, "{}", 2);
-    g_format_options[2] = '\0';
-  }
-
-  status = mochi_host_format_js(kind, g_format_value, g_format_options,
-                                (char *)g_format_output,
-                                (int)sizeof(g_format_output), g_format_error,
-                                (int)sizeof(g_format_error));
-  if (status != 0) return mochi_format_error(mrb);
-
-  {
-    uint64_t text = goose_vm_make_scratch_string(
-        slice_of(g_format_output, strlen((const char *)g_format_output)));
-    if (text == 0) {
-      snprintf(g_format_error, sizeof(g_format_error),
-               "format result allocation failed");
-      return mochi_format_error(mrb);
-    }
-    return text;
-  }
+  if (argc < 1) return mochi_host_failure(mrb, "format value is required");
+  args[0] = value;
+  args[1] = options;
+  return mochi_capability_sync(mrb, "formatting", "format", kind, args,
+                               argc >= 2 ? 2 : 1);
 }
 
 static mrb_value mochi_format_number_native(mrb_state *mrb, mrb_value self) {
@@ -521,6 +570,62 @@ static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
   return mrb_fixnum_value(0);
 }
 
+/* Ruby-callable: Mochi.host_async(capability, operation, args, callback).
+ * Queues one capability request for the loader. The callback receives the
+ * typed result Hash only while the requesting instance is still mounted. */
+static mrb_value mochi_host_async_native(mrb_state *mrb, mrb_value self) {
+  mrb_value capability = mrb_nil_value();
+  mrb_value operation = mrb_nil_value();
+  mrb_value args = mrb_nil_value();
+  mrb_value callback = mrb_nil_value();
+  mrb_value instance_value;
+  mrb_int argc;
+  uint64_t instance_handle;
+  const uint8_t *line;
+  int64_t line_len = 0;
+  char instance_text[32];
+  int instance_len;
+  int request_id;
+  (void)self;
+
+  argc = mrb_get_args(mrb, "oooo", &capability, &operation, &args, &callback);
+  if (argc < 4) {
+    return mochi_host_failure(
+        mrb, "host_async requires a capability, operation, arguments, and callback");
+  }
+  instance_handle = goose_vm_current_self();
+  if (instance_handle == 0) {
+    return mochi_host_failure(mrb, "host_async must run inside a component");
+  }
+  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
+                          (unsigned long long)instance_handle);
+  if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
+    return mochi_host_failure(mrb, "invalid component instance");
+  }
+  instance_value = goose_vm_make_scratch_string(
+      slice_of(instance_text, (size_t)instance_len));
+  if (instance_value == 0) {
+    return mochi_host_failure(mrb, "host_async instance allocation failed");
+  }
+
+  request_id = g_host_next_id;
+  line = goose_vm_capability_request_json(
+      request_id, instance_value, capability, operation, args, callback, &line_len);
+  if (!line || line_len <= 0) {
+    capture_vm_error();
+    return mochi_host_failure(
+        mrb, g_error_len > 0 ? g_error_text : "bad host capability request");
+  }
+  if (g_emit_outbox_len + (int32_t)line_len >= MOCHI_EMIT_CAPACITY) {
+    return mochi_host_failure(mrb, "host capability outbox is full");
+  }
+  memcpy(g_emit_outbox + g_emit_outbox_len, line, (size_t)line_len);
+  g_emit_outbox_len += (int32_t)line_len;
+  g_emit_outbox[g_emit_outbox_len] = '\0';
+  g_host_next_id += 1;
+  return mrb_fixnum_value(request_id);
+}
+
 MOCHI_EXPORT
 int32_t mochi_init_runtime(void) {
   struct RClass *mochi;
@@ -544,6 +649,9 @@ int32_t mochi_init_runtime(void) {
   mrb_define_module_function(g_mrb, mochi, "format_date",
                              mochi_format_date_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "host_async",
+                             mochi_host_async_native,
+                             MRB_ARGS_REQ(4));
   if (g_mrb->exc) {
     set_error_text("Mochi module registration failed");
     return -1;
@@ -964,6 +1072,50 @@ int32_t mochi_deliver_fetch(uint64_t instance, const uint8_t *callback,
   if (result != 0 || goose_vm_has_error()) {
     capture_vm_error();
     if (g_error_len == 0) set_error_text("fetch callback failed");
+    return -1;
+  }
+  return 0;
+}
+
+MOCHI_EXPORT
+int32_t mochi_host_inbox_offset(void) {
+  return (int32_t)(intptr_t)g_host_inbox;
+}
+
+MOCHI_EXPORT
+int32_t mochi_host_inbox_capacity(void) { return MOCHI_FETCH_CAPACITY; }
+
+/* deliver_host_result(instance, callback_name, callback_len, response_len):
+ * the loader has written the JSON result envelope to the host inbox. Goose
+ * parses it and invokes the callback with one `{ok, value, error}` Hash. */
+MOCHI_EXPORT
+int32_t mochi_deliver_host_result(uint64_t instance, const uint8_t *callback,
+                                  int32_t callback_len, int32_t response_len) {
+  char name[MOCHI_CALLBACK_CAPACITY];
+  mrb_sym symbol;
+  int64_t result;
+  if (!g_mrb || !callback || callback_len <= 0 || response_len <= 0 ||
+      response_len > MOCHI_FETCH_CAPACITY) {
+    set_error_text("bad host capability delivery");
+    return -1;
+  }
+  if (callback_len >= MOCHI_CALLBACK_CAPACITY) {
+    set_error_text("host capability callback name too long");
+    return -1;
+  }
+  memcpy(name, callback, (size_t)callback_len);
+  name[callback_len] = '\0';
+  clear_error();
+  symbol = mrb_intern_cstr(g_mrb, name);
+  if (symbol == 0) {
+    set_error_text("host capability callback name invalid");
+    return -1;
+  }
+  result = goose_vm_deliver_host_result(
+      instance, symbol, slice_of(g_host_inbox, (size_t)response_len));
+  if (result != 0 || goose_vm_has_error()) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("host capability callback failed");
     return -1;
   }
   return 0;

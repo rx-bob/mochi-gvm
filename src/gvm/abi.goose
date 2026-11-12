@@ -52,6 +52,7 @@ var g_abi_host_error: u8[>..] = [];
 var g_abi_patch_bytes: u8[>..] = [];
 var g_abi_json: u8[>..] = [];
 var g_abi_fetch_json: u8[>..] = [];
+var g_abi_capability_json: u8[>..] = [];
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -174,6 +175,7 @@ fn abi_reset() {
     g_abi_patch_bytes.clear();
     g_abi_json.clear();
     g_abi_fetch_json.clear();
+    g_abi_capability_json.clear();
     host_reset();
     abi_clear_error();
 }
@@ -623,6 +625,117 @@ fn abi_fetch_response(envelope: const u8[:]) -> u64 {
     return value;
 }
 
+// Normalizes one host capability result. The loader always sends an object,
+// but a malformed adapter response must fail with an actionable build-facing
+// error rather than reaching Ruby as an unknown shape.
+fn abi_host_result_hash(envelope: const u8[:]) -> u64 {
+    let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
+    if !parsed || !vm_is_hash_value(g_abi_machine, value) {
+        abi_fail("bad host capability result");
+        return mrb_nil();
+    }
+    let ok_key = mrb_symbol(intern_symbol("ok"));
+    let value_key = mrb_symbol(intern_symbol("value"));
+    let error_key = mrb_symbol(intern_symbol("error"));
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, ok_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, ok_key, mrb_false());
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, value_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, value_key, mrb_nil());
+    }
+    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, error_key)) {
+        builtin_hash_set(g_abi_pool, g_abi_scratch, value, error_key, mrb_nil());
+    }
+    return value;
+}
+
+// Converts a successful synchronous host result into its typed Ruby value.
+// A failed result publishes the adapter's error text through the VM's host
+// error slot so the Ruby caller sees the capability failure directly.
+fn abi_host_result(envelope: const u8[:]) -> u64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    let result = abi_host_result_hash(envelope);
+    if abi_has_error() {
+        return mrb_nil();
+    }
+    let ok_key = mrb_symbol(intern_symbol("ok"));
+    if !mrb_is_true(builtin_hash_get(g_abi_pool, g_abi_scratch, result, ok_key)) {
+        let error_key = mrb_symbol(intern_symbol("error"));
+        let error_value = builtin_hash_get(g_abi_pool, g_abi_scratch, result, error_key);
+        if vm_is_string_value(g_abi_machine, error_value) {
+            abi_fail(abi_string_bytes(error_value));
+        } else {
+            abi_fail("host capability failed");
+        }
+        return mrb_nil();
+    }
+    let value_key = mrb_symbol(intern_symbol("value"));
+    return builtin_hash_get(g_abi_pool, g_abi_scratch, result, value_key);
+}
+
+fn abi_deliver_host_result(
+    instance: u64, callback_symbol: u32, envelope: const u8[:]
+) -> i64 {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    if state_instance_disposed(g_abi_pool, instance) {
+        abi_fail("disposed instance");
+        return -1;
+    }
+    vm_begin_entry(g_abi_machine);
+    let result = abi_host_result_hash(envelope);
+    if g_abi_machine.error != VmError.Ok || abi_has_error() {
+        vm_end_entry(g_abi_machine);
+        return -1;
+    }
+    let args: MrbValue[1] = [result];
+    vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
+    abi_record_call_context(instance, callback_symbol);
+    abi_record_vm_error(g_abi_machine);
+    if g_abi_machine.error != VmError.Ok {
+        return -1;
+    }
+    return 0;
+}
+
+// Builds one asynchronous host capability request. `instance` is the decimal
+// handle string resolved by the bridge; the loader attaches the live mount
+// token before invoking the adapter.
+fn abi_capability_request_json(
+    request_id: i64, instance: u64, capability: u64, operation: u64,
+    args: u64, callback: u64
+) -> const u8[:] {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    g_abi_capability_json.clear();
+    if !vm_is_string_value(g_abi_machine, capability)
+        || !vm_is_string_value(g_abi_machine, operation)
+        || !abi_fetch_callback_ok(callback)
+        || (!mrb_is_nil(args) && !vm_is_array_value(g_abi_machine, args)) {
+        abi_fail("bad host capability request");
+        return "";
+    }
+    g_abi_capability_json.append("{\"__host\":\"capability_async\",\"id\":");
+    mrb_format_fixnum(g_abi_capability_json, request_id);
+    g_abi_capability_json.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, g_abi_capability_json, instance, 0);
+    g_abi_capability_json.append(",\"capability\":");
+    binding_json_append_value(g_abi_machine, g_abi_capability_json, capability, 0);
+    g_abi_capability_json.append(",\"operation\":");
+    binding_json_append_value(g_abi_machine, g_abi_capability_json, operation, 0);
+    g_abi_capability_json.append(",\"args\":");
+    if mrb_is_nil(args) {
+        g_abi_capability_json.append("[]");
+    } else {
+        binding_json_append_value(g_abi_machine, g_abi_capability_json, args, 0);
+    }
+    g_abi_capability_json.append(",\"callback\":");
+    binding_json_append_key(g_abi_machine, g_abi_capability_json, callback);
+    g_abi_capability_json.append("}\n");
+    return g_abi_capability_json[..];
+}
+
 fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:]) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
@@ -801,6 +914,29 @@ export fn goose_vm_deliver_fetch(
     instance: u64, callback_symbol: u32, envelope: const u8[:]
 ) -> i64 {
     return abi_deliver_fetch(instance, callback_symbol, envelope);
+}
+
+// Synchronous host capability result. The bridge passes the adapter's JSON
+// envelope and receives either the typed Ruby value or a host error.
+export fn goose_vm_host_result(envelope: const u8[:]) -> u64 {
+    return abi_host_result(envelope);
+}
+
+// Asynchronous host capability completion. The callback receives one Hash with
+// `ok`, `value`, and `error` keys.
+export fn goose_vm_deliver_host_result(
+    instance: u64, callback_symbol: u32, envelope: const u8[:]
+) -> i64 {
+    return abi_deliver_host_result(instance, callback_symbol, envelope);
+}
+
+export fn goose_vm_capability_request_json(
+    request_id: i64, instance: u64, capability: u64, operation: u64,
+    args: u64, callback: u64
+) -> const u8[:] {
+    return abi_capability_request_json(
+        request_id, instance, capability, operation, args, callback
+    );
 }
 
 // Collects only when no VM frame or entry argument is live. Host mutations run

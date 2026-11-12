@@ -639,3 +639,85 @@ fn test_abi_set_ivar_string_return_codes(t: goosetest::Test&) {
     t.assert_eq("disposed instance", vm::abi_last_error());
     vm::abi_close();
 }
+
+fn test_abi_host_result_keeps_typing_and_errors(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq("42", vm::abi_value_json(
+        vm::abi_host_result("{\"ok\":true,\"value\":42}")));
+    t.assert_false(vm::abi_has_error());
+    t.assert_eq("\"ready\"", vm::abi_value_json(
+        vm::abi_host_result("{\"ok\":true,\"value\":\"ready\"}")));
+    t.assert_eq("[1,2]", vm::abi_value_json(
+        vm::abi_host_result("{\"ok\":true,\"value\":[1,2]}")));
+    t.assert_eq("{\"ok\":false,\"value\":null,\"error\":null}", vm::abi_value_json(
+        vm::abi_host_result_hash("{}")));
+
+    t.assert_true(vm::mrb_is_nil(vm::abi_host_result(
+        "{\"ok\":false,\"value\":null,\"error\":\"no locale\"}")));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("no locale", vm::abi_last_error());
+
+    t.assert_true(vm::mrb_is_nil(vm::abi_host_result("[]")));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("bad host capability result", vm::abi_last_error());
+    vm::abi_close();
+}
+
+fn test_abi_builds_host_capability_requests(t: goosetest::Test&) {
+    vm::abi_open();
+    let instance = vm::abi_make_string("42");
+    let capability = vm::abi_make_string("probe");
+    let operation = vm::abi_make_string("ping");
+    let args, parsed = vm::json_parse_document(
+        vm::g_abi_pool, vm::g_abi_scratch, "[41,\"x\"]");
+    t.assert_true(parsed);
+    let callback = vm::mrb_symbol(vm::intern_symbol("on_ping"));
+
+    t.assert_eq(
+        "{\"__host\":\"capability_async\",\"id\":3,\"instance\":\"42\",\"capability\":\"probe\",\"operation\":\"ping\",\"args\":[41,\"x\"],\"callback\":\"on_ping\"}\n",
+        vm::abi_capability_request_json(
+        3, instance, capability, operation, args, callback));
+    t.assert_false(vm::abi_has_error());
+
+    t.assert_eq("", vm::abi_capability_request_json(
+        4, instance, capability, operation, vm::abi_make_string("not an array"),
+        callback));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("bad host capability request", vm::abi_last_error());
+    vm::abi_close();
+}
+
+fn test_abi_delivers_host_capability_results(t: goosetest::Test&) {
+    vm::abi_open();
+    t.assert_eq(0, vm::abi_load_irep(fetch_probe_rite()));
+    let probe_class = vm::abi_const_get(vm::intern_symbol("FetchProbe"));
+    let probe = vm::abi_obj_new(vm::mrb_class_id(probe_class));
+    let callback = vm::intern_symbol("on_logs");
+
+    t.assert_eq(0, vm::abi_deliver_host_result(probe, callback,
+        "{\"ok\":true,\"value\":null,\"error\":null,\"status\":201,\"data\":{\"rows\":[77]}}"));
+    t.assert_false(vm::abi_has_error());
+    let status, status_ok = vm::state_get_ivar(vm::g_abi_pool, probe,
+        vm::intern_symbol("@status"));
+    t.assert_true(status_ok);
+    t.assert_eq(201, vm::mrb_fixnum_value(status));
+    let row, row_ok = vm::state_get_ivar(vm::g_abi_pool, probe,
+        vm::intern_symbol("@row"));
+    t.assert_true(row_ok);
+    t.assert_eq(77, vm::mrb_fixnum_value(row));
+    let error, error_ok = vm::state_get_ivar(vm::g_abi_pool, probe,
+        vm::intern_symbol("@error"));
+    t.assert_true(error_ok);
+    t.assert_true(vm::abi_string_bytes(error) == "none");
+
+    t.assert_eq(-1, vm::abi_deliver_host_result(probe, callback, "[]"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("bad host capability result", vm::abi_last_error());
+
+    t.assert_eq(0, vm::abi_unregister_component(probe));
+    t.assert_eq(-1, vm::abi_deliver_host_result(probe, callback,
+        "{\"ok\":true,\"value\":null}"));
+    t.assert_true(vm::abi_has_error());
+    t.assert_eq("disposed instance", vm::abi_last_error());
+    vm::abi_close();
+}
