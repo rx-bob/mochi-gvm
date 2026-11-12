@@ -594,6 +594,23 @@ fn abi_fetch_request_json(
     return g_abi_fetch_json[..];
 }
 
+// Builds an owner-scoped cancellation record for the loader's fetch outbox.
+fn abi_fetch_cancel_json(fetch_id: i64, instance: u64) -> const u8[:] {
+    abi_clear_error();
+    g_abi_machine.error = VmError.Ok;
+    g_abi_fetch_json.clear();
+    if !vm_is_string_value(g_abi_machine, instance) || fetch_id <= 0 {
+        abi_fail("bad fetch cancellation");
+        return "";
+    }
+    g_abi_fetch_json.append("{\"id\":");
+    mrb_format_fixnum(g_abi_fetch_json, fetch_id);
+    g_abi_fetch_json.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, g_abi_fetch_json, instance, 0);
+    g_abi_fetch_json.append(",\"cancel\":true}\n");
+    return g_abi_fetch_json[..];
+}
+
 // Parses the loader's response envelope and fills in the stable response keys.
 fn abi_fetch_response(envelope: const u8[:]) -> u64 {
     let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
@@ -908,6 +925,10 @@ export fn goose_vm_fetch_request_json(
     fetch_id: i64, instance: u64, url: u64, callback: u64, options: u64
 ) -> const u8[:] {
     return abi_fetch_request_json(fetch_id, instance, url, callback, options);
+}
+
+export fn goose_vm_fetch_cancel_json(fetch_id: i64, instance: u64) -> const u8[:] {
+    return abi_fetch_cancel_json(fetch_id, instance);
 }
 
 export fn goose_vm_deliver_fetch(

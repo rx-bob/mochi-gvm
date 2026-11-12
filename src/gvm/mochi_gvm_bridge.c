@@ -78,6 +78,8 @@ extern uint64_t goose_vm_current_self(void);
 extern const uint8_t *goose_vm_fetch_request_json(
     int64_t fetch_id, uint64_t instance, uint64_t url, uint64_t callback,
     uint64_t options, int64_t *out_len);
+extern const uint8_t *goose_vm_fetch_cancel_json(
+    int64_t fetch_id, uint64_t instance, int64_t *out_len);
 extern int64_t goose_vm_deliver_fetch(uint64_t instance, uint32_t callback_symbol,
                                       goose_u8_slice envelope);
 extern const uint8_t *goose_vm_capability_request_json(
@@ -399,6 +401,45 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
   return mrb_fixnum_value(fetch_id);
 }
 
+/* Ruby-callable: Mochi.cancel_fetch(request_id). Cancellation is scoped to
+ * the active component, so one component cannot cancel another's request. */
+static mrb_value mochi_cancel_fetch_native(mrb_state *mrb, mrb_value self) {
+  mrb_value id_value = mrb_nil_value();
+  mrb_int argc;
+  uint64_t instance_handle;
+  mrb_value instance_value;
+  char instance_text[32];
+  int instance_len;
+  const uint8_t *line;
+  int64_t line_len = 0;
+  int64_t fetch_id;
+  (void)self;
+
+  argc = mrb_get_args(mrb, "o", &id_value);
+  if (argc != 1 || !mrb_fixnum_p(id_value)) return mrb_false_value();
+  fetch_id = mrb_fixnum(id_value);
+  if (fetch_id <= 0) return mrb_false_value();
+  instance_handle = goose_vm_current_self();
+  if (instance_handle == 0) return mrb_false_value();
+  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
+                          (unsigned long long)instance_handle);
+  if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
+    return mrb_false_value();
+  }
+  instance_value = goose_vm_make_scratch_string(
+      slice_of(instance_text, (size_t)instance_len));
+  if (instance_value == 0) return mrb_false_value();
+  line = goose_vm_fetch_cancel_json(fetch_id, instance_value, &line_len);
+  if (!line || line_len <= 0 ||
+      g_fetch_outbox_len + (int32_t)line_len >= MOCHI_FETCH_CAPACITY) {
+    return mrb_false_value();
+  }
+  memcpy(g_fetch_outbox + g_fetch_outbox_len, line, (size_t)line_len);
+  g_fetch_outbox_len += (int32_t)line_len;
+  g_fetch_outbox[g_fetch_outbox_len] = '\0';
+  return mrb_true_value();
+}
+
 /* Ruby-callable: Mochi.emit("show_canvas").
  * Ruby-callable: Mochi.emit("select_trace", id: "tr_1", target: "cowboy-logs").
  * Appends one JSON object per emit:
@@ -641,6 +682,8 @@ int32_t mochi_init_runtime(void) {
   mochi = mrb_define_module(g_mrb, "Mochi");
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
                              MRB_ARGS_REQ(2) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "cancel_fetch",
+                             mochi_cancel_fetch_native, MRB_ARGS_REQ(1));
   mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   mrb_define_module_function(g_mrb, mochi, "emit_child", mochi_emit_child_native,
