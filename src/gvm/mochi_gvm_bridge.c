@@ -315,6 +315,85 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   return mrb_fixnum_value(0);
 }
 
+/* Ruby-callable: Mochi.emit_child("select", id: 7, label: "Seven").
+ * Generated component `emit` methods call this bridge. The line carries the
+ * emitting component instance so the loader can route the event to that exact
+ * child element instead of broadcasting by action or tag name:
+ *   {"__child_event":"select","instance":"<handle>","payload":{...}}\n
+ * Payload shape/type validation belongs to the loader, which has the compiled
+ * component event schema and can report a source-located contract error. */
+static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
+  static const char PREFIX[] = "{\"__child_event\":";
+  static const char INSTANCE_KEY[] = ",\"instance\":\"";
+  static const char PAYLOAD_KEY[] = "\",\"payload\":";
+  static const char EMPTY_PAYLOAD[] = "{}";
+  static const char SUFFIX[] = "}\n";
+  mrb_value event_value = mrb_nil_value();
+  mrb_value payload = mrb_nil_value();
+  mrb_int argc;
+  uint64_t instance_handle;
+  char instance_text[32];
+  int instance_len;
+  const uint8_t *event_json;
+  const uint8_t *payload_json;
+  int64_t event_len = 0;
+  int64_t payload_len = 0;
+  char line[MOCHI_EMIT_CAPACITY];
+  size_t at = 0;
+  (void)self;
+
+  argc = mrb_get_args(mrb, "oo", &event_value, &payload);
+  if (argc < 1 || !mrb_string_p(event_value) || mrb_string_len(event_value) <= 0) {
+    return mrb_fixnum_value(-1);
+  }
+  if (argc >= 2 && !goose_vm_is_hash(payload)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  instance_handle = goose_vm_current_self();
+  if (instance_handle == 0) return mrb_fixnum_value(-1);
+  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
+                          (unsigned long long)instance_handle);
+  if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  event_json = goose_vm_value_json(event_value, &event_len);
+  if (!event_json || event_len <= 0) return mrb_fixnum_value(-1);
+
+  // `goose_vm_value_json` returns a shared buffer, so copy the event name into
+  // the line before serializing the payload. Otherwise the payload overwrites
+  // the event JSON and the wire line is malformed.
+  if (!append_text_piece(line, sizeof(line), &at, PREFIX, sizeof(PREFIX) - 1) ||
+      !append_text_piece(line, sizeof(line), &at, event_json, (size_t)event_len)) {
+    return mrb_fixnum_value(-1);
+  }
+
+  if (argc >= 2) {
+    payload_json = goose_vm_value_json(payload, &payload_len);
+    if (!payload_json || payload_len <= 0) return mrb_fixnum_value(-1);
+  } else {
+    payload_json = (const uint8_t *)EMPTY_PAYLOAD;
+    payload_len = (int64_t)(sizeof(EMPTY_PAYLOAD) - 1);
+  }
+
+  if (!append_text_piece(line, sizeof(line), &at, INSTANCE_KEY, sizeof(INSTANCE_KEY) - 1) ||
+      !append_text_piece(line, sizeof(line), &at, instance_text, (size_t)instance_len) ||
+      !append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY, sizeof(PAYLOAD_KEY) - 1) ||
+      !append_text_piece(line, sizeof(line), &at, payload_json, (size_t)payload_len) ||
+      !append_text_piece(line, sizeof(line), &at, SUFFIX, sizeof(SUFFIX) - 1)) {
+    return mrb_fixnum_value(-1);
+  }
+  if (g_emit_outbox_len + (int32_t)at >= MOCHI_EMIT_CAPACITY) {
+    return mrb_fixnum_value(-1);
+  }
+
+  memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
+  g_emit_outbox_len += (int32_t)at;
+  g_emit_outbox[g_emit_outbox_len] = '\0';
+  return mrb_fixnum_value(0);
+}
+
 MOCHI_EXPORT
 int32_t mochi_init_runtime(void) {
   struct RClass *mochi;
@@ -329,6 +408,8 @@ int32_t mochi_init_runtime(void) {
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
                              MRB_ARGS_REQ(2) | MRB_ARGS_OPT(1));
   mrb_define_module_function(g_mrb, mochi, "emit", mochi_emit_native,
+                             MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "emit_child", mochi_emit_child_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
   if (g_mrb->exc) {
     set_error_text("Mochi module registration failed");

@@ -54,6 +54,44 @@ fn test_host_storage_roundtrip_and_outbox(t: goosetest::Test&) {
     t.assert_eq("fallback", vm::builtin_string_bytes(pool, scratch, fallback));
 }
 
+fn test_host_focus_commands(t: goosetest::Test&) {
+    vm::host_reset();
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+
+    let focus_args: vm::MrbValue[1] = [vm::scratch_alloc_string(scratch, "modal_close")];
+    let focus_val, focus_ok = vm::vm_call_mochi_builtin(machine, "focus", focus_args[..]);
+    t.assert_true(focus_ok);
+    t.assert_true(vm::mrb_is_true(focus_val));
+    t.assert_true(vm::goose_vm_host_outbox().len > 0);
+    vm::goose_vm_clear_host_outbox();
+
+    let empty: vm::MrbValue[0] = [];
+    let restore_val, restore_ok = vm::vm_call_mochi_builtin(machine, "restore_focus", empty[..]);
+    t.assert_true(restore_ok);
+    t.assert_true(vm::mrb_is_true(restore_val));
+    t.assert_true(vm::goose_vm_host_outbox().len > 0);
+    vm::goose_vm_clear_host_outbox();
+
+    let empty_ref_args: vm::MrbValue[1] = [vm::scratch_alloc_string(scratch, "")];
+    let empty_val, empty_ok = vm::vm_call_mochi_builtin(machine, "focus", empty_ref_args[..]);
+    t.assert_true(empty_ok);
+    t.assert_true(vm::mrb_is_false(empty_val));
+}
+
 fn test_host_route_timer_and_get_attr(t: goosetest::Test&) {
     vm::host_reset();
     var file: vm::RiteFile = vm::RiteFile {

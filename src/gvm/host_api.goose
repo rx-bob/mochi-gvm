@@ -206,6 +206,36 @@ fn vm_call_mochi_timer(
     return mrb_nil(), false;
 }
 
+fn vm_call_mochi_focus(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
+    let self_val = if machine.frames.len > 0 {
+        machine.frames[machine.frames.len - 1].self_value
+    } else {
+        mrb_nil()
+    };
+    if name == "focus" && args.len >= 1 {
+        var rbuf: u8[>..] = [];
+        let ref = host_arg_text(machine, args[0], rbuf);
+        if ref.len == 0 {
+            return mrb_false(), true;
+        }
+        g_host_outbox.append("{\"__host\":\"focus\",\"name\":");
+        host_append_json_escaped(g_host_outbox, ref);
+        g_host_outbox.append(",\"instance\":\"");
+        mrb_format_fixnum(g_host_outbox, self_val as!i64);
+        g_host_outbox.append("\"}\n");
+        return mrb_true(), true;
+    }
+    if name == "restore_focus" && args.len == 0 {
+        g_host_outbox.append("{\"__host\":\"restore_focus\",\"instance\":\"");
+        mrb_format_fixnum(g_host_outbox, self_val as!i64);
+        g_host_outbox.append("\"}\n");
+        return mrb_true(), true;
+    }
+    return mrb_nil(), false;
+}
+
 fn vm_call_mochi_builtin(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
@@ -216,6 +246,10 @@ fn vm_call_mochi_builtin(
     let timer_val, timer_ok = vm_call_mochi_timer(machine, name, args);
     if timer_ok {
         return timer_val, true;
+    }
+    let focus_val, focus_ok = vm_call_mochi_focus(machine, name, args);
+    if focus_ok {
+        return focus_val, true;
     }
     if name == "route" {
         return scratch_alloc_string(machine.scratch, g_host_route[..]), true;
