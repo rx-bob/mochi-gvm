@@ -10,6 +10,51 @@ import std;
 import goosetest;
 import vm;
 
+// Promotion copies a fresh graph without publishing mutations. Once assigned,
+// writes through a retained nested alias must still dirty the owning root.
+fn test_promoted_graph_publication_and_alias(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let class_id = vm::state_define_class(pool, vm::intern_symbol("PromotionProbe"), vm::NULL_CLASS_ID);
+    let owner = vm::state_alloc_instance(pool, class_id);
+    vm::state_register_component(pool, owner);
+    let root_key = vm::intern_symbol("@records");
+    let initial = vm::state_alloc_array(pool);
+    vm::state_set_ivar(pool, scratch, owner, root_key, initial);
+    vm::state_clear_dirty_mask(pool, owner);
+    let hash = vm::scratch_alloc_hash(scratch);
+    let first_key = vm::mrb_symbol(vm::intern_symbol("first"));
+    let second_key = vm::mrb_symbol(vm::intern_symbol("second"));
+    vm::scratch_hash_set(scratch, hash, first_key, vm::mrb_fixnum(1));
+    vm::scratch_hash_set(scratch, hash, second_key, vm::mrb_fixnum(2));
+    vm::scratch_hash_set(scratch, hash, first_key, vm::mrb_fixnum(3));
+    let array = vm::scratch_alloc_array(scratch);
+    vm::scratch_array_push(scratch, array, hash);
+    vm::scratch_array_push(scratch, array, initial);
+    let promoted = vm::promote_to_state(pool, scratch, array);
+    t.assert_eq(vm::VmError.Ok, pool.error);
+    t.assert_true(vm::mask_is_empty(vm::state_dirty_mask(pool, owner)));
+    vm::scratch_reset(scratch);
+    let nested, _ = vm::state_array_get(pool, promoted, 0);
+    let alias, _ = vm::state_array_get(pool, promoted, 1);
+    t.assert_true(vm::mrb_value_identical(initial, alias));
+    let value, _ = vm::state_hash_get(pool, nested, first_key);
+    t.assert_eq(3, vm::mrb_fixnum_value(value));
+    let object, _ = vm::state_object(pool, nested);
+    t.assert_eq(2, object.item_count);
+    t.assert_true(vm::mrb_value_identical(first_key, pool.slots[object.items_first_index].key));
+    t.assert_true(vm::mrb_value_identical(second_key, pool.slots[object.items_last_index].key));
+    vm::state_set_ivar(pool, scratch, owner, root_key, promoted);
+    t.assert_false(vm::mask_is_empty(vm::state_dirty_mask(pool, owner)));
+    vm::state_clear_dirty_mask(pool, owner);
+    vm::state_hash_set(pool, nested, first_key, vm::mrb_fixnum(4));
+    t.assert_false(vm::mask_is_empty(vm::state_dirty_mask(pool, owner)));
+}
+
 fn test_state_classes_and_component_registration(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

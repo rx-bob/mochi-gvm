@@ -1,6 +1,7 @@
 // Configured goosetest entry point for the mochi-gvm core target.
 
 import goosetest from "../goosetest";
+import static_storage from "./src/build";
 import vm from "./src/gvm";
 
 import goosetest_generated.core.runner;

@@ -2,6 +2,8 @@
 // dist/mochi-gvm.js. The Goose ABI compiles alone via `--standalone`; the C
 // bridge supplies the small integer surface the JS loader calls.
 
+import static_storage from "../src/build";
+
 import json;
 import os;
 import std;
@@ -56,6 +58,14 @@ fn generate_goose_c() {
     command.append(" --stack-reserve 64K -O2 ");
     command.append(ENTRY);
     run(command[..]);
+    var generated: u8[>..] = [];
+    var lowered: u8[>..] = [];
+    if !read_file(GOOSE_C, generated)
+        || static_storage::lower(generated, lowered) != 10
+        || !write_file(GOOSE_C, lowered) {
+        print("build_wasm failed: persistent storage initialization layout changed");
+        exit(1);
+    }
 }
 
 fn compile_bridge() {
@@ -99,7 +109,7 @@ fn compile_bridge() {
     command.append(
         "\"stringToUTF8\",\"lengthBytesUTF8\",\"setValue\",\"getValue\"]' "
     );
-    command.append("-sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=4194304 ");
+    command.append("-sALLOW_MEMORY_GROWTH=1 -sINITIAL_HEAP=4194304 ");
     command.append("-sMAXIMUM_MEMORY=100663296 ");
     command.append("-sSTACK_SIZE=1048576 -sMODULARIZE=1 ");
     command.append("-sEXPORT_NAME=MochiModule -sNO_EXIT_RUNTIME=1 ");

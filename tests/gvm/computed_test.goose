@@ -5,6 +5,39 @@ import goosetest;
 import vm;
 
 let COMPUTED: const u8[:] = embed_file("../fixtures/computed.mrb");
+let INSPECTOR: const u8[:] = embed_file("../fixtures/inspector_computed.mrb");
+
+fn test_default_structured_projection(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    t.assert_eq(vm::ParseError.Ok, vm::vm_load_irep(file, INSPECTOR));
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let owner = vm::vm_instantiate(machine, vm::intern_symbol("InspectorComputed"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    let filtered = vm::vm_call0(machine, owner, vm::intern_symbol("filtered"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_eq(480, vm::builtin_array_length(pool, scratch, filtered));
+    let visible = vm::vm_call0(machine, owner, vm::intern_symbol("visible"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_eq(12, vm::builtin_array_length(pool, scratch, visible));
+    vm::vm_call0(machine, owner, vm::intern_symbol("next_page"));
+    let next = vm::vm_call0(machine, owner, vm::intern_symbol("visible"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_eq(12, vm::builtin_array_length(pool, scratch, next));
+    t.assert_true(vm::mrb_value_identical(filtered, vm::vm_call0(machine, owner, vm::intern_symbol("filtered"))));
+}
 
 fn test_explicit_mask_invalidation(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {

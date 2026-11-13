@@ -44,27 +44,29 @@ struct ByteRange {
 root struct StatePool {
     classes: ClassDef[>..] = [],
     consts: ConstEntry[>..] = [],
-    objects: ArenaObject[>..] = [],
-    ivars: IvarSlot[>..] = [],
-    slots: ArenaSlot[>..] = [],
+    // Back the advertised capacities directly. A Goose growable region uses
+    // the small data-stack reservation; WASM cannot protect its guard pages.
+    objects: ArenaObject[..MAX_STATE_OBJECTS] = [],
+    ivars: IvarSlot[..MAX_STATE_IVARS] = [],
+    slots: ArenaSlot[..MAX_STATE_SLOTS] = [],
     components: MrbValue[>..] = [],
     bindings: BindingEntry[>..] = [],
     computed: ComputedEntry[>..] = [],
     computed_depth: i64 = 0,
-    blob: u8[>..] = [],
-    free_objects: i64[>..] = [],
-    free_ivars: i64[>..] = [],
-    free_slots: i64[>..] = [],
+    blob: u8[..MAX_STATE_BYTES] = [],
+    free_objects: i64[..MAX_STATE_OBJECTS] = [],
+    free_ivars: i64[..MAX_STATE_IVARS] = [],
+    free_slots: i64[..MAX_STATE_SLOTS] = [],
     // String bytes use first-fit reuse without compaction. Adjacent ranges are
     // coalesced on free, so the list is bounded by the live string count. The
     // collector runs at most one allocation interval (64 objects) after a value
     // becomes garbage; that interval plus the live graph is the retention bound.
-    free_bytes: ByteRange[>..] = [],
+    free_bytes: ByteRange[..MAX_STATE_OBJECTS + 1] = [],
     // One mark word per object header. `mark_epoch` advances per collection so
     // marking never has to clear the whole table.
-    marks: u32[>..] = [],
+    marks: u32[..MAX_STATE_OBJECTS] = [],
     mark_epoch: u32 = 0,
-    mark_stack: MrbValue[>..] = [],
+    mark_stack: MrbValue[..MAX_STATE_OBJECTS] = [],
     allocations_since_collect: i64 = 0,
     // Signal tracking is global because at most one binding getter runs at a
     // time: reads of the tracked instance set their bits in `active_read_mask`
@@ -782,7 +784,10 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
             while slot_index >= 0 {
                 let slot = scratch.slots[slot_index];
                 let stored = promote_to_state_at(pool, scratch, slot.value, depth + 1);
-                state_array_push(pool, promoted, stored);
+                // This collection is new and unreachable until promotion
+                // returns. Publishing it owns notification; filling it must
+                // not scan every component root once per copied slot.
+                state_append_slot(pool, mrb_arena_index(promoted), mrb_nil(), stored);
                 slot_index = slot.next_index;
             }
             return promoted;
@@ -797,7 +802,8 @@ recursive fn promote_to_state_at(pool: StatePool&, scratch: ScratchArena&, value
                 let slot = scratch.slots[slot_index];
                 let stored_key = promote_to_state_at(pool, scratch, slot.key, depth + 1);
                 let stored_value = promote_to_state_at(pool, scratch, slot.value, depth + 1);
-                state_hash_set(pool, promoted, stored_key, stored_value);
+                // Scratch hashes already have unique keys in insertion order.
+                state_append_slot(pool, mrb_arena_index(promoted), stored_key, stored_value);
                 slot_index = slot.next_index;
             }
             return promoted;
