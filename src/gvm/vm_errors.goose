@@ -26,9 +26,12 @@ enum VmError {
     StateCapacity,
     Disposed,
     NoConstant,
+    ComputedEffect,
+    ComputedReentry,
 }
 
 struct ErrorContext {
+    computed: bool = false,
     class_id: u32,
     method_symbol: u32,
     binding_id: i64,
@@ -65,6 +68,8 @@ fn vm_error_name(err: VmError) -> u8[:] {
         ScratchFull => "scratch arena capacity exceeded",
         StateCapacity => "state pool capacity exceeded",
         Disposed => "disposed instance",
+        ComputedEffect => "computed evaluation must not mutate state or emit host effects",
+        ComputedReentry => "reentrant computed evaluation",
     };
 }
 
@@ -77,6 +82,7 @@ fn vm_set_error_context(machine: Vm&, class_id: u32, method_symbol: u32, binding
 }
 
 fn vm_clear_entry_capacity_failure(machine: Vm&) {
+    machine.error_context.computed = false;
     machine.error_context.reference_symbol = NULL_SYMBOL;
     machine.error_context.scratch_resource = ScratchResource.None;
     machine.error_context.scratch_requested = 0;
@@ -131,6 +137,7 @@ fn capacity_resource_name(resource: CapacityResource) -> u8[:] {
         IvarsPerObject => "ivars per object",
         Components => "component registrations",
         Bindings => "bindings",
+        ComputedEntries => "computed cache entries",
         Classes => "classes",
         AbiBytecode => "ABI bytecode bytes",
         HostCommands => "host command bytes",

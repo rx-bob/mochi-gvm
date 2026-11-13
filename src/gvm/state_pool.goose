@@ -7,6 +7,7 @@
 namespace vm;
 
 import.capacity_config;
+import.computed;
 import.ivar_mask;
 import.scratch_alloc;
 import.signals;
@@ -48,6 +49,8 @@ root struct StatePool {
     slots: ArenaSlot[>..] = [],
     components: MrbValue[>..] = [],
     bindings: BindingEntry[>..] = [],
+    computed: ComputedEntry[>..] = [],
+    computed_depth: i64 = 0,
     blob: u8[>..] = [],
     free_objects: i64[>..] = [],
     free_ivars: i64[>..] = [],

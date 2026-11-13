@@ -102,6 +102,10 @@ fn builtin_array_new(scratch: ScratchArena&) -> MrbValue {
 }
 
 fn builtin_array_push(pool: StatePool&, scratch: ScratchArena&, array: MrbValue, value: MrbValue) -> bool {
+    if pool.computed_depth > 0 && mrb_is_state(array) {
+        pool.error = VmError.ComputedEffect;
+        return false;
+    }
     if mrb_is_scratch(array) {
         return scratch_array_push(scratch, array, value);
     }
@@ -116,6 +120,10 @@ fn builtin_array_push(pool: StatePool&, scratch: ScratchArena&, array: MrbValue,
 }
 
 fn builtin_array_pop(pool: StatePool&, scratch: ScratchArena&, array: MrbValue) -> MrbValue {
+    if pool.computed_depth > 0 && mrb_is_state(array) {
+        pool.error = VmError.ComputedEffect;
+        return mrb_nil();
+    }
     if mrb_is_scratch(array) {
         let value, ok = scratch_array_pop(scratch, array);
         if !ok {
@@ -191,6 +199,10 @@ fn builtin_array_get(pool: StatePool&, scratch: ScratchArena&, array: MrbValue, 
 fn builtin_array_set(
     pool: StatePool&, scratch: ScratchArena&, array: MrbValue, position: i64, value: MrbValue
 ) -> bool {
+    if pool.computed_depth > 0 && mrb_is_state(array) {
+        pool.error = VmError.ComputedEffect;
+        return false;
+    }
     let length = builtin_array_length(pool, scratch, array);
     var index = position;
     if index < 0 {
@@ -337,6 +349,10 @@ fn builtin_hash_key_equal(
 }
 
 fn builtin_hash_set(pool: StatePool&, scratch: ScratchArena&, hash: MrbValue, key: MrbValue, value: MrbValue) -> bool {
+    if pool.computed_depth > 0 && mrb_is_state(hash) {
+        pool.error = VmError.ComputedEffect;
+        return false;
+    }
     if mrb_is_scratch(hash) {
         let object, ok = scratch_object(scratch, hash);
         if !ok || object.kind != ArenaObjectKind.Hash {

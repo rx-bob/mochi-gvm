@@ -237,6 +237,9 @@ fn vm_op_index(
         return vm_fail(machine, VmError.BadOperand, pc + 1);
     }
     if !builtin_set_index(machine.pool, machine.scratch, container, key, value) {
+        if machine.pool.error != VmError.Ok {
+            return vm_fail(machine, machine.pool.error, pc + 1);
+        }
         return vm_fail(machine, VmError.TypeMismatch, pc + 1);
     }
     return vm_step_continue(pc + 1);

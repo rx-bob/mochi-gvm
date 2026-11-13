@@ -150,6 +150,8 @@ fn abi_reset() {
     g_abi_pool.slots.clear();
     g_abi_pool.components.clear();
     g_abi_pool.bindings.clear();
+    g_abi_pool.computed.clear();
+    g_abi_pool.computed_depth = 0;
     g_abi_pool.blob.clear();
     g_abi_pool.free_objects.clear();
     g_abi_pool.free_ivars.clear();
@@ -170,6 +172,8 @@ fn abi_reset() {
     g_abi_scratch.reset_count = 0;
 
     g_abi_machine.methods.clear();
+    g_abi_machine.computed_definitions.clear();
+    g_abi_machine.computed_roots.clear();
     g_abi_machine.native_methods.clear();
     g_abi_machine.regs.clear();
     g_abi_machine.frames.clear();

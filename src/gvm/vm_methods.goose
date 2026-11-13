@@ -5,6 +5,7 @@ import.array_slice;
 import.builtins;
 import.builtins_ext;
 import.collection_arena;
+import.computed;
 import.host_api;
 import.scratch_alloc;
 import.state_pool;
@@ -83,12 +84,16 @@ fn vm_call_user_method(
     }
     let irep, found = vm_lookup_method(machine, class_id, method_symbol);
     if found {
-        vm_exec_with_args(machine, irep, receiver, frame.base + dst, args);
+        vm_exec_method(machine, class_id, method_symbol, irep, receiver, frame.base + dst, args);
         return true, machine.error == VmError.Ok;
     }
     let native_id, native_found = vm_lookup_native_method(machine, class_id, method_symbol);
     if !native_found {
         return false, true;
+    }
+    if machine.pool.computed_depth > 0 {
+        machine.error = VmError.ComputedEffect;
+        return true, false;
     }
     for index in 0..args.len {
         goose_abi_native_set_arg(index, args[index]);
@@ -261,6 +266,12 @@ fn vm_call_builtin(
     machine: Vm&, receiver: MrbValue, method_symbol: u32, args: MrbValue[:]
 ) -> MrbValue, bool {
     let name = symbol_name(method_symbol);
+    if machine.pool.computed_depth > 0 && mrb_is_state(receiver)
+        && (name == "<<" || name == "push" || name == "pop" || name == "clear"
+        || name == "delete" || name == "[]=" || name == "concat") {
+        machine.error = VmError.ComputedEffect;
+        return mrb_nil(), true;
+    }
     if name == "!" {
         return builtin_not(receiver), true;
     }
@@ -284,6 +295,9 @@ fn vm_call_builtin(
     }
     if mrb_is_class(receiver) {
         let class_id = mrb_class_id(receiver);
+        if name == "__mochi_computed" {
+            return computed_register(machine, class_id, args), true;
+        }
         if class_id == BUILTIN_ARRAY_CLASS_ID && name == "new" {
             return builtin_array_new(machine.scratch), true;
         }

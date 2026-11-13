@@ -846,6 +846,10 @@ fn builtin_hash_ext(
 }
 
 fn builtin_hash_delete(machine: Vm&, hash: MrbValue, key: MrbValue) {
+    if machine.pool.computed_depth > 0 && mrb_is_state(hash) {
+        machine.error = VmError.ComputedEffect;
+        return;
+    }
     let keys, vals = vm_collect_hash_pairs(machine, hash);
     let len = builtin_array_length(machine.pool, machine.scratch, keys);
     if mrb_is_scratch(hash) {

@@ -1,6 +1,7 @@
 // Host entrypoints for instantiating components and invoking their methods.
 namespace vm;
 
+import.computed;
 import.signals;
 import.state_pool;
 import.state_reclaim;
@@ -49,6 +50,7 @@ fn vm_dispose_instance(machine: Vm&, instance: MrbValue) -> bool {
         return false;
     }
     binding_unregister_all(machine.pool, instance);
+    computed_unregister(machine.pool, instance);
     state_unregister_component(machine.pool, instance);
     state_mark_instance_disposed(machine.pool, instance);
     // Reclaim immediately when this host entry owns no frames. A collection
@@ -265,6 +267,11 @@ fn vm_call_args_prepared(
     }
     let native_id, native_found = vm_lookup_native_method(machine, class_id, method_sym);
     if native_found {
+        if machine.pool.computed_depth > 0 || computed_definition(machine, class_id, method_sym) >= 0 {
+            machine.error = VmError.ComputedEffect;
+            vm_set_error_context(machine, class_id, method_sym, -1);
+            return mrb_nil();
+        }
         for index in 0..args.len {
             goose_abi_native_set_arg(index, args[index]);
         }
@@ -291,5 +298,5 @@ fn vm_call_args_prepared(
         vm_end_entry(machine);
         return mrb_nil();
     }
-    return vm_exec_with_args(machine, irep, receiver, -1, args);
+    return vm_exec_method(machine, class_id, method_sym, irep, receiver, -1, args);
 }

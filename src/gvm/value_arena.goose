@@ -154,6 +154,7 @@ enum CapacityResource {
     Classes,
     AbiBytecode,
     HostCommands,
+    ComputedEntries,
 }
 
 struct CapacityFailure {

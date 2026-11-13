@@ -1,6 +1,7 @@
 // Shared state and helpers for the scalar RITE register VM.
 namespace vm;
 
+import.computed;
 import.rite_parser;
 import.rite_pool;
 import.rite_types;
@@ -144,6 +145,8 @@ root struct Vm {
     pool: StatePool&,
     scratch: ScratchArena&,
     methods: MethodEntry[>..] = [],
+    computed_definitions: ComputedDefinition[>..] = [],
+    computed_roots: u32[>..] = [],
     native_methods: NativeMethod[>..] = [],
     regs: MrbValue[..MAX_VM_REGS] = [],
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],

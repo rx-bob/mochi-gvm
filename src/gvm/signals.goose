@@ -425,7 +425,11 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
         }
         if machine.error != VmError.Ok {
             let class_id, _ = vm_receiver_class_id(machine, instance);
-            vm_set_error_context(machine, class_id, entry.getter_symbol, entry.binding_id);
+            if !machine.error_context.computed {
+                vm_set_error_context(machine, class_id, entry.getter_symbol, entry.binding_id);
+            } else {
+                machine.error_context.binding_id = entry.binding_id;
+            }
             // Reject this whole patch batch. No later getter may reset the
             // first error, and every binding must be retried after recovery.
             for reset in 0..machine.pool.bindings.len {

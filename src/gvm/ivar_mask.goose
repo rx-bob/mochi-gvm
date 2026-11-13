@@ -7,6 +7,7 @@
 // test and setting a bit only touches the owning word.
 namespace vm;
 
+import.computed;
 import.scratch_alloc;
 import.state_pool;
 import.value_arena;
@@ -317,6 +318,7 @@ fn state_store_ivar_raw(pool: StatePool&, object_index: u32, key: u32, value: Mr
                 return true;
             }
             pool.ivars[slot_index].value = value;
+            computed_invalidate(pool, index, pool.ivars[slot_index].bit_index);
             state_mark_ivar_dirty(pool, index, pool.ivars[slot_index].bit_index);
             return true;
         }
@@ -327,6 +329,7 @@ fn state_store_ivar_raw(pool: StatePool&, object_index: u32, key: u32, value: Mr
         return false;
     }
     if !mrb_is_nil(value) {
+        computed_invalidate(pool, index, pool.ivars[created].bit_index);
         state_mark_ivar_dirty(pool, index, pool.ivars[created].bit_index);
     }
     return true;

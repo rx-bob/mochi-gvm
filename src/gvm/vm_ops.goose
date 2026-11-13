@@ -116,6 +116,9 @@ recursive fn vm_exec_frame(
         let step = vm_exec_step(machine, frame, record, iseq, pc + 1, op);
         pc = step.pc;
         machine.frames[frame_index].pc = pc;
+        if machine.pool.error != VmError.Ok && machine.error == VmError.Ok {
+            machine.error = machine.pool.error;
+        }
         if machine.scratch.overflow && machine.error == VmError.Ok {
             machine.error = VmError.ScratchFull;
             vm_absorb_scratch_failure(machine, record_index);
@@ -133,6 +136,7 @@ recursive fn vm_exec_frame(
         }
         if machine.error != VmError.Ok {
             vm_absorb_method_context(machine, record_index);
+            running = false;
         }
     }
 
@@ -161,6 +165,9 @@ fn vm_exec_step(
     // collection here cannot invalidate an in-flight expression.
     gc_maybe_collect(machine);
     scratch_maybe_collect(machine);
+    if machine.pool.computed_depth > 0 && (op == OP_SETIV || op == OP_SETCONST) {
+        return vm_fail(machine, VmError.ComputedEffect, pc);
+    }
     let dispatched, handled = vm_dispatch_step(machine, frame, record, iseq, pc, op);
     if handled {
         return dispatched;

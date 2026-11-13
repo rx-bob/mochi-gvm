@@ -103,6 +103,10 @@ fn gc_mark_roots(machine: Vm&) {
     for entry in pool.bindings {
         gc_mark_push(pool, entry.instance);
     }
+    for entry in pool.computed {
+        gc_mark_push(pool, entry.instance);
+        gc_mark_push(pool, entry.value);
+    }
     for value in machine.regs {
         gc_mark_push(pool, value);
     }

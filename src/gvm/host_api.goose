@@ -448,6 +448,10 @@ fn vm_call_mochi_attr(
 fn vm_call_mochi_builtin(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    if machine.pool.computed_depth > 0 {
+        machine.error = VmError.ComputedEffect;
+        return mrb_nil(), true;
+    }
     let before = g_host_outbox.len;
     let value, handled = vm_call_mochi_operation(machine, name, args);
     if g_host_outbox.len >= HOST_OUTBOX_CAPACITY {
