@@ -3,6 +3,7 @@ namespace vm;
 
 import.builtins;
 import.drag_api;
+import.files_api;
 import.json_args;
 import.rite_types;
 import.scratch_alloc;
@@ -483,6 +484,10 @@ fn vm_call_mochi_operation(
     let drag_val, drag_ok = drag_api_dispatch(machine, name, args, g_host_outbox);
     if drag_ok {
         return drag_val, true;
+    }
+    let files_val, files_ok = files_api_dispatch(machine, name, args, g_host_outbox);
+    if files_ok {
+        return files_val, true;
     }
     let route_val, route_ok = vm_call_mochi_route(machine, name, args);
     if route_ok {
