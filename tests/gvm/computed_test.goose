@@ -64,6 +64,64 @@ fn test_explicit_mask_invalidation(t: goosetest::Test&) {
     t.assert_eq(0, pool.computed.len);
 }
 
+fn test_computed_lifetimes_reuse_graphs(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    t.assert_eq(vm::ParseError.Ok, vm::vm_load_irep(file, COMPUTED));
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let klass = vm::intern_symbol("ComputedProbe");
+    let rows_method = vm::intern_symbol("rows");
+    let other = vm::vm_instantiate(machine, klass);
+    let retained = vm::vm_call0(machine, other, rows_method);
+    vm::vm_end_entry(machine);
+    vm::gc_collect(machine);
+    let baseline = vm::state_allocated_object_count(pool);
+    for _ in 0..100 {
+        let owner = vm::vm_instantiate(machine, klass);
+        let first = vm::vm_call0(machine, owner, rows_method);
+        t.assert_eq(vm::VmError.Ok, machine.error);
+        set_count(machine, owner, 3);
+        let replacement = vm::vm_call0(machine, owner, rows_method);
+        t.assert_false(vm::mrb_value_identical(first, replacement));
+        vm::vm_end_entry(machine);
+        vm::gc_collect(machine);
+        t.assert_true(vm::mrb_value_identical(replacement, vm::vm_call0(machine, owner, rows_method)));
+        set_count(machine, owner, 0);
+        vm::vm_call0(machine, owner, rows_method);
+        t.assert_eq(vm::VmError.DivisionByZero, machine.error);
+        t.assert_false(pool.computed[1].valid);
+        t.assert_false(pool.computed[1].evaluating);
+        t.assert_true(vm::mrb_is_nil(pool.computed[1].value));
+        t.assert_eq(0, pool.computed_depth);
+        t.assert_true(vm::mrb_value_identical(retained, vm::vm_call0(machine, other, rows_method)));
+        set_count(machine, owner, 6);
+        let recovered = vm::vm_call0(machine, owner, rows_method);
+        t.assert_eq(vm::VmError.Ok, machine.error);
+        let item = vm::builtin_array_get(pool, scratch, recovered, 0);
+        let number = vm::builtin_hash_get(pool, scratch, item, vm::scratch_alloc_string(scratch, "value"));
+        t.assert_eq(2, vm::mrb_fixnum_value(number));
+        vm::vm_end_entry(machine);
+        t.assert_true(vm::vm_dispose_instance(machine, owner));
+        t.assert_eq(1, pool.computed.len);
+        t.assert_eq(baseline, vm::state_allocated_object_count(pool));
+    }
+    t.assert_true(vm::vm_dispose_instance(machine, other));
+    t.assert_eq(0, pool.computed.len);
+    t.assert_eq(0, vm::state_allocated_object_count(pool));
+}
+
 fn set_count(machine: vm::Vm&, owner: vm::MrbValue, count: i64) {
     let args: vm::MrbValue[1] = [vm::mrb_fixnum(count)];
     vm::vm_call_args(machine, owner, vm::intern_symbol("change"), args[..]);
@@ -313,6 +371,9 @@ fn test_bad_metadata_and_cache_capacity(t: goosetest::Test&) {
     t.assert_eq(vm::VmError.StateCapacity, machine.error);
     t.assert_eq(vm::CapacityResource.ComputedEntries, pool.failure.resource);
     t.assert_eq(vm::MAX_BINDINGS, pool.failure.capacity);
+    t.assert_true(machine.error_context.computed);
+    t.assert_eq(vm::intern_symbol("rows"), machine.error_context.method_symbol);
+    t.assert_eq(vm::CapacityResource.ComputedEntries, machine.error_context.capacity_resource);
     vm::computed_unregister(pool, owner);
     vm::vm_call0(machine, owner, vm::intern_symbol("rows"));
     t.assert_eq(vm::VmError.Ok, machine.error);

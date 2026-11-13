@@ -160,6 +160,11 @@ fn vm_exec_method(machine: Vm&, class_id: u32, method_symbol: u32, irep: i64,
     let index = computed_entry(machine, receiver, definition);
     if index < 0 {
         machine.error = machine.pool.error;
+        // Entry allocation can fail before the method gets a frame. Keep the
+        // rejected computed method, rather than attributing it to its caller.
+        vm_set_error_context(machine, class_id, method_symbol, machine.error_context.binding_id);
+        machine.error_context.computed = true;
+        vm_absorb_state_failure(machine, irep);
         return mrb_nil();
     }
     let entry = machine.pool.computed[index];
