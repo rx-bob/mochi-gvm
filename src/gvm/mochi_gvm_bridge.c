@@ -673,6 +673,9 @@ static mrb_value mochi_host_async_native(mrb_state *mrb, mrb_value self) {
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mochi_host_failure(mrb, "invalid component instance");
   }
+  /* Preserve Ruby call order when synchronous Goose host commands (such as
+   * opening a file reader) are pending beside this async request. */
+  if (!sync_host_outbox()) return mochi_host_failure(mrb, g_error_text);
   instance_value = goose_vm_make_scratch_string(
       slice_of(instance_text, (size_t)instance_len));
   if (instance_value == 0) {

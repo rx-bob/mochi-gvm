@@ -579,13 +579,21 @@ fn abi_value_json(value: u64) -> const u8[:] {
     return g_abi_json[..];
 }
 
-// Returns the receiver of the current VM frame. Native module calls use this
-// to resolve the component that invoked `Mochi.fetch`.
+// Returns the nearest component receiver in the active Ruby call stack.
+// Capability wrappers such as MochiFiles call native Mochi APIs from a class
+// method, so the current frame's receiver can be the wrapper class instead.
 fn abi_current_self() -> u64 {
-    if g_abi_machine.frames.len == 0 {
-        return 0;
+    var frame_index = g_abi_machine.frames.len - 1;
+    while frame_index >= 0 {
+        let candidate = g_abi_machine.frames[frame_index].self_value;
+        for component in g_abi_machine.pool.components {
+            if mrb_value_identical(candidate, component) {
+                return candidate;
+            }
+        }
+        frame_index -= 1;
     }
-    return g_abi_machine.frames[g_abi_machine.frames.len - 1].self_value;
+    return 0;
 }
 
 fn abi_fetch_callback_ok(callback: u64) -> bool {
