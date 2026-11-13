@@ -204,6 +204,42 @@ fn vm_call_mochi_storage(
     return mrb_nil(), false;
 }
 
+fn vm_call_mochi_events(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
+    if name != "subscribe" && name != "unsubscribe" {
+        return mrb_nil(), false;
+    }
+    if args.len < 2 {
+        return mrb_false(), true;
+    }
+    let instance, has_instance = host_current_instance(machine);
+    if !has_instance {
+        return mrb_false(), true;
+    }
+    let event_name, event_ok = builtin_hash_key_text(machine.pool, machine.scratch, args[0]);
+    let callback, callback_ok = builtin_hash_key_text(machine.pool, machine.scratch, args[1]);
+    if !event_ok || !callback_ok || event_name.len == 0 || callback.len == 0 ||
+    event_name.len > 128 || callback.len > 128 {
+        return mrb_false(), true;
+    }
+    let command = if name == "subscribe" {
+        "event_subscribe"
+    } else {
+        "event_unsubscribe"
+    };
+    g_host_outbox.append("{\"__host\":");
+    host_append_json_escaped(g_host_outbox, command);
+    g_host_outbox.append(",\"event\":");
+    host_append_json_escaped(g_host_outbox, event_name);
+    g_host_outbox.append(",\"callback\":");
+    host_append_json_escaped(g_host_outbox, callback);
+    g_host_outbox.append(",\"instance\":\"");
+    mrb_format_fixnum(g_host_outbox, instance as!i64);
+    g_host_outbox.append("\"}\n");
+    return mrb_true(), true;
+}
+
 fn vm_call_mochi_timer(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
@@ -274,21 +310,9 @@ fn vm_call_mochi_focus(
     return mrb_nil(), false;
 }
 
-fn vm_call_mochi_builtin(
+fn vm_call_mochi_route(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
-    let storage_val, storage_ok = vm_call_mochi_storage(machine, name, args);
-    if storage_ok {
-        return storage_val, true;
-    }
-    let timer_val, timer_ok = vm_call_mochi_timer(machine, name, args);
-    if timer_ok {
-        return timer_val, true;
-    }
-    let focus_val, focus_ok = vm_call_mochi_focus(machine, name, args);
-    if focus_ok {
-        return focus_val, true;
-    }
     if name == "route" {
         return scratch_alloc_string(machine.scratch, g_host_route[..]), true;
     }
@@ -331,6 +355,12 @@ fn vm_call_mochi_builtin(
         g_host_outbox.append("\"}\n");
         return mrb_true(), true;
     }
+    return mrb_nil(), false;
+}
+
+fn vm_call_mochi_attr(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
     if name == "get_attr" && args.len >= 1 {
         var abuf: u8[>..] = [];
         let raw_name = host_arg_text(machine, args[0], abuf);
@@ -353,6 +383,32 @@ fn vm_call_mochi_builtin(
         return mrb_nil(), true;
     }
     return mrb_nil(), false;
+}
+
+fn vm_call_mochi_builtin(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
+    let event_val, event_ok = vm_call_mochi_events(machine, name, args);
+    if event_ok {
+        return event_val, true;
+    }
+    let storage_val, storage_ok = vm_call_mochi_storage(machine, name, args);
+    if storage_ok {
+        return storage_val, true;
+    }
+    let timer_val, timer_ok = vm_call_mochi_timer(machine, name, args);
+    if timer_ok {
+        return timer_val, true;
+    }
+    let focus_val, focus_ok = vm_call_mochi_focus(machine, name, args);
+    if focus_ok {
+        return focus_val, true;
+    }
+    let route_val, route_ok = vm_call_mochi_route(machine, name, args);
+    if route_ok {
+        return route_val, true;
+    }
+    return vm_call_mochi_attr(machine, name, args);
 }
 
 export fn goose_vm_seed_storage(key: const u8[:], value: const u8[:]) {

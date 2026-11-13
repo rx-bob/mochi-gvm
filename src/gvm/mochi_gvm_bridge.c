@@ -444,12 +444,10 @@ static mrb_value mochi_cancel_fetch_native(mrb_state *mrb, mrb_value self) {
   return mrb_true_value();
 }
 
-/* Ruby-callable: Mochi.emit("show_canvas").
- * Ruby-callable: Mochi.emit("select_trace", id: "tr_1", target: "cowboy-logs").
- * Appends one JSON object per emit:
- *   {"action":"...","target":...,"payload":...}\n
- * The loader filters by target tag and passes payload to one-argument action
- * handlers. A plain action line is still emitted with null target and payload. */
+/* Ruby-callable: Mochi.emit("notice", id: "tr_1").
+ * Appends one explicitly published event per call:
+ *   {"__host":"event_publish","event":"...","payload":...}\n
+ * The loader delivers only to live, explicitly registered subscribers. */
 static int append_text_piece(
     char *buffer, size_t capacity, size_t *at, const void *data, size_t length
 ) {
@@ -460,53 +458,35 @@ static int append_text_piece(
 }
 
 static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
-  static const char PREFIX[] = "{\"action\":";
-  static const char TARGET_KEY[] = ",\"target\":";
+  static const char PREFIX[] = "{\"__host\":\"event_publish\",\"event\":";
   static const char PAYLOAD_KEY[] = ",\"payload\":";
   static const char SUFFIX[] = "}\n";
   static const char JSON_NULL[] = "null";
-  mrb_value action_value = mrb_nil_value();
+  mrb_value event_value = mrb_nil_value();
   mrb_value payload = mrb_nil_value();
-  mrb_value target = mrb_nil_value();
   mrb_int argc;
-  const uint8_t *action_json;
-  const uint8_t *target_json;
+  const uint8_t *event_json;
   const uint8_t *payload_json;
-  int64_t action_len = 0;
-  int64_t target_len = 0;
+  int64_t event_len = 0;
   int64_t payload_len = 0;
   char line[MOCHI_EMIT_CAPACITY];
   size_t at = 0;
   (void)self;
 
-  argc = mrb_get_args(mrb, "oo", &action_value, &payload);
-  if (argc < 1 || !mrb_string_p(action_value) || mrb_string_len(action_value) <= 0) {
+  argc = mrb_get_args(mrb, "oo", &event_value, &payload);
+  if (argc < 1 || !mrb_string_p(event_value) || mrb_string_len(event_value) <= 0) {
     return mrb_fixnum_value(-1);
   }
   if (argc >= 2 && !goose_vm_is_hash(payload)) {
     return mrb_fixnum_value(-1);
   }
 
-  action_json = goose_vm_value_json(action_value, &action_len);
-  if (!action_json || action_len <= 0) return mrb_fixnum_value(-1);
+  event_json = goose_vm_value_json(event_value, &event_len);
+  if (!event_json || event_len <= 0) return mrb_fixnum_value(-1);
   if (!append_text_piece(line, sizeof(line), &at, PREFIX, sizeof(PREFIX) - 1)) {
     return mrb_fixnum_value(-1);
   }
-  if (!append_text_piece(line, sizeof(line), &at, action_json, (size_t)action_len)) {
-    return mrb_fixnum_value(-1);
-  }
-  if (!append_text_piece(line, sizeof(line), &at, TARGET_KEY,
-                         sizeof(TARGET_KEY) - 1)) {
-    return mrb_fixnum_value(-1);
-  }
-
-  if (argc >= 2) {
-    mrb_sym target_symbol = mrb_intern_cstr(mrb, "target");
-    target = goose_vm_hash_get_symbol(payload, target_symbol);
-  }
-  target_json = goose_vm_value_json(target, &target_len);
-  if (!target_json || target_len <= 0) return mrb_fixnum_value(-1);
-  if (!append_text_piece(line, sizeof(line), &at, target_json, (size_t)target_len)) {
+  if (!append_text_piece(line, sizeof(line), &at, event_json, (size_t)event_len)) {
     return mrb_fixnum_value(-1);
   }
   if (!append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY,
