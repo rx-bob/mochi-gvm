@@ -64,6 +64,42 @@ fn test_host_storage_roundtrip_and_outbox(t: goosetest::Test&) {
     t.assert_eq("absent", vm::builtin_string_bytes(pool, scratch, absent));
 }
 
+fn test_drag_payload_validation_and_typed_command(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    var count: i64 = 0;
+    let array = vm::builtin_array_new(machine.scratch);
+    t.assert_true(vm::builtin_array_push(machine.pool, machine.scratch, array, vm::mrb_false()));
+    t.assert_true(vm::builtin_array_push(machine.pool, machine.scratch, array, vm::mrb_nil()));
+    t.assert_true(vm::drag_value_valid(machine, array, 0, count));
+    t.assert_eq(3, count);
+
+    count = 0;
+    t.assert_false(vm::drag_value_valid(machine, vm::mrb_symbol(vm::intern_symbol("unsafe")), 0, count));
+    t.assert_false(vm::drag_value_valid(machine, vm::scratch_alloc_string(machine.scratch, "ok"), 33, count));
+
+    vm::host_reset();
+    var outbox: u8[>..] = [];
+    let args: vm::MrbValue[1] = [vm::mrb_false()];
+    let result = vm::drag_api_command(machine, "drag_set_data", args[..], outbox, vm::mrb_fixnum(7));
+    t.assert_true(vm::mrb_is_true(result));
+    t.assert_true(outbox.len >= 7);
+    t.assert_true(outbox[outbox.len - 7..] == "false}\n");
+}
+
 fn test_host_storage_subscribe_requires_instance(t: goosetest::Test&) {
     vm::host_reset();
     var file: vm::RiteFile = vm::RiteFile {

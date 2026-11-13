@@ -2,6 +2,7 @@
 namespace vm;
 
 import.builtins;
+import.drag_api;
 import.json_args;
 import.rite_types;
 import.scratch_alloc;
@@ -10,6 +11,7 @@ import.state_pool;
 import.value_arena;
 import.vm_core;
 import.vm_methods;
+import.vm_num;
 
 struct HostStorageEntry {
     key_symbol: u32,
@@ -478,33 +480,13 @@ fn vm_call_mochi_operation(
     if pointer_ok {
         return pointer_val, true;
     }
+    let drag_val, drag_ok = drag_api_dispatch(machine, name, args, g_host_outbox);
+    if drag_ok {
+        return drag_val, true;
+    }
     let route_val, route_ok = vm_call_mochi_route(machine, name, args);
     if route_ok {
         return route_val, true;
     }
     return vm_call_mochi_attr(machine, name, args);
-}
-
-export fn goose_vm_seed_storage(key: const u8[:], value: const u8[:]) {
-    host_storage_put_raw(key, value);
-}
-
-export fn goose_vm_remove_storage(key: const u8[:]) {
-    host_storage_remove_raw(key);
-}
-
-export fn goose_vm_set_route_state(path: const u8[:]) {
-    host_set_route_raw(path);
-}
-
-export fn goose_vm_set_route_info(info: const u8[:]) {
-    host_set_route_info_raw(info);
-}
-
-export fn goose_vm_host_outbox() -> const u8[:] {
-    return host_outbox_bytes();
-}
-
-export fn goose_vm_clear_host_outbox() {
-    host_clear_outbox();
 }

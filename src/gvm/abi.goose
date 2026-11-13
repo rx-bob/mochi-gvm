@@ -11,6 +11,7 @@ import.builtins;
 import.capacity_config;
 import.event_payload;
 import.host_api;
+import.host_api_exports;
 import.ivar_mask;
 import.json_args;
 import.rite_types;
