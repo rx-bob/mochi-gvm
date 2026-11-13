@@ -1,6 +1,8 @@
 // Extended scalar, String, Array, and Hash intrinsics for the Goose VM.
 namespace vm;
 
+import math;
+
 import.builtins;
 import.collection_arena;
 import.rite_types;
@@ -81,9 +83,276 @@ fn numeric_method_fault(fault: NumFault) -> VmError {
     };
 }
 
+// Decimal precision is deliberately bounded: powers stay exact in i64 and
+// each call has constant work, independent of the requested ndigits value.
+let NUM_MAX_DECIMAL_PRECISION: i64 = 18;
+let NUM_FLOAT_EPSILON: f64 = 0.0000000000000002220446049250313;
+
+fn numeric_is_hash(machine: Vm&, value: MrbValue) -> bool {
+    if mrb_is_scratch(value) {
+        return scratch_is_hash(machine.scratch, value);
+    }
+    return state_is_hash(machine.pool, value);
+}
+
+fn numeric_decimal_scale_i64(precision: i64) -> i64 {
+    var scale: i64 = 1;
+    var i = 0;
+    while i < precision {
+        scale *= 10;
+        i += 1;
+    }
+    return scale;
+}
+
+fn numeric_decimal_scale(precision: i64) -> f64 {
+    var scale = 1.0;
+    var i = 0;
+    while i < precision {
+        scale *= 10.0;
+        i += 1;
+    }
+    return scale;
+}
+
+fn numeric_integer_round(
+    value: i64, precision: i64, operation: u8[:], half_mode: u8[:]
+) -> i64, bool {
+    if precision >= 0 {
+        return value, true;
+    }
+    let scale = numeric_decimal_scale_i64(-precision)as u64;
+    var magnitude = value as!u64;
+    let negative = value < 0;
+    if negative {
+        magnitude = 0 - magnitude;
+    }
+    var quotient = magnitude / scale;
+    let remainder = magnitude % scale;
+    if operation == "ceil" {
+        if !negative && remainder != 0 {
+            quotient += 1;
+        }
+    } else if operation == "floor" {
+        if negative && remainder != 0 {
+            quotient += 1;
+        }
+    } else {
+        let twice_remainder = remainder * 2;
+        let increment = if half_mode == "down" {
+            twice_remainder > scale
+        } else if half_mode == "even" {
+            twice_remainder > scale || (twice_remainder == scale && quotient % 2 != 0)
+        } else {
+            twice_remainder >= scale
+        };
+        if increment {
+            quotient += 1;
+        }
+    }
+    let rounded = quotient * scale;
+    let limit = if negative {
+        NUM_I64_MAGNITUDE
+    } else {
+        NUM_I64_POSITIVE_LIMIT
+    };
+    if rounded > limit {
+        return 0, false;
+    }
+    if negative {
+        if rounded == NUM_I64_MAGNITUDE {
+            return NUM_I64_MIN, true;
+        }
+        return -(rounded as!i64), true;
+    }
+    return rounded as!i64, true;
+}
+
+fn numeric_float_round(
+    value: f64, precision: i64, operation: u8[:], half_mode: u8[:]
+) -> f64 {
+    let scale = numeric_decimal_scale(if precision < 0 {
+            -precision
+        } else {
+            precision
+        });
+    if precision < 0 && value != 0.0 {
+        let magnitude = if value < 0.0 {
+            -value
+        } else {
+            value
+        };
+        if magnitude < scale {
+            if operation == "floor" && value < 0.0 {
+                return -scale;
+            }
+            if operation == "ceil" && value > 0.0 {
+                return scale;
+            }
+            if operation == "round" {
+                let half_scale = scale / 2.0;
+                if magnitude > half_scale {
+                    return copysign(scale, value);
+                }
+                if magnitude == half_scale {
+                    if half_mode == "up" {
+                        return copysign(scale, value);
+                    }
+                    if half_mode == "even" {
+                        return copysign(0.0, value);
+                    }
+                }
+            }
+            return copysign(0.0, value);
+        }
+    }
+    let scaled = if precision < 0 {
+        value / scale
+    } else {
+        value * scale
+    };
+    if scaled == INF || scaled == -INF {
+        return value;
+    }
+    var rounded: f64 = 0.0;
+    if operation == "floor" {
+        rounded = floor(scaled);
+    } else if operation == "ceil" {
+        rounded = -floor(-scaled);
+    } else {
+        let magnitude = if scaled < 0.0 {
+            -scaled
+        } else {
+            scaled
+        };
+        let lower = floor(magnitude);
+        let fraction = magnitude - lower;
+        var tolerance = magnitude * NUM_FLOAT_EPSILON * 2.0;
+        if tolerance > 0.0000000001 {
+            tolerance = 0.0000000001;
+        }
+        let tie = fraction == 0.5 || (fraction > 0.5 - tolerance && fraction < 0.5 + tolerance);
+        var increment = fraction > 0.5 && !tie;
+        if tie {
+            increment = half_mode == "up" || (half_mode == "even" && floor(lower / 2.0) * 2.0 != lower);
+        }
+        var rounded_magnitude = lower;
+        if increment {
+            rounded_magnitude += 1.0;
+        }
+        rounded = if scaled < 0.0 {
+            -rounded_magnitude
+        } else {
+            rounded_magnitude
+        };
+    }
+    let result = if precision < 0 {
+        rounded * scale
+    } else {
+        rounded / scale
+    };
+    if result == 0.0 {
+        return copysign(0.0, value);
+    }
+    return result;
+}
+
+fn numeric_rounding_method(
+    machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
+    var precision: i64 = 0;
+    var half_mode: const u8[:] = "up";
+    var positional_count = args.len;
+    if name == "round" && args.len > 0 && numeric_is_hash(machine, args[args.len - 1]) {
+        let options = args[args.len - 1];
+        positional_count -= 1;
+        let half_key = mrb_symbol(intern_symbol("half"));
+        let half_value = builtin_hash_get(machine.pool, machine.scratch, options, half_key);
+        if mrb_is_nil(half_value) || builtin_hash_length(machine.pool, machine.scratch, options) != 1 {
+            machine.error = VmError.InvalidArgument;
+            return mrb_nil(), true;
+        }
+        if !mrb_is_symbol(half_value) {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        half_mode = symbol_name(mrb_symbol_id(half_value));
+        if half_mode != "up" && half_mode != "down" && half_mode != "even" {
+            machine.error = VmError.InvalidArgument;
+            return mrb_nil(), true;
+        }
+    }
+    if positional_count > 1 || (name != "round" && args.len > 1) {
+        machine.error = VmError.WrongArity;
+        return mrb_nil(), true;
+    }
+    if positional_count == 1 {
+        let integer, ok = num_integer_value(machine.scratch, machine.pool, args[0]);
+        if !ok {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        precision = integer;
+    }
+    if precision < - NUM_MAX_DECIMAL_PRECISION || precision > NUM_MAX_DECIMAL_PRECISION {
+        machine.error = VmError.InvalidArgument;
+        return mrb_nil(), true;
+    }
+    let kind = num_kind(machine.scratch, machine.pool, receiver);
+    if kind == NumKind.Integer {
+        let integer, ok = num_integer_value(machine.scratch, machine.pool, receiver);
+        if !ok {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        let rounded, rounded_ok = numeric_integer_round(integer, precision, name, half_mode);
+        if !rounded_ok {
+            machine.error = VmError.IntegerOverflow;
+            return mrb_nil(), true;
+        }
+        let result = num_from_i64(machine.scratch, rounded);
+        if mrb_is_nil(result) {
+            machine.error = VmError.ScratchFull;
+        }
+        return result, true;
+    }
+    let value, value_ok = num_float_value(machine.scratch, machine.pool, receiver);
+    if !value_ok {
+        return mrb_nil(), false;
+    }
+    if value != value || value == INF || value == -INF {
+        if precision > 0 {
+            return receiver, true;
+        }
+        machine.error = VmError.FloatDomain;
+        return mrb_nil(), true;
+    }
+    let rounded = numeric_float_round(value, precision, name, half_mode);
+    if precision > 0 {
+        let result = num_from_f64(machine.scratch, rounded);
+        if mrb_is_nil(result) {
+            machine.error = VmError.ScratchFull;
+        }
+        return result, true;
+    }
+    let integer, integer_ok = num_to_i64(machine.scratch, machine.pool, num_from_f64(machine.scratch, rounded));
+    if !integer_ok {
+        machine.error = VmError.IntegerOverflow;
+        return mrb_nil(), true;
+    }
+    let result = num_from_i64(machine.scratch, integer);
+    if mrb_is_nil(result) {
+        machine.error = VmError.ScratchFull;
+    }
+    return result, true;
+}
+
 fn builtin_number_method(
     machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    if name == "round" || name == "floor" || name == "ceil" {
+        return numeric_rounding_method(machine, receiver, name, args);
+    }
     if name == "zero?" {
         return mrb_bool(num_zero(machine.scratch, machine.pool, receiver)), true;
     }

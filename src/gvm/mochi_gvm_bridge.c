@@ -477,6 +477,7 @@ static int append_text_piece(
 static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   static const char PREFIX[] = "{\"__host\":\"event_publish\",\"event\":";
   static const char INSTANCE_KEY[] = ",\"instance\":\"";
+  static const char INSTANCE_END[] = "\"";
   static const char PAYLOAD_KEY[] = ",\"payload\":";
   static const char SUFFIX[] = "}\n";
   static const char JSON_NULL[] = "null";
@@ -521,6 +522,8 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
                          sizeof(INSTANCE_KEY) - 1) ||
       !append_text_piece(line, sizeof(line), &at, instance_text,
                          (size_t)instance_len) ||
+      !append_text_piece(line, sizeof(line), &at, INSTANCE_END,
+                         sizeof(INSTANCE_END) - 1) ||
       !append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY,
                          sizeof(PAYLOAD_KEY) - 1)) {
     return mrb_fixnum_value(-1);

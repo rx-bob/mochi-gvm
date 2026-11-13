@@ -32,6 +32,10 @@ fn test_ivar_capacity_error_name(t: goosetest::Test&) {
     t.assert_eq("ivar capacity exceeded", vm::vm_error_name(vm::VmError.IvarCapacity));
 }
 
+fn test_invalid_argument_error_name(t: goosetest::Test&) {
+    t.assert_eq("invalid argument", vm::vm_error_name(vm::VmError.InvalidArgument));
+}
+
 fn test_innermost_method_claims_error_context_once(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..
