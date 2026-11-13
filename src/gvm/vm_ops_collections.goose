@@ -1,6 +1,7 @@
 // Opcode handlers for literals, strings, upvars, and Array/Hash operations.
 namespace vm;
 
+import.array_slice;
 import.builtins;
 import.collection_arena;
 import.rite_types;
@@ -216,7 +217,16 @@ fn vm_op_index(
         return vm_fail(machine, VmError.BadOperand, pc + 1);
     }
     if op == OP_GETIDX {
-        let value = builtin_get_index(machine.pool, machine.scratch, container, key);
+        var value = mrb_nil();
+        if scratch_is_array(machine.scratch, container) || state_is_array(machine.pool, container) {
+            let args: MrbValue[1] = [key];
+            value = builtin_array_index(machine, container, args[..]);
+            if machine.error != VmError.Ok {
+                return vm_fail(machine, machine.error, pc + 1);
+            }
+        } else {
+            value = builtin_get_index(machine.pool, machine.scratch, container, key);
+        }
         if !vm_write_register(machine, record, frame.base, ops.a, value) {
             return vm_fail(machine, VmError.BadOperand, pc + 1);
         }

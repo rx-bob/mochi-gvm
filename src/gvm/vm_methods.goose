@@ -1,6 +1,7 @@
 // Method lookup and intrinsic dispatch for SEND-family opcodes.
 namespace vm;
 
+import.array_slice;
 import.builtins;
 import.builtins_ext;
 import.collection_arena;
@@ -108,6 +109,9 @@ fn vm_call_user_method(
 fn vm_call_array_builtin(
     machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    if name == "[]" || name == "slice" {
+        return builtin_array_index(machine, receiver, args), true;
+    }
     if name == "<<" || name == "push" {
         if args.len < 1 {
             return mrb_nil(), true;
@@ -135,13 +139,6 @@ fn vm_call_array_builtin(
             separator = args[0];
         }
         return builtin_array_join(machine.pool, machine.scratch, receiver, separator), true;
-    }
-    if name == "[]" {
-        if args.len < 1 || !mrb_is_fixnum(args[0]) {
-            return mrb_nil(), true;
-        }
-        return builtin_array_get(machine.pool, machine.scratch, receiver,
-            mrb_fixnum_value(args[0])), true;
     }
     if name == "[]=" {
         if args.len < 2 || !mrb_is_fixnum(args[0]) {

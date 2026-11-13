@@ -2,6 +2,7 @@
 namespace vm;
 
 import.abi;
+import.array_slice;
 import.builtins;
 import.builtins_ext;
 import.collection_arena;

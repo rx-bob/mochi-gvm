@@ -247,3 +247,56 @@ fn test_loadi16_getidx0_array2_and_upvars(t: goosetest::Test&) {
     t.assert_eq(vm::StepKind.Continue, s5.kind);
     t.assert_eq(2026, vm::mrb_fixnum_value(machine.regs[1]));
 }
+
+fn test_array_index_opcodes_check_argument_types(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let record = fake_record(4);
+    let frame = vm::CallFrame {
+        record_index: 0,
+        base: 0,
+        self_value: vm::mrb_nil(),
+        pc: 0,
+    };
+    for _ in record.nregs {
+        machine.regs.push(vm::mrb_nil());
+    }
+    let array = vm::scratch_alloc_array(scratch);
+    vm::scratch_array_push(scratch, array, vm::mrb_fixnum(7));
+    let persistent = vm::promote_to_state(pool, scratch, array);
+    let get_bytes: u8[1] = [1];
+    let zero_bytes: u8[2] = [1, 2];
+    for source in[array, persistent] {
+        machine.regs[2] = source;
+        vm::vm_op_index(machine, frame, record, zero_bytes[..], 0, vm::OP_GETIDX0);
+        t.assert_eq(7, vm::mrb_fixnum_value(machine.regs[1]));
+        machine.regs[1] = source;
+        machine.regs[2] = vm::num_from_i64(scratch, 9223372036854775807);
+        vm::vm_op_index(machine, frame, record, get_bytes[..], 0, vm::OP_GETIDX);
+        t.assert_true(vm::mrb_is_nil(machine.regs[1]));
+        t.assert_eq(vm::VmError.Ok, machine.error);
+        machine.regs[1] = source;
+        machine.regs[2] = vm::scratch_alloc_string(scratch, "0");
+        let failed = vm::vm_op_index(machine, frame, record, get_bytes[..], 0, vm::OP_GETIDX);
+        t.assert_eq(vm::StepKind.Stop, failed.kind);
+        t.assert_eq(vm::VmError.TypeMismatch, machine.error);
+        machine.error = vm::VmError.Ok;
+        machine.regs[1] = source;
+        machine.regs[2] = vm::mrb_fixnum(-1);
+        vm::vm_op_index(machine, frame, record, get_bytes[..], 0, vm::OP_GETIDX);
+        t.assert_eq(7, vm::mrb_fixnum_value(machine.regs[1]));
+    }
+}
