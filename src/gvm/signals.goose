@@ -388,8 +388,9 @@ fn vm_eval_binding(machine: Vm&, entry: BindingEntry&) -> const u8[:] {
         entry.initialized = false;
         return "";
     }
-    entry.initialized = true;
-    return binding_text(machine, value);
+    let text = binding_text(machine, value);
+    entry.initialized = !vm_capture_capacity_failure(machine);
+    return text;
 }
 
 // Re-evaluates the instance's uninitialized bindings plus every binding whose
@@ -406,7 +407,6 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
     }
     let dirty = state_dirty_mask(machine.pool, instance);
     var emitted = 0;
-    var first_error = VmError.Ok;
     for index in 0..machine.pool.bindings.len {
         let stored = machine.pool.bindings[index];
         if !mrb_value_identical(stored.instance, instance) {
@@ -424,12 +424,18 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
             machine.error = machine.pool.error;
         }
         if machine.error != VmError.Ok {
-            if first_error == VmError.Ok {
-                first_error = machine.error;
-                let class_id, _ = vm_receiver_class_id(machine, instance);
-                vm_set_error_context(machine, class_id, entry.getter_symbol, entry.binding_id);
+            let class_id, _ = vm_receiver_class_id(machine, instance);
+            vm_set_error_context(machine, class_id, entry.getter_symbol, entry.binding_id);
+            // Reject this whole patch batch. No later getter may reset the
+            // first error, and every binding must be retried after recovery.
+            for reset in 0..machine.pool.bindings.len {
+                if mrb_value_identical(machine.pool.bindings[reset].instance, instance) {
+                    machine.pool.bindings[reset].initialized = false;
+                }
             }
-            continue;
+            out_patches.clear();
+            vm_end_entry(machine);
+            return -1;
         }
         binding_append_u16_le(out_patches, entry.binding_id);
         binding_append_u32_le(out_patches, text.len as u32);
@@ -437,10 +443,6 @@ fn vm_flush_dirty_bindings(machine: Vm&, instance: MrbValue, out_patches: u8[>..
         emitted += 1;
     }
     state_clear_dirty_mask(machine.pool, instance);
-    if first_error != VmError.Ok {
-        machine.error = first_error;
-        return -1;
-    }
     return emitted;
 }
 

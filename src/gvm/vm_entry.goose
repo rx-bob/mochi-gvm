@@ -9,6 +9,32 @@ import.vm_core;
 import.vm_methods;
 import.vm_ops;
 
+// Starts a top-level entry from a clean tick arena. A previous entry's scratch
+// result is dead once the host has read it, so the arena rewinds here.
+fn vm_begin_entry(machine: Vm&) {
+    machine.error = VmError.Ok;
+    vm_set_error_context(machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
+    vm_clear_entry_capacity_failure(machine);
+    machine.pool.error = VmError.Ok;
+    machine.regs.clear();
+    machine.frames.clear();
+    machine.entry_args.clear();
+    machine.scratch_roots.clear();
+    scratch_reset(machine.scratch);
+}
+
+// Preserve rejected allocations before releasing transient roots and scratch.
+fn vm_end_entry(machine: Vm&) {
+    if machine.error != VmError.Ok {
+        vm_capture_capacity_failure(machine);
+    }
+    machine.regs.clear();
+    machine.frames.clear();
+    machine.entry_args.clear();
+    machine.scratch_roots.clear();
+    scratch_reset(machine.scratch);
+}
+
 // Releases the registrations created for one instance. Classes and IREP stay
 // resident; the instance header itself is reclaimed by the collector once no
 // root or reachable collection refers to it. Repeated disposal is safe.

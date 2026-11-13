@@ -7,6 +7,7 @@ import.rite_types;
 import.scratch_alloc;
 import.state_pool;
 import.value_arena;
+import.vm_entry;
 import.vm_errors;
 import.vm_num;
 
@@ -226,29 +227,6 @@ fn vm_load_irep(file: RiteFile&, bytes: u8[:]) -> ParseError {
 // symbol indices stay absolute, so earlier programs remain executable.
 fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError {
     return parse_rite_append(bytes, file, byte_offset);
-}
-
-// Starts a top-level entry from a clean tick arena. A previous entry's scratch
-// result is dead once the host has read it, so the arena rewinds here.
-fn vm_begin_entry(machine: Vm&) {
-    machine.error = VmError.Ok;
-    vm_set_error_context(machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
-    vm_clear_entry_capacity_failure(machine);
-    machine.pool.error = VmError.Ok;
-    machine.regs.clear();
-    machine.frames.clear();
-    machine.entry_args.clear();
-    machine.scratch_roots.clear();
-    scratch_reset(machine.scratch);
-}
-
-// Ends a top-level entry and returns the tick arena to zero bytes.
-fn vm_end_entry(machine: Vm&) {
-    machine.regs.clear();
-    machine.frames.clear();
-    machine.entry_args.clear();
-    machine.scratch_roots.clear();
-    scratch_reset(machine.scratch);
 }
 
 // Returns the bytes of a string value, or an empty view for any other kind.

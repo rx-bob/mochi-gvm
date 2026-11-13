@@ -12,7 +12,6 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "../src/gvm/include/mochi_capacity_profile.h"
 
 typedef struct {
   const uint8_t *data;
@@ -112,17 +111,6 @@ int32_t mochi_prepare_toolchain(void) {
   fprintf(stderr,
           "build_wasm: emcc needs python 3.10+; set EMSDK_PYTHON to one\n");
   return -1;
-}
-
-/* Writes the build's normalized capacity identity beside its paired runtime. */
-int32_t mochi_write_capacity_profile(void) {
-  FILE *file = fopen("dist/mochi-gvm.capacity.json", "wb");
-  size_t length = strlen(MOCHI_CAPACITY_PROFILE_JSON);
-  int32_t status = 0;
-  if (!file) return -1;
-  if (fwrite(MOCHI_CAPACITY_PROFILE_JSON, 1, length, file) != length) status = -1;
-  if (fclose(file) != 0) status = -1;
-  return status;
 }
 
 /* Runs one shell command. Returns its exit status, or -1 when it cannot

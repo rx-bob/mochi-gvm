@@ -2,7 +2,9 @@
 // dist/mochi-gvm.js. The Goose ABI compiles alone via `--standalone`; the C
 // bridge supplies the small integer surface the JS loader calls.
 
+import json;
 import os;
+import std;
 
 let OUT_DIR: const u8[:] = "dist";
 let ENTRY: const u8[:] = "src/gvm/vm.goose";
@@ -15,9 +17,27 @@ let WASM_OPT_BIN: const u8[:] = "dist/mochi-gvm.opt.wasm";
 // Provided by scripts/toolchain.c: the script's sidecar.
 extern fn mochi_prepare_toolchain() -> i64;
 
-extern fn mochi_write_capacity_profile() -> i64;
-
 extern fn mochi_run(command: const u8[:]) -> i64;
+
+// Read the same profile header as emcc at build time. Compiling this metadata
+// into the toolchain sidecar could reuse a cached C object from another profile.
+fn write_capacity_profile() -> bool {
+    var header: u8[>..] = [];
+    if !read_file("src/gvm/include/mochi_capacity_profile.h", header) {
+        return false;
+    }
+    let prefix = "#define MOCHI_CAPACITY_PROFILE_JSON ";
+    for line in split(header, '\n') {
+        if starts_with(line, prefix) {
+            var nodes: json::Node[>..] = [];
+            var decoded: u8[>..] = [];
+            let node, error = json::parse(line[prefix.len..], nodes, decoded);
+            let text, valid = json::as_string(node);
+            return error.len == 0 && valid && write_file("dist/mochi-gvm.capacity.json", text);
+        }
+    }
+    return false;
+}
 
 fn run(command: const u8[:]) {
     let status = mochi_run(command);
@@ -123,7 +143,7 @@ fn main() {
         print("build_wasm failed: artifact is missing");
         exit(1);
     }
-    if mochi_write_capacity_profile() != 0 {
+    if !write_capacity_profile() {
         print("build_wasm failed: cannot write capacity profile identity");
         exit(1);
     }

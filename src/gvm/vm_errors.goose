@@ -92,6 +92,25 @@ fn vm_clear_entry_capacity_failure(machine: Vm&) {
     machine.pool.failure.active = false;
 }
 
+// Parsing and promotion can reject an allocation before bytecode executes.
+// Preserve that rejection before entry teardown resets the scratch arena.
+fn vm_capture_capacity_failure(machine: Vm&) -> bool {
+    if machine.scratch.failure.active {
+        machine.error = VmError.ScratchFull;
+        vm_absorb_scratch_failure(machine, -1);
+        return true;
+    }
+    if machine.pool.failure.active {
+        machine.error = machine.pool.error;
+        if machine.error == VmError.Ok {
+            machine.error = VmError.StateCapacity;
+        }
+        vm_absorb_state_failure(machine, -1);
+        return true;
+    }
+    return false;
+}
+
 fn capacity_resource_name(resource: CapacityResource) -> u8[:] {
     return match resource {
         None => "",
@@ -108,6 +127,7 @@ fn capacity_resource_name(resource: CapacityResource) -> u8[:] {
         Bindings => "bindings",
         Classes => "classes",
         AbiBytecode => "ABI bytecode bytes",
+        HostCommands => "host command bytes",
     };
 }
 

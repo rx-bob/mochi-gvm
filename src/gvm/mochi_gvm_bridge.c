@@ -133,18 +133,13 @@ static int32_t g_host_next_id = 1;
 
 static int append_text_piece(
     char *buffer, size_t capacity, size_t *at, const void *data, size_t length);
+static int sync_host_outbox(void);
 
 static goose_u8_slice slice_of(const void *data, size_t length) {
   goose_u8_slice slice;
   slice.data = (uint8_t *)data;
   slice.len = (int64_t)length;
   return slice;
-}
-
-static int32_t clamp_length(int64_t length, int32_t capacity) {
-  if (length <= 0) return 0;
-  if (length > capacity) return capacity;
-  return (int32_t)length;
 }
 
 static void clear_error(void) {
@@ -163,6 +158,14 @@ static void set_error_text(const char *text) {
   memcpy(g_error_text, text, length);
   g_error_text[length] = '\0';
   g_error_len = (int32_t)length;
+}
+
+static void set_capacity_error(const char *resource, int64_t requested,
+                               int64_t used, int64_t capacity) {
+  char text[256];
+  snprintf(text, sizeof(text), "%s exhausted (requested %lld, used %lld of %lld)",
+           resource, (long long)requested, (long long)used, (long long)capacity);
+  set_error_text(text);
 }
 
 /* Copies the VM's error text out of Goose memory before the next entry can
@@ -253,6 +256,12 @@ static mrb_value mochi_host_failure(mrb_state *mrb, const char *text) {
   return mrb_nil_value();
 }
 
+static mrb_value mochi_capacity_failure(mrb_state *mrb, const char *resource,
+                                        int64_t requested, int64_t used, int64_t capacity) {
+  set_capacity_error(resource, requested, used, capacity);
+  return mochi_host_failure(mrb, g_error_text);
+}
+
 /* Serializes one synchronous capability call as a JSON argument array. A
  * literal first argument carries protocol selectors such as the formatting
  * kind; every other argument keeps its typed Ruby/VM representation. */
@@ -269,20 +278,20 @@ static mrb_value mochi_capability_sync(
   goose_vm_clear_host_error();
   g_host_error[0] = '\0';
   if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "[", 1)) {
-    return mochi_host_failure(mrb, "host capability arguments are too large");
+    return mochi_host_failure(mrb, g_error_text);
   }
   if (literal_first) {
     if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "\"", 1) ||
         !append_text_piece(g_host_args, sizeof(g_host_args), &at, literal_first,
                            strlen(literal_first)) ||
         !append_text_piece(g_host_args, sizeof(g_host_args), &at, "\"", 1)) {
-      return mochi_host_failure(mrb, "host capability arguments are too large");
+      return mochi_host_failure(mrb, g_error_text);
     }
   }
   for (index = 0; index < value_count; index++) {
     if (index > 0 || literal_first) {
       if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, ",", 1)) {
-        return mochi_host_failure(mrb, "host capability arguments are too large");
+        return mochi_host_failure(mrb, g_error_text);
       }
     }
     json = goose_vm_value_json(values[index], &json_len);
@@ -291,11 +300,11 @@ static mrb_value mochi_capability_sync(
     }
     if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, json,
                            (size_t)json_len)) {
-      return mochi_host_failure(mrb, "host capability arguments are too large");
+      return mochi_host_failure(mrb, g_error_text);
     }
   }
   if (!append_text_piece(g_host_args, sizeof(g_host_args), &at, "]", 1)) {
-    return mochi_host_failure(mrb, "host capability arguments are too large");
+    return mochi_host_failure(mrb, g_error_text);
   }
   g_host_args[at] = '\0';
 
@@ -395,8 +404,9 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
   line = goose_vm_fetch_request_json(fetch_id, instance_value, url_value,
                                      callback_value, options_value, &line_len);
   if (!line || line_len <= 0) return mrb_fixnum_value(-1);
-  if (g_fetch_outbox_len + (int32_t)line_len >= MOCHI_FETCH_CAPACITY) {
-    return mrb_fixnum_value(-1);
+  if (line_len > MOCHI_FETCH_CAPACITY - 1 - g_fetch_outbox_len) {
+    return mochi_capacity_failure(mrb, "ABI fetch bytes", line_len,
+                                  g_fetch_outbox_len, MOCHI_FETCH_CAPACITY - 1);
   }
   memcpy(g_fetch_outbox + g_fetch_outbox_len, line, (size_t)line_len);
   g_fetch_outbox_len += (int32_t)line_len;
@@ -434,9 +444,12 @@ static mrb_value mochi_cancel_fetch_native(mrb_state *mrb, mrb_value self) {
       slice_of(instance_text, (size_t)instance_len));
   if (instance_value == 0) return mrb_false_value();
   line = goose_vm_fetch_cancel_json(fetch_id, instance_value, &line_len);
-  if (!line || line_len <= 0 ||
-      g_fetch_outbox_len + (int32_t)line_len >= MOCHI_FETCH_CAPACITY) {
+  if (!line || line_len <= 0) {
     return mrb_false_value();
+  }
+  if (line_len > MOCHI_FETCH_CAPACITY - 1 - g_fetch_outbox_len) {
+    return mochi_capacity_failure(mrb, "ABI fetch bytes", line_len,
+                                  g_fetch_outbox_len, MOCHI_FETCH_CAPACITY - 1);
   }
   memcpy(g_fetch_outbox + g_fetch_outbox_len, line, (size_t)line_len);
   g_fetch_outbox_len += (int32_t)line_len;
@@ -445,13 +458,17 @@ static mrb_value mochi_cancel_fetch_native(mrb_state *mrb, mrb_value self) {
 }
 
 /* Ruby-callable: Mochi.emit("notice", id: "tr_1").
- * Appends one explicitly published event per call:
- *   {"__host":"event_publish","event":"...","payload":...}\n
+ * Appends one explicitly published event per call, with its publisher handle:
+ *   {"__host":"event_publish","event":"...","instance":"...","payload":...}\n
  * The loader delivers only to live, explicitly registered subscribers. */
 static int append_text_piece(
     char *buffer, size_t capacity, size_t *at, const void *data, size_t length
 ) {
-  if (*at > capacity || length > capacity - *at) return 0;
+  if (*at > capacity || length > capacity - *at) {
+    mochi_capacity_failure(g_mrb, buffer == g_host_args ? "ABI host argument bytes" : "ABI emit bytes",
+                            length, *at, capacity);
+    return 0;
+  }
   if (length > 0 && data) memcpy(buffer + *at, data, length);
   *at += length;
   return 1;
@@ -459,12 +476,16 @@ static int append_text_piece(
 
 static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   static const char PREFIX[] = "{\"__host\":\"event_publish\",\"event\":";
+  static const char INSTANCE_KEY[] = ",\"instance\":\"";
   static const char PAYLOAD_KEY[] = ",\"payload\":";
   static const char SUFFIX[] = "}\n";
   static const char JSON_NULL[] = "null";
   mrb_value event_value = mrb_nil_value();
   mrb_value payload = mrb_nil_value();
   mrb_int argc;
+  uint64_t instance_handle;
+  char instance_text[32];
+  int instance_len;
   const uint8_t *event_json;
   const uint8_t *payload_json;
   int64_t event_len = 0;
@@ -480,6 +501,13 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   if (argc >= 2 && !goose_vm_is_hash(payload)) {
     return mrb_fixnum_value(-1);
   }
+  instance_handle = goose_vm_current_self();
+  if (instance_handle == 0) return mrb_fixnum_value(-1);
+  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
+                          (unsigned long long)instance_handle);
+  if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
+    return mrb_fixnum_value(-1);
+  }
 
   event_json = goose_vm_value_json(event_value, &event_len);
   if (!event_json || event_len <= 0) return mrb_fixnum_value(-1);
@@ -489,7 +517,11 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   if (!append_text_piece(line, sizeof(line), &at, event_json, (size_t)event_len)) {
     return mrb_fixnum_value(-1);
   }
-  if (!append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY,
+  if (!append_text_piece(line, sizeof(line), &at, INSTANCE_KEY,
+                         sizeof(INSTANCE_KEY) - 1) ||
+      !append_text_piece(line, sizeof(line), &at, instance_text,
+                         (size_t)instance_len) ||
+      !append_text_piece(line, sizeof(line), &at, PAYLOAD_KEY,
                          sizeof(PAYLOAD_KEY) - 1)) {
     return mrb_fixnum_value(-1);
   }
@@ -509,7 +541,8 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
     return mrb_fixnum_value(-1);
   }
   if (g_emit_outbox_len + (int32_t)at >= MOCHI_EMIT_CAPACITY) {
-    return mrb_fixnum_value(-1);
+    return mochi_capacity_failure(mrb, "ABI emit bytes", at,
+                                  g_emit_outbox_len, MOCHI_EMIT_CAPACITY - 1);
   }
 
   memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
@@ -588,7 +621,8 @@ static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
     return mrb_fixnum_value(-1);
   }
   if (g_emit_outbox_len + (int32_t)at >= MOCHI_EMIT_CAPACITY) {
-    return mrb_fixnum_value(-1);
+    return mochi_capacity_failure(mrb, "ABI emit bytes", at,
+                                  g_emit_outbox_len, MOCHI_EMIT_CAPACITY - 1);
   }
 
   memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
@@ -643,8 +677,9 @@ static mrb_value mochi_host_async_native(mrb_state *mrb, mrb_value self) {
     return mochi_host_failure(
         mrb, g_error_len > 0 ? g_error_text : "bad host capability request");
   }
-  if (g_emit_outbox_len + (int32_t)line_len >= MOCHI_EMIT_CAPACITY) {
-    return mochi_host_failure(mrb, "host capability outbox is full");
+  if (line_len > MOCHI_EMIT_CAPACITY - 1 - g_emit_outbox_len) {
+    return mochi_capacity_failure(mrb, "ABI emit bytes", line_len,
+                                  g_emit_outbox_len, MOCHI_EMIT_CAPACITY - 1);
   }
   memcpy(g_emit_outbox + g_emit_outbox_len, line, (size_t)line_len);
   g_emit_outbox_len += (int32_t)line_len;
@@ -862,6 +897,10 @@ MOCHI_EXPORT
 int32_t mochi_dispatch_event_args(uint64_t instance, uint32_t method_symbol,
                                   const uint8_t *json, int32_t length) {
   clear_error();
+  if (length > MOCHI_EVENT_ARGS_CAPACITY) {
+    set_capacity_error("ABI event argument bytes", length, 0, MOCHI_EVENT_ARGS_CAPACITY);
+    return 0;
+  }
   if (!json || length <= 0 || length > MOCHI_EVENT_ARGS_CAPACITY) {
     set_error_text("invalid event arguments");
     return 0;
@@ -896,14 +935,19 @@ int32_t mochi_flush_patches(uint64_t instance) {
   clear_error();
   g_patch_len = 0;
   count = goose_vm_flush_patches(instance);
-  bytes = goose_vm_patch_bytes(&length);
-  g_patch_len = clamp_length(length, MOCHI_PATCH_CAPACITY);
-  if (bytes && g_patch_len > 0) {
-    memcpy(g_patch_buffer, bytes, (size_t)g_patch_len);
-  }
   if (goose_vm_has_error() || count < 0) {
     capture_vm_error();
     return -1;
+  }
+  if (!sync_host_outbox()) return -1;
+  bytes = goose_vm_patch_bytes(&length);
+  if (length > MOCHI_PATCH_CAPACITY) {
+    set_capacity_error("ABI patch bytes", length, 0, MOCHI_PATCH_CAPACITY);
+    return -1;
+  }
+  g_patch_len = (int32_t)length;
+  if (bytes && g_patch_len > 0) {
+    memcpy(g_patch_buffer, bytes, (size_t)g_patch_len);
   }
   return (int32_t)count;
 }
@@ -947,30 +991,34 @@ int32_t mochi_fetch_inbox_offset(void) {
 MOCHI_EXPORT
 int32_t mochi_fetch_inbox_capacity(void) { return MOCHI_FETCH_CAPACITY; }
 
-static void sync_host_outbox(void) {
+static int sync_host_outbox(void) {
   int64_t host_len = 0;
   const uint8_t *host_bytes = goose_vm_host_outbox(&host_len);
   if (host_bytes && host_len > 0) {
-    int32_t avail = MOCHI_EMIT_CAPACITY - 1 - g_emit_outbox_len;
-    int32_t copy_len = clamp_length(host_len, avail);
-    if (copy_len > 0) {
-      memcpy(g_emit_outbox + g_emit_outbox_len, host_bytes, (size_t)copy_len);
-      g_emit_outbox_len += copy_len;
-      g_emit_outbox[g_emit_outbox_len] = '\0';
+    if (host_len > MOCHI_EMIT_CAPACITY - 1 - g_emit_outbox_len) {
+      set_capacity_error("ABI emit bytes", host_len, g_emit_outbox_len,
+                         MOCHI_EMIT_CAPACITY - 1);
+      goose_vm_clear_host_outbox();
+      g_emit_outbox_len = 0;
+      g_emit_outbox[0] = '\0';
+      return 0;
     }
+    memcpy(g_emit_outbox + g_emit_outbox_len, host_bytes, (size_t)host_len);
+    g_emit_outbox_len += (int32_t)host_len;
+    g_emit_outbox[g_emit_outbox_len] = '\0';
     goose_vm_clear_host_outbox();
   }
+  return 1;
 }
 
 MOCHI_EXPORT
 int32_t mochi_emit_outbox_offset(void) {
-  sync_host_outbox();
   return (int32_t)(intptr_t)g_emit_outbox;
 }
 
 MOCHI_EXPORT
 int32_t mochi_emit_outbox_len(void) {
-  sync_host_outbox();
+  if (!sync_host_outbox()) return -1;
   return g_emit_outbox_len;
 }
 
@@ -1058,15 +1106,24 @@ int32_t mochi_eval_each_expr(uint64_t instance, uint32_t method_symbol,
                              const uint8_t *json, int32_t json_len) {
   int64_t out_len = 0;
   const uint8_t *bytes;
+  clear_error();
   g_eval_len = 0;
   if (!json || json_len <= 0) return -1;
+  if (json_len > MOCHI_EVENT_ARGS_CAPACITY) {
+    set_capacity_error("ABI event argument bytes", json_len, 0, MOCHI_EVENT_ARGS_CAPACITY);
+    return -1;
+  }
   bytes = goose_vm_eval_each_expr(instance, method_symbol,
                                   slice_of(json, (size_t)json_len), &out_len);
   if (goose_vm_has_error()) {
     capture_vm_error();
     return -1;
   }
-  g_eval_len = clamp_length(out_len, MOCHI_EVENT_ARGS_CAPACITY - 1);
+  if (out_len > MOCHI_EVENT_ARGS_CAPACITY - 1) {
+    set_capacity_error("ABI evaluation bytes", out_len, 0, MOCHI_EVENT_ARGS_CAPACITY - 1);
+    return -1;
+  }
+  g_eval_len = (int32_t)out_len;
   if (bytes && g_eval_len > 0) {
     memcpy(g_eval_buffer, bytes, (size_t)g_eval_len);
   }

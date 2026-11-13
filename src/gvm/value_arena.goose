@@ -153,6 +153,7 @@ enum CapacityResource {
     Bindings,
     Classes,
     AbiBytecode,
+    HostCommands,
 }
 
 struct CapacityFailure {

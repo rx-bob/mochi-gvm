@@ -461,7 +461,7 @@ fn json_parse_document(
     };
     let value = json_parse_value(pool, scratch, data, cursor, 0);
     json_skip_whitespace(data, cursor);
-    return value, !cursor.failed && cursor.at == data.len;
+    return value, !cursor.failed && !scratch.overflow && cursor.at == data.len;
 }
 
 // Decodes a top-level JSON array into `args`. The caller owns `args` and must
@@ -487,7 +487,7 @@ fn json_parse_args(
             return false;
         }
         let value = json_parse_value(pool, scratch, data, cursor, 0);
-        if cursor.failed {
+        if cursor.failed || scratch.overflow {
             return false;
         }
         args.push(value);

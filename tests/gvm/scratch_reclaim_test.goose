@@ -161,6 +161,7 @@ fn test_scratch_failure_names_byte_resource(t: goosetest::Test&) {
     t.assert_eq(4096, machine.scratch.failure.requested);
     t.assert_eq(vm::SCRATCH_CAPACITY_BYTES, machine.scratch.failure.used);
     t.assert_eq(vm::SCRATCH_CAPACITY_BYTES, machine.scratch.failure.capacity);
+    assert_capacity_entry_recovers(t, machine);
 }
 
 fn test_scratch_failure_names_slot_resource(t: goosetest::Test&) {
@@ -191,6 +192,7 @@ fn test_scratch_failure_names_slot_resource(t: goosetest::Test&) {
     t.assert_eq(1, machine.scratch.failure.requested);
     t.assert_eq(vm::SCRATCH_CAPACITY_SLOTS, machine.scratch.failure.used);
     t.assert_eq(vm::SCRATCH_CAPACITY_SLOTS, machine.scratch.failure.capacity);
+    assert_capacity_entry_recovers(t, machine);
 }
 
 fn test_scratch_failure_names_ivar_resource(t: goosetest::Test&) {
@@ -223,6 +225,7 @@ fn test_scratch_failure_names_ivar_resource(t: goosetest::Test&) {
     t.assert_eq(1, machine.scratch.failure.requested);
     t.assert_eq(vm::SCRATCH_CAPACITY_IVARS, machine.scratch.failure.used);
     t.assert_eq(vm::SCRATCH_CAPACITY_IVARS, machine.scratch.failure.capacity);
+    assert_capacity_entry_recovers(t, machine);
 }
 
 fn test_scratch_failure_names_object_resource(t: goosetest::Test&) {
@@ -256,4 +259,26 @@ fn test_scratch_failure_names_object_resource(t: goosetest::Test&) {
     t.assert_eq(1, machine.scratch.failure.requested);
     t.assert_eq(vm::SCRATCH_CAPACITY_OBJECTS, machine.scratch.failure.used);
     t.assert_eq(vm::SCRATCH_CAPACITY_OBJECTS, machine.scratch.failure.capacity);
+    assert_capacity_entry_recovers(t, machine);
+}
+
+fn assert_capacity_entry_recovers(t: goosetest::Test&, machine: vm::Vm&) {
+    let failure = machine.scratch.failure;
+    let class_id = vm::state_define_class(machine.pool, vm::intern_symbol("Retained"), vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(machine.pool, class_id);
+    t.assert_true(vm::state_register_component(machine.pool, instance));
+    machine.error = vm::VmError.ScratchFull;
+    t.assert_true(vm::vm_capture_capacity_failure(machine));
+    vm::vm_end_entry(machine);
+    t.assert_eq(failure.capacity, machine.error_context.capacity_limit);
+    t.assert_eq(0, machine.scratch.objects.len);
+    t.assert_eq(0, machine.scratch.slots.len);
+    t.assert_eq(0, machine.scratch.ivars.len);
+    vm::vm_begin_entry(machine);
+    t.assert_false(machine.scratch.failure.active);
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_true(vm::mrb_is_scratch(vm::scratch_alloc_string(machine.scratch, "next entry")));
+    t.assert_eq(1, vm::state_class_count(machine.pool));
+    let _, live = vm::state_object(machine.pool, instance);
+    t.assert_true(live, "entry reset preserves persistent objects and class definitions");
 }

@@ -6,6 +6,7 @@
 // component, look up a class or method, or run one host call.
 namespace vm;
 
+import.abi_capacity;
 import.builtins;
 import.capacity_config;
 import.host_api;
@@ -221,7 +222,6 @@ fn abi_close() {
 
 fn abi_load_irep(bytes: const u8[:]) -> i64 {
     abi_clear_error();
-    g_abi_file.data = "";
     let offset = g_abi_bytecode.len;
     if offset + bytes.len > ABI_MAX_BYTECODE {
         g_abi_pool.failure = CapacityFailure {
@@ -236,6 +236,7 @@ fn abi_load_irep(bytes: const u8[:]) -> i64 {
         abi_record_vm_error(g_abi_machine);
         return 1;
     }
+    g_abi_file.data = "";
     g_abi_bytecode.append(bytes);
     g_abi_file.data = g_abi_bytecode[..];
     let err = vm_append_irep(g_abi_file, g_abi_bytecode[..], offset);
@@ -401,7 +402,8 @@ fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
     vm_begin_entry(g_abi_machine);
     var args: MrbValue[>..] = [];
     if !json_parse_args(g_abi_pool, g_abi_scratch, json, args) {
-        abi_fail("bad JSON argument list");
+        abi_record_call_context(receiver, method_symbol);
+        abi_input_failure("bad JSON argument list");
         vm_end_entry(g_abi_machine);
         return mrb_nil();
     }
@@ -642,7 +644,7 @@ fn abi_fetch_cancel_json(fetch_id: i64, instance: u64) -> const u8[:] {
 fn abi_fetch_response(envelope: const u8[:]) -> u64 {
     let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
     if !parsed || !vm_is_hash_value(g_abi_machine, value) {
-        abi_fail("bad fetch response");
+        abi_input_failure("bad fetch response");
         return mrb_nil();
     }
     let status_key = mrb_symbol(intern_symbol("status"));
@@ -675,7 +677,7 @@ fn abi_fetch_response(envelope: const u8[:]) -> u64 {
 fn abi_host_result_hash(envelope: const u8[:]) -> u64 {
     let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
     if !parsed || !vm_is_hash_value(g_abi_machine, value) {
-        abi_fail("bad host capability result");
+        abi_input_failure("bad host capability result");
         return mrb_nil();
     }
     let ok_key = mrb_symbol(intern_symbol("ok"));
@@ -730,6 +732,8 @@ fn abi_deliver_host_result(
     vm_begin_entry(g_abi_machine);
     let result = abi_host_result_hash(envelope);
     if g_abi_machine.error != VmError.Ok || abi_has_error() {
+        abi_record_call_context(instance, callback_symbol);
+        abi_record_vm_error(g_abi_machine);
         vm_end_entry(g_abi_machine);
         return -1;
     }
@@ -787,6 +791,8 @@ fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:])
     vm_begin_entry(g_abi_machine);
     let response = abi_fetch_response(envelope);
     if g_abi_machine.error != VmError.Ok || abi_has_error() {
+        abi_record_call_context(instance, callback_symbol);
+        abi_record_vm_error(g_abi_machine);
         vm_end_entry(g_abi_machine);
         return -1;
     }
@@ -1061,7 +1067,8 @@ export fn goose_vm_set_props_json(instance: u64, json: const u8[:]) -> i64 {
     vm_begin_entry(g_abi_machine);
     let props, parsed = json_parse_document(g_abi_pool, g_abi_scratch, json);
     if !parsed || !vm_is_hash_value(g_abi_machine, props) {
-        abi_fail("bad props payload");
+        abi_record_call_context(instance, intern_symbol("__mochi_apply_props"));
+        abi_input_failure("bad props payload");
         vm_end_entry(g_abi_machine);
         return -1;
     }

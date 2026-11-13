@@ -388,6 +388,19 @@ fn vm_call_mochi_attr(
 fn vm_call_mochi_builtin(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    let before = g_host_outbox.len;
+    let value, handled = vm_call_mochi_operation(machine, name, args);
+    if g_host_outbox.len >= HOST_OUTBOX_CAPACITY {
+        state_fail_capacity(machine.pool, CapacityResource.HostCommands,
+            g_host_outbox.len - before, before, HOST_OUTBOX_CAPACITY - 1);
+        machine.error = VmError.StateCapacity;
+    }
+    return value, handled;
+}
+
+fn vm_call_mochi_operation(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
     let event_val, event_ok = vm_call_mochi_events(machine, name, args);
     if event_ok {
         return event_val, true;
