@@ -390,3 +390,30 @@ fn test_sort_workspace_limit_preserves_input(t: goosetest::Test&) {
         machine.pool, machine.scratch, input, vm::SCRATCH_CAPACITY_SLOTS / 2
         )));
 }
+
+fn test_next_preserves_flow_and_lexical_locals(t: goosetest::Test&) {
+    let bytes = embed_file("../fixtures/helper_contracts.mrb");
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    t.assert_eq(vm::ParseError.Ok, vm::vm_load_irep(file, bytes));
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let root = vm::vm_instantiate(machine, vm::intern_symbol("HelperRoot"));
+    let result = vm::vm_call0(machine, root, vm::intern_symbol("blocks"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_true(vm::vm_string_equals(machine, result, "1,3:11,7,13:4:after"));
+    let nested = vm::vm_call0(machine, root, vm::intern_symbol("nested"));
+    t.assert_eq(vm::VmError.Ok, machine.error);
+    t.assert_eq(12, vm::mrb_fixnum_value(nested));
+}

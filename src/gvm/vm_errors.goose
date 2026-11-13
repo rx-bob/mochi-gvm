@@ -25,12 +25,14 @@ enum VmError {
     ScratchFull,
     StateCapacity,
     Disposed,
+    NoConstant,
 }
 
 struct ErrorContext {
     class_id: u32,
     method_symbol: u32,
     binding_id: i64,
+    reference_symbol: u32 = NULL_SYMBOL,
     scratch_resource: ScratchResource = ScratchResource.None,
     scratch_requested: i64 = 0,
     scratch_used: i64 = 0,
@@ -48,6 +50,7 @@ fn vm_error_name(err: VmError) -> u8[:] {
         BadOperand => "bad operand",
         BadReceiver => "bad receiver",
         NoClass => "unknown class",
+        NoConstant => "unknown constant",
         NoMethod => "unknown method",
         TypeMismatch => "type mismatch",
         IntegerOverflow => "integer overflow",
@@ -74,6 +77,7 @@ fn vm_set_error_context(machine: Vm&, class_id: u32, method_symbol: u32, binding
 }
 
 fn vm_clear_entry_capacity_failure(machine: Vm&) {
+    machine.error_context.reference_symbol = NULL_SYMBOL;
     machine.error_context.scratch_resource = ScratchResource.None;
     machine.error_context.scratch_requested = 0;
     machine.error_context.scratch_used = 0;

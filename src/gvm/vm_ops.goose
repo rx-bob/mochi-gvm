@@ -12,6 +12,7 @@ import.scratch_reclaim;
 import.state_pool;
 import.state_reclaim;
 import.value_arena;
+import.vm_constants;
 import.vm_core;
 import.vm_dispatch;
 import.vm_num;
@@ -94,15 +95,7 @@ recursive fn vm_exec_frame(
         vm_absorb_method_context(machine, record_index);
         return mrb_nil();
     }
-    for _ in record.nregs {
-        machine.regs.push(mrb_nil());
-    }
-    machine.regs[base] = self_value;
-    var argument = 0;
-    while argument < args.len && argument + 1 < record.nregs {
-        machine.regs[base + 1 + argument] = args[argument];
-        argument += 1;
-    }
+    vm_initialize_registers(machine, record.nregs, self_value, args);
     let frame = CallFrame {
         record_index: record_index,
         base: base,
@@ -110,6 +103,7 @@ recursive fn vm_exec_frame(
         pc: 0,
         env_frame: env_frame,
         argc: args.len,
+        lexical_owner: vm_lexical_owner(machine, record_index, self_value, env_frame),
     };
     machine.frames.push(frame);
     let frame_index = machine.frames.len - 1;
@@ -143,6 +137,20 @@ recursive fn vm_exec_frame(
     }
 
     return vm_finish_frame(machine, base, dst_register, result);
+}
+
+// Initializes one checked register window before publishing its call frame.
+fn vm_initialize_registers(machine: Vm&, count: i64, self_value: MrbValue, args: MrbValue[:]) {
+    let base = machine.regs.len;
+    for _ in count {
+        machine.regs.push(mrb_nil());
+    }
+    machine.regs[base] = self_value;
+    var argument = 0;
+    while argument < args.len && argument + 1 < count {
+        machine.regs[base + 1 + argument] = args[argument];
+        argument += 1;
+    }
 }
 
 // Routes one opcode byte to its handler family.
@@ -201,7 +209,7 @@ fn vm_exec_step(
     if op == OP_TDEF || op == OP_SDEF {
         return vm_op_tdef(machine, frame, record, iseq, pc, op);
     }
-    if op == OP_ENTER || op == OP_RETURN || op == OP_RETURN_BLK || op == OP_BREAK
+    if op == OP_ENTER || op == OP_RETURN
         || op == OP_RETSELF || op == OP_RETNIL || op == OP_RETTRUE
         || op == OP_RETFALSE || op == OP_STOP {
         return vm_op_control(machine, frame, record, iseq, pc, op);
@@ -444,7 +452,7 @@ fn vm_op_tdef(
     if !symbol_ok || child < 0 || !mrb_is_class(target) {
         return vm_fail(machine, VmError.TypeMismatch, pc + 3);
     }
-    vm_define_method(machine, mrb_class_id(target), symbol, child);
+    vm_define_method(machine, mrb_class_id(target), symbol, child, frame.lexical_owner);
     if !vm_write_register(machine, record, frame.base, ops.a, mrb_symbol(symbol)) {
         return vm_fail(machine, VmError.BadOperand, pc + 3);
     }
@@ -481,7 +489,7 @@ fn vm_op_control(
         }
         return vm_step_continue(pc + 3);
     }
-    if op == OP_RETURN || op == OP_RETURN_BLK || op == OP_BREAK {
+    if op == OP_RETURN {
         let ops = vm_read_operands(iseq, pc, 1);
         if !ops.valid {
             return vm_fail(machine, VmError.BadOperand, pc);

@@ -98,6 +98,10 @@ fn abi_format_error_context() -> u8[>..] {
         return text;
     }
     text.append(vm_error_name(g_abi_machine.error));
+    if g_abi_machine.error_context.reference_symbol != NULL_SYMBOL {
+        text.append(" ");
+        text.append(symbol_name(g_abi_machine.error_context.reference_symbol));
+    }
     if g_abi_machine.error == VmError.NativeError && g_abi_host_error.len > 0 {
         text.append(": ");
         text.append(g_abi_host_error[..]);

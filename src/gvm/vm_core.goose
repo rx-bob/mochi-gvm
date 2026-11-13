@@ -37,6 +37,7 @@ let OP_GETIV: u8 = 25;
 let OP_SETIV: u8 = 26;
 let OP_GETCONST: u8 = 29;
 let OP_SETCONST: u8 = 30;
+let OP_GETMCNST: u8 = 31;
 let OP_GETUPVAR: u8 = 33;
 let OP_SETUPVAR: u8 = 34;
 let OP_GETIDX: u8 = 35;
@@ -104,6 +105,7 @@ struct MethodEntry {
     class_id: u32,
     name_symbol: u32,
     irep_index: i64,
+    lexical_owner: u32 = NULL_CLASS_ID,
 }
 
 struct NativeMethod {
@@ -119,6 +121,7 @@ struct CallFrame {
     pc: i64,
     env_frame: i64 = -1,
     argc: i64 = 0,
+    lexical_owner: u32 = NULL_CLASS_ID,
 }
 
 struct Step {
@@ -310,11 +313,13 @@ fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
 }
 
 // Binds `name_symbol` to `irep_index` on `class_id`, replacing a redefinition.
-fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i64) {
+fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i64,
+    lexical_owner: u32 = NULL_CLASS_ID) {
     for index in 0..machine.methods.len {
         if machine.methods[index].class_id == class_id
             && machine.methods[index].name_symbol == name_symbol {
             machine.methods[index].irep_index = irep_index;
+            machine.methods[index].lexical_owner = lexical_owner;
             return;
         }
     }
@@ -326,6 +331,7 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
             class_id: class_id,
             name_symbol: name_symbol,
             irep_index: irep_index,
+            lexical_owner: lexical_owner,
         });
 }
 

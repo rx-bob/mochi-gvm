@@ -6,6 +6,7 @@ import.scratch_alloc;
 import.state_pool;
 import.value_arena;
 import.vm_blocks;
+import.vm_constants;
 import.vm_core;
 import.vm_methods;
 import.vm_num;
@@ -15,11 +16,8 @@ import.vm_ops_collections;
 fn vm_dispatch_step(
     machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step, bool {
-    if op == OP_GETCONST {
-        return vm_op_getconst(machine, frame, record, iseq, pc), true;
-    }
-    if op == OP_SETCONST {
-        return vm_op_setconst(machine, frame, record, iseq, pc), true;
+    if op == OP_GETCONST || op == OP_SETCONST || op == OP_GETMCNST {
+        return vm_op_const(machine, frame, record, iseq, pc, op), true;
     }
     if op == OP_JMP || op == OP_JMPUW {
         return vm_op_jump(machine, iseq, pc), true;
@@ -47,60 +45,6 @@ fn vm_dispatch_step(
         return vm_op_send(machine, frame, record, iseq, pc, op), true;
     }
     return vm_step_continue(pc), false;
-}
-
-fn vm_op_getconst(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64
-) -> Step {
-    let ops = vm_read_operands(iseq, pc, 2);
-    if !ops.valid {
-        return vm_fail(machine, VmError.BadOperand, pc);
-    }
-    let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
-    if !symbol_ok {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
-    }
-    let name = symbol_name(symbol);
-    var value = mrb_nil();
-    if name == "Array" {
-        value = mrb_class(BUILTIN_ARRAY_CLASS_ID);
-    } else if name == "Mochi" {
-        value = mrb_class(BUILTIN_MOCHI_CLASS_ID);
-    } else {
-        let class_id, found = vm_find_class(machine.pool, symbol);
-        if found {
-            value = mrb_class(class_id);
-        } else {
-            let const_val, const_found = state_get_const(machine.pool, symbol);
-            if !const_found {
-                return vm_fail(machine, VmError.NoClass, pc + 2);
-            }
-            value = const_val;
-        }
-    }
-    if !vm_write_register(machine, record, frame.base, ops.a, value) {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
-    }
-    return vm_step_continue(pc + 2);
-}
-
-fn vm_op_setconst(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64
-) -> Step {
-    let ops = vm_read_operands(iseq, pc, 2);
-    if !ops.valid {
-        return vm_fail(machine, VmError.BadOperand, pc);
-    }
-    let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
-    let value, value_ok = vm_read_register(machine, record, frame.base, ops.a);
-    if !symbol_ok || !value_ok {
-        return vm_fail(machine, VmError.BadOperand, pc + 2);
-    }
-    state_set_const(machine.pool, machine.scratch, symbol, value);
-    if machine.pool.error != VmError.Ok {
-        return vm_fail(machine, machine.pool.error, pc + 2);
-    }
-    return vm_step_continue(pc + 2);
 }
 
 fn vm_op_jump(machine: Vm&, iseq: u8[:], pc: i64) -> Step {
@@ -410,10 +354,13 @@ fn vm_op_send(
     }
     let result, handled = vm_call_builtin(machine, receiver, symbol, args[..]);
     if !handled {
-        // Preserve the caller class while naming the unresolved dispatch target
-        // in the existing error context. This makes generated-method failures
-        // distinguish a missing nested builtin from a missing generated method.
-        let context_class = machine.error_context.class_id;
+        // Explicit helper calls name their actual receiver. Implicit calls
+        // retain the caller context, including asynchronous callback methods.
+        let context_class = if mrb_is_class(receiver) && (op == OP_SEND || op == OP_SEND0) {
+            mrb_class_id(receiver)
+        } else {
+            machine.error_context.class_id
+        };
         if context_class != NULL_CLASS_ID {
             vm_set_error_context(machine, context_class, symbol, machine.error_context.binding_id);
         }

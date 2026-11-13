@@ -26,6 +26,7 @@ struct ClassDef {
 struct ConstEntry {
     name_symbol: u32,
     value: MrbValue,
+    owner: u32 = NULL_CLASS_ID,
 }
 
 // One reclaimed string byte range. Adjacent ranges are coalesced on free so a
@@ -186,10 +187,11 @@ fn state_class_superclass_id(pool: StatePool&, class_id: u32) -> u32 {
     return pool.classes[class_id].superclass_id;
 }
 
-fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, value: MrbValue) {
+fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, value: MrbValue,
+    owner: u32 = NULL_CLASS_ID) {
     let promoted = promote_to_state(pool, scratch, value);
     for index in 0..pool.consts.len {
-        if pool.consts[index].name_symbol == name_symbol {
+        if pool.consts[index].name_symbol == name_symbol && pool.consts[index].owner == owner {
             pool.consts[index].value = promoted;
             return;
         }
@@ -197,12 +199,13 @@ fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, v
     pool.consts.push(ConstEntry {
             name_symbol: name_symbol,
             value: promoted,
+            owner: owner,
         });
 }
 
-fn state_get_const(pool: StatePool&, name_symbol: u32) -> MrbValue, bool {
+fn state_get_const(pool: StatePool&, name_symbol: u32, owner: u32 = NULL_CLASS_ID) -> MrbValue, bool {
     for entry in pool.consts {
-        if entry.name_symbol == name_symbol {
+        if entry.name_symbol == name_symbol && entry.owner == owner {
             return entry.value, true;
         }
     }

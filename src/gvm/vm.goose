@@ -17,6 +17,7 @@ import.signals;
 import.state_pool;
 import.value_arena;
 import.vm_blocks;
+import.vm_constants;
 import.vm_core;
 import.vm_dispatch;
 import.vm_entry;
