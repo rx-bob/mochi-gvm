@@ -92,6 +92,38 @@ fn test_host_storage_subscribe_requires_instance(t: goosetest::Test&) {
     t.assert_eq(0, vm::goose_vm_host_outbox().len);
 }
 
+fn test_global_subscription_owner_and_escaping(t: goosetest::Test&) {
+    vm::abi_open();
+    vm::host_reset();
+    let args: vm::MrbValue[2] = [
+        vm::scratch_alloc_string(vm::g_abi_scratch, "notice\""),
+        vm::mrb_symbol(vm::intern_symbol("receive")),
+    ];
+    let missing_owner, handled = vm::vm_call_mochi_builtin(vm::g_abi_machine, "subscribe", args[..]);
+    t.assert_true(handled);
+    t.assert_true(vm::mrb_is_false(missing_owner));
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    vm::g_abi_machine.frames.push(vm::CallFrame {
+            self_value: 42,
+            ..
+        });
+    let subscribed, sub_handled = vm::vm_call_mochi_builtin(vm::g_abi_machine, "subscribe", args[..]);
+    t.assert_true(sub_handled && vm::mrb_is_true(subscribed));
+    var expected: u8[>..] = [];
+    expected.append("{\"__host\":\"event_subscribe\",\"event\":\"notice\\\"\",");
+    expected.append("\"callback\":\"receive\",\"instance\":\"42\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+    vm::host_clear_outbox();
+    let unsubscribed, unsub_handled = vm::vm_call_mochi_builtin(vm::g_abi_machine, "unsubscribe", args[..]);
+    t.assert_true(unsub_handled && vm::mrb_is_true(unsubscribed));
+    expected.clear();
+    expected.append("{\"__host\":\"event_unsubscribe\",\"event\":\"notice\\\"\",");
+    expected.append("\"callback\":\"receive\",\"instance\":\"42\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+    vm::g_abi_machine.frames.clear();
+    vm::host_reset();
+}
+
 fn test_host_focus_commands(t: goosetest::Test&) {
     vm::host_reset();
     var file: vm::RiteFile = vm::RiteFile {

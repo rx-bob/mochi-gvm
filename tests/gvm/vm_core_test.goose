@@ -44,6 +44,36 @@ fn test_restore_header_rebuilds_rite(t: goosetest::Test&) {
     t.assert_true(full[end_at..end_at + 4] == "END\0");
 }
 
+fn test_array_class_package_dispatch(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let class_id, found = vm::vm_find_class(pool, vm::intern_symbol("Array"));
+    t.assert_true(found);
+    t.assert_eq(vm::BUILTIN_ARRAY_CLASS_ID, class_id);
+    let array = vm::builtin_array_new(scratch);
+    let owner, owner_ok = vm::vm_owner_class_id(machine, array);
+    t.assert_true(owner_ok);
+    t.assert_eq(vm::BUILTIN_ARRAY_CLASS_ID, owner);
+    let method = vm::intern_symbol("optional_sum");
+    vm::vm_define_method(machine, class_id, method, 17);
+    let irep, method_found = vm::vm_lookup_method(machine, owner, method);
+    t.assert_true(method_found);
+    t.assert_eq(17, irep);
+}
+
 fn test_load_counter_irep(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..

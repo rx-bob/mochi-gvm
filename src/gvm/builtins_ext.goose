@@ -436,19 +436,28 @@ fn builtin_number_method(
     }
     if name == "<" || name == "<=" || name == ">" || name == ">=" {
         let order, comparable = num_compare(machine.scratch, machine.pool, receiver, right);
+        if !comparable {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
         var comparison = false;
-        if comparable {
-            if name == "<" {
-                comparison = order < 0;
-            } else if name == "<=" {
-                comparison = order <= 0;
-            } else if name == ">" {
-                comparison = order > 0;
-            } else {
-                comparison = order >= 0;
-            }
+        if name == "<" {
+            comparison = order < 0;
+        } else if name == "<=" {
+            comparison = order <= 0;
+        } else if name == ">" {
+            comparison = order > 0;
+        } else {
+            comparison = order >= 0;
         }
         return mrb_bool(comparison), true;
+    }
+    if name == "<=>" {
+        let order, comparable = num_compare(machine.scratch, machine.pool, receiver, right);
+        if !comparable {
+            return mrb_nil(), true;
+        }
+        return mrb_fixnum(order), true;
     }
     return mrb_nil(), false;
 }

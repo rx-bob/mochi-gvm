@@ -14,7 +14,6 @@ import.vm_num;
 import.vm_ops;
 
 // Reserved class IDs for constants that have no state-pool class definition.
-let BUILTIN_ARRAY_CLASS_ID: u32 = 0xFFFFFF01;
 let BUILTIN_MOCHI_CLASS_ID: u32 = 0xFFFFFF02;
 let NATIVE_FAIL: u64 = 0xFFFFFFFFFFFFFFFF;
 
@@ -187,6 +186,47 @@ fn vm_call_hash_builtin(
 fn vm_call_string_builtin(
     machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    if name == "<=>" || name == "<" || name == "<=" || name == ">" || name == ">=" {
+        if args.len != 1 || !vm_is_string_value(machine, args[0]) {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        let left = builtin_string_bytes(machine.pool, machine.scratch, receiver);
+        let right = builtin_string_bytes(machine.pool, machine.scratch, args[0]);
+        var order = 0;
+        var index = 0;
+        while index < left.len && index < right.len {
+            if left[index] < right[index] {
+                order = -1;
+                break;
+            }
+            if left[index] > right[index] {
+                order = 1;
+                break;
+            }
+            index += 1;
+        }
+        if order == 0 {
+            if left.len < right.len {
+                order = -1;
+            } else if left.len > right.len {
+                order = 1;
+            }
+        }
+        if name == "<=>" {
+            return mrb_fixnum(order), true;
+        }
+        let comparison = if name == "<" {
+            order < 0
+        } else if name == "<=" {
+            order <= 0
+        } else if name == ">" {
+            order > 0
+        } else {
+            order >= 0
+        };
+        return mrb_bool(comparison), true;
+    }
     if name == "length" {
         return mrb_fixnum(builtin_string_length(machine.pool, machine.scratch, receiver)), true;
     }

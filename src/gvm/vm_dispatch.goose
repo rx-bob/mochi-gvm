@@ -224,6 +224,30 @@ fn vm_op_binary(
     }
     if !num_is_number(machine.scratch, machine.pool, left)
         || !num_is_number(machine.scratch, machine.pool, right) {
+        if (op == OP_LT || op == OP_LE || op == OP_GT || op == OP_GE)
+            && vm_is_string_value(machine, left) && vm_is_string_value(machine, right) {
+            let pair: MrbValue[1] = [right];
+            let order_value, handled = vm_call_string_builtin(
+                machine, left, "<=>", pair[..]
+            );
+            if !handled || !mrb_is_fixnum(order_value) {
+                return vm_fail(machine, VmError.TypeMismatch, pc + 1);
+            }
+            let order = mrb_fixnum_value(order_value);
+            let comparison = if op == OP_LT {
+                order < 0
+            } else if op == OP_LE {
+                order <= 0
+            } else if op == OP_GT {
+                order > 0
+            } else {
+                order >= 0
+            };
+            if !vm_write_register(machine, record, frame.base, ops.a, mrb_bool(comparison)) {
+                return vm_fail(machine, VmError.BadOperand, pc + 1);
+            }
+            return vm_step_continue(pc + 1);
+        }
         let non_fix, ok = vm_op_binary_non_fixnum(machine, left, right, op);
         if !ok {
             return vm_fail(machine, VmError.TypeMismatch, pc + 1);
@@ -420,7 +444,17 @@ fn vm_op_send_block(
     } else {
         receiver_val
     };
-    let result = vm_dispatch_block_method(machine, receiver, symbol, closure, frame.self_value);
+    var args: MrbValue[..MAX_VM_ARGS] = [];
+    var index = 0;
+    while index < arg_count {
+        let value, value_ok = vm_read_register(machine, record, frame.base, ops.a + 1 + index);
+        if !value_ok {
+            return vm_fail(machine, VmError.BadOperand, pc + 3);
+        }
+        args.push(value);
+        index += 1;
+    }
+    let result = vm_dispatch_block_method(machine, receiver, symbol, closure, frame.self_value, args[..]);
     if machine.error != VmError.Ok {
         return vm_step_stop(pc + 3);
     }

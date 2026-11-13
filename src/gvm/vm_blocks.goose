@@ -8,6 +8,7 @@ import.state_pool;
 import.value_arena;
 import.vm_core;
 import.vm_methods;
+import.vm_num;
 import.vm_ops;
 
 recursive fn vm_invoke_block(
@@ -165,16 +166,111 @@ recursive fn vm_array_match_block(
     return mrb_fixnum(matched);
 }
 
+recursive fn vm_array_aggregate_block(
+    machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue,
+    self_value: MrbValue, args: MrbValue[:]
+) -> MrbValue {
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, array);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
+    for value in args {
+        scratch_root(machine, value);
+    }
+    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    if name == "sum" {
+        if args.len > 1 {
+            machine.error = VmError.WrongArity;
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        var total = if args.len == 1 {
+            args[0]
+        } else {
+            mrb_fixnum(0)
+        };
+        scratch_root(machine, total);
+        let total_root_index = machine.scratch_roots.len - 1;
+        var index = 0;
+        while index < length {
+            let item = builtin_array_get(machine.pool, machine.scratch, array, index);
+            let mapped = vm_invoke_block(machine, closure, self_value, item);
+            if machine.error != VmError.Ok {
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            let updated, fault = num_add(machine.scratch, machine.pool, total, mapped);
+            if fault != NumFault.Ok {
+                machine.error = match fault {
+                    Overflow => VmError.IntegerOverflow,
+                    Scratch => VmError.ScratchFull,
+                    _ => VmError.TypeMismatch,
+                };
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            total = updated;
+            machine.scratch_roots[total_root_index] = total;
+            index += 1;
+        }
+        scratch_root_end(machine, root_mark);
+        return total;
+    }
+    if args.len != 0 {
+        machine.error = VmError.WrongArity;
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+    if length == 0 {
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+    var result = builtin_array_get(machine.pool, machine.scratch, array, 0);
+    scratch_root(machine, result);
+    let result_root_index = machine.scratch_roots.len - 1;
+    var index = 1;
+    while index < length {
+        let candidate = builtin_array_get(machine.pool, machine.scratch, array, index);
+        let pair: MrbValue[2] = [candidate, result];
+        let order_value = vm_invoke_block_args(machine, closure, self_value, pair[..]);
+        if machine.error != VmError.Ok {
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        let order, comparable = num_compare(
+            machine.scratch, machine.pool, order_value, mrb_fixnum(0)
+        );
+        if !comparable {
+            machine.error = VmError.TypeMismatch;
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        if (name == "min" && order < 0) || (name == "max" && order > 0) {
+            result = candidate;
+            machine.scratch_roots[result_root_index] = result;
+        }
+        index += 1;
+    }
+    scratch_root_end(machine, root_mark);
+    return result;
+}
+
 recursive fn vm_array_block_ext(
-    machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue, self_value: MrbValue
+    machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue,
+    self_value: MrbValue, args: MrbValue[:]
 ) -> MrbValue, bool {
     let root_mark = scratch_root_begin(machine);
     scratch_root(machine, array);
     scratch_root(machine, closure);
     scratch_root(machine, self_value);
+    for value in args {
+        scratch_root(machine, value);
+    }
     var result = mrb_nil();
     var handled = true;
-    if name == "each_with_index" {
+    if name == "sum" || name == "min" || name == "max" {
+        result = vm_array_aggregate_block(machine, array, name, closure, self_value, args);
+    } else if name == "each_with_index" {
         result = vm_array_each_with_index(machine, array, closure, self_value);
     } else if name == "find" || name == "detect" {
         result = vm_array_find_block(machine, array, closure, self_value);
@@ -337,7 +433,8 @@ recursive fn vm_dispatch_hash_block(
 }
 
 recursive fn vm_dispatch_block_method(
-    machine: Vm&, receiver: MrbValue, symbol: u32, closure: MrbValue, self_value: MrbValue
+    machine: Vm&, receiver: MrbValue, symbol: u32, closure: MrbValue,
+    self_value: MrbValue, args: MrbValue[:]
 ) -> MrbValue {
     let name = symbol_name(symbol);
     if vm_is_array_value(machine, receiver) {
@@ -347,7 +444,7 @@ recursive fn vm_dispatch_block_method(
         if name == "select" || name == "filter" || name == "find_all" || name == "reject" {
             return vm_filter_array(machine, receiver, closure, self_value, name != "reject");
         }
-        let ext, ok = vm_array_block_ext(machine, receiver, name, closure, self_value);
+        let ext, ok = vm_array_block_ext(machine, receiver, name, closure, self_value, args);
         if ok {
             return ext;
         }

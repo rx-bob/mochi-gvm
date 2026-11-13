@@ -15,6 +15,7 @@ let MAX_VM_REGS = 1024;
 let MAX_VM_CALL_DEPTH = 64;
 let MAX_VM_METHODS = 4096;
 let MAX_VM_ARGS = 8;
+let BUILTIN_ARRAY_CLASS_ID: u32 = 0xFFFFFF01;
 
 // Opcode bytes from mruby 4.0 `include/mruby/ops.h`.
 let OP_NOP: u8 = 0;
@@ -297,6 +298,9 @@ fn vm_concat_text(machine: Vm&, left: MrbValue, right: MrbValue) -> MrbValue {
 
 // Finds a class definition by its interned name symbol.
 fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
+    if symbol_name(name_symbol) == "Array" {
+        return BUILTIN_ARRAY_CLASS_ID, true;
+    }
     for index in 0..pool.classes.len {
         if pool.classes[index].name_symbol == name_symbol {
             return index as u32, true;
@@ -327,6 +331,15 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
 
 // Resolves a method through the class and its superclass chain.
 fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool {
+    if class_id == BUILTIN_ARRAY_CLASS_ID {
+        for index in 0..machine.methods.len {
+            let entry = machine.methods[index];
+            if entry.class_id == class_id && entry.name_symbol == name_symbol {
+                return entry.irep_index, true;
+            }
+        }
+        return -1, false;
+    }
     var current = class_id;
     var steps = 0;
     while current != NULL_CLASS_ID
@@ -357,6 +370,14 @@ fn vm_receiver_class_id(machine: Vm&, receiver: MrbValue) -> u32, bool {
 fn vm_owner_class_id(machine: Vm&, receiver: MrbValue) -> u32, bool {
     if mrb_is_class(receiver) {
         return mrb_class_id(receiver), true;
+    }
+    let object, ok = scratch_object(machine.scratch, receiver);
+    if ok && object.kind == ArenaObjectKind.Array {
+        return BUILTIN_ARRAY_CLASS_ID, true;
+    }
+    let state, state_ok = state_object(machine.pool, receiver);
+    if state_ok && state.kind == ArenaObjectKind.Array {
+        return BUILTIN_ARRAY_CLASS_ID, true;
     }
     return vm_receiver_class_id(machine, receiver);
 }

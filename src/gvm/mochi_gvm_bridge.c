@@ -78,6 +78,7 @@ extern uint8_t goose_vm_is_class(uint64_t value);
 extern uint8_t goose_vm_is_hash(uint64_t value);
 extern uint64_t goose_vm_hash_get_symbol(uint64_t hash, uint32_t key_symbol);
 extern const uint8_t *goose_vm_value_json(uint64_t value, int64_t *out_len);
+extern uint8_t goose_vm_event_payload_valid(uint64_t value);
 extern uint64_t goose_vm_make_scratch_string(goose_u8_slice bytes);
 extern uint64_t goose_vm_current_self(void);
 extern const uint8_t *goose_vm_fetch_request_json(
@@ -474,6 +475,8 @@ static int append_text_piece(
   return 1;
 }
 
+static int sync_host_outbox(void);
+
 static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   static const char PREFIX[] = "{\"__host\":\"event_publish\",\"event\":";
   static const char INSTANCE_KEY[] = ",\"instance\":\"";
@@ -496,11 +499,13 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   (void)self;
 
   argc = mrb_get_args(mrb, "oo", &event_value, &payload);
-  if (argc < 1 || !mrb_string_p(event_value) || mrb_string_len(event_value) <= 0) {
-    return mrb_fixnum_value(-1);
+  if (argc < 1 || !mrb_string_p(event_value) || mrb_string_len(event_value) <= 0 ||
+      mrb_string_len(event_value) > 128) {
+    return mochi_host_failure(mrb, "Mochi.emit requires an event name of 1 to 128 bytes");
   }
-  if (argc >= 2 && !goose_vm_is_hash(payload)) {
-    return mrb_fixnum_value(-1);
+  if (argc >= 2 && (!goose_vm_is_hash(payload) || !goose_vm_event_payload_valid(payload))) {
+    return mochi_host_failure(mrb,
+      "Mochi.emit payload must be a bounded Hash of transportable values; unsupported value, key, number or nesting");
   }
   instance_handle = goose_vm_current_self();
   if (instance_handle == 0) return mrb_fixnum_value(-1);
@@ -509,6 +514,8 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mrb_fixnum_value(-1);
   }
+  /* Keep subscribe/unsubscribe and publication in Ruby statement order. */
+  if (!sync_host_outbox()) return mochi_host_failure(mrb, g_error_text);
 
   event_json = goose_vm_value_json(event_value, &event_len);
   if (!event_json || event_len <= 0) return mrb_fixnum_value(-1);

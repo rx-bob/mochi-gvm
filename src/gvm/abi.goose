@@ -9,6 +9,7 @@ namespace vm;
 import.abi_capacity;
 import.builtins;
 import.capacity_config;
+import.event_payload;
 import.host_api;
 import.ivar_mask;
 import.json_args;
@@ -950,6 +951,10 @@ export fn goose_vm_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
 
 export fn goose_vm_value_json(value: u64) -> const u8[:] {
     return abi_value_json(value);
+}
+
+export fn goose_vm_event_payload_valid(value: u64) -> bool {
+    return event_payload_valid(g_abi_machine, value);
 }
 
 export fn goose_vm_current_self() -> u64 {
