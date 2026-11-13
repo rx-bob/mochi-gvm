@@ -328,6 +328,38 @@ fn test_string_ext_case_trim_and_predicates(t: goosetest::Test&) {
     t.assert_true(vm::mrb_is_true(ew));
 }
 
+fn test_string_bytesize_getbyte_binary(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    var binary: u8[3] = [0, 128, 255];
+    let value = vm::scratch_alloc_string(scratch, binary[..]);
+    let no_args: vm::MrbValue[0] = [];
+    let length, length_ok = vm::builtin_string_ext(machine, value, "bytesize", no_args[..]);
+    t.assert_true(length_ok);
+    t.assert_eq(3, vm::mrb_fixnum_value(length));
+    let index: vm::MrbValue[1] = [vm::mrb_fixnum(2)];
+    let byte, byte_ok = vm::builtin_string_ext(machine, value, "getbyte", index[..]);
+    t.assert_true(byte_ok);
+    t.assert_eq(255, vm::mrb_fixnum_value(byte));
+    let negative_index: vm::MrbValue[1] = [vm::mrb_fixnum(-2)];
+    let negative_byte, negative_ok = vm::builtin_string_ext(machine, value, "getbyte", negative_index[..]);
+    t.assert_true(negative_ok);
+    t.assert_eq(128, vm::mrb_fixnum_value(negative_byte));
+}
+
 fn test_string_ext_split_and_gsub(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..

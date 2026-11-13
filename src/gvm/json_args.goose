@@ -334,6 +334,90 @@ fn json_number_wrapper(scratch: ScratchArena&, value: MrbValue) -> MrbValue, boo
     return mrb_nil(), true, false;
 }
 
+fn json_base64_value(byte: u8) -> i64 {
+    if byte >= 65 && byte <= 90 {
+        return byte - 65;
+    }
+    if byte >= 97 && byte <= 122 {
+        return byte - 97 + 26;
+    }
+    if byte >= 48 && byte <= 57 {
+        return byte - 48 + 52;
+    }
+    if byte == 43 {
+        return 62;
+    }
+    if byte == 47 {
+        return 63;
+    }
+    return -1;
+}
+
+// The loader wraps binary response strings in a single reserved base64
+// envelope. Decode directly into the tick arena so Ruby sees a byte string.
+fn json_bytes_wrapper(scratch: ScratchArena&, value: MrbValue) -> MrbValue, bool, bool {
+    let object, object_ok = scratch_object(scratch, value);
+    if !object_ok || object.kind != ArenaObjectKind.Hash {
+        return mrb_nil(), false, true;
+    }
+    var encoded: MrbValue = mrb_nil();
+    var found = false;
+    var slot_index = object.items_first_index;
+    while slot_index >= 0 {
+        let slot = scratch.slots[slot_index];
+        if scratch_is_string(scratch, slot.key) &&
+        scratch_string_bytes(scratch, slot.key) == "__mochi_bytes" {
+            encoded = slot.value;
+            found = true;
+        }
+        slot_index = slot.next_index;
+    }
+    if !found {
+        return mrb_nil(), false, true;
+    }
+    if scratch_hash_length(scratch, value) != 1 || !scratch_is_string(scratch, encoded) {
+        return mrb_nil(), true, false;
+    }
+    let text = scratch_string_bytes(scratch, encoded);
+    if text.len % 4 != 0 {
+        return mrb_nil(), true, false;
+    }
+    var decoded: u8[>..] = [];
+    var index = 0;
+    while index < text.len {
+        let a = json_base64_value(text[index]);
+        let b = json_base64_value(text[index + 1]);
+        let pad_c = text[index + 2] == 61;
+        let pad_d = text[index + 3] == 61;
+        let c = if pad_c {
+            0
+        } else {
+            json_base64_value(text[index + 2])
+        };
+        let d = if pad_d {
+            0
+        } else {
+            json_base64_value(text[index + 3])
+        };
+        let final_group = index + 4 == text.len;
+        if a < 0 || b < 0 || c < 0 || d < 0 || (pad_c && !pad_d) ||
+        ((pad_c || pad_d) && !final_group) || (pad_c && (b & 15) != 0) ||
+        (pad_d && !pad_c && (c & 3) != 0) {
+            return mrb_nil(), true, false;
+        }
+        decoded.push(((a << 2) | (b >> 4))as u8);
+        if !pad_c {
+            decoded.push((((b & 15) << 4) | (c >> 2))as u8);
+        }
+        if !pad_d {
+            decoded.push((((c & 3) << 6) | d)as u8);
+        }
+        index += 4;
+    }
+    let result = scratch_alloc_string(scratch, decoded[..]);
+    return result, true, !mrb_is_nil(result);
+}
+
 recursive fn json_parse_value(
     pool: StatePool&, scratch: ScratchArena&, data: const u8[:], cursor: JsonCursor&, depth: i64
 ) -> MrbValue {
@@ -359,6 +443,14 @@ recursive fn json_parse_value(
                 return mrb_nil();
             }
             return decoded;
+        }
+        let bytes, bytes_wrapped, bytes_ok = json_bytes_wrapper(scratch, object);
+        if bytes_wrapped {
+            if !bytes_ok {
+                cursor.failed = true;
+                return mrb_nil();
+            }
+            return bytes;
         }
         return object;
     }

@@ -115,6 +115,35 @@ fn test_parse_wide_numbers_and_wrappers(t: goosetest::Test&) {
     t.assert_eq(0.5, wrapper_float);
 }
 
+fn test_binary_wrapper_decodes_all_byte_values(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var args: vm::MrbValue[>..] = [];
+    let json = "[{\"__mochi_bytes\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==\"}]";
+    t.assert_true(vm::json_parse_args(pool, scratch, json, args));
+    let bytes = vm::builtin_string_bytes(pool, scratch, args[0]);
+    t.assert_eq(256, bytes.len);
+    for index in 0..256 {
+        t.assert_eq(index, bytes[index]);
+    }
+}
+
+fn test_binary_wrapper_rejects_malformed_base64(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var args: vm::MrbValue[>..] = [];
+    t.assert_false(vm::json_parse_args(pool, scratch, "[{\"__mochi_bytes\":\"AA=A\"}]", args));
+    t.assert_false(vm::json_parse_args(pool, scratch, "[{\"__mochi_bytes\":\"?===\"}]", args));
+}
+
 fn test_rejects_malformed_json(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

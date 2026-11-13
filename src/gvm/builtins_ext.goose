@@ -583,8 +583,19 @@ fn builtin_string_split_replace(
 fn builtin_string_ext(
     machine: Vm&, receiver: MrbValue, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
-    if name == "size" {
+    if name == "size" || name == "bytesize" {
         return mrb_fixnum(builtin_string_length(machine.pool, machine.scratch, receiver)), true;
+    }
+    if name == "getbyte" && args.len == 1 && mrb_is_fixnum(args[0]) {
+        let bytes = builtin_string_bytes(machine.pool, machine.scratch, receiver);
+        var index = mrb_fixnum_value(args[0]);
+        if index < 0 {
+            index += bytes.len;
+        }
+        if index < 0 || index >= bytes.len {
+            return mrb_nil(), true;
+        }
+        return mrb_fixnum(bytes[index]), true;
     }
     if name == "+" && args.len >= 1 && vm_is_string_value(machine, args[0]) {
         return vm_concat_text(machine, receiver, args[0]), true;

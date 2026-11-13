@@ -18,8 +18,10 @@ fn files_current_component_instance(machine: Vm&) -> MrbValue, bool {
     return mrb_nil(), false;
 }
 
-fn files_api_command(handle: u8[:], out: u8[>..]&, instance: MrbValue) -> MrbValue {
-    out.append("{\"__host\":\"file_release\",\"instance\":\"");
+fn files_api_command(command: u8[:], handle: u8[:], out: u8[>..]&, instance: MrbValue) -> MrbValue {
+    out.append("{\"__host\":\"");
+    out.append(command);
+    out.append("\",\"instance\":\"");
     mrb_format_fixnum(out, instance as!i64);
     out.append("\",\"handle\":");
     out.push(34);
@@ -31,7 +33,7 @@ fn files_api_command(handle: u8[:], out: u8[>..]&, instance: MrbValue) -> MrbVal
 fn files_api_dispatch(
     machine: Vm&, name: u8[:], args: MrbValue[:], out: u8[>..]&
 ) -> MrbValue, bool {
-    if name != "file_release" {
+    if name != "file_release" && name != "file_reader_open" && name != "file_reader_close" {
         return mrb_nil(), false;
     }
     if args.len != 1 {
@@ -52,5 +54,12 @@ fn files_api_dispatch(
         machine.error = VmError.TypeMismatch;
         return mrb_nil(), true;
     }
-    return files_api_command(handle, out, instance), true;
+    let command = if name == "file_reader_open" {
+        "file_reader_open"
+    } else if name == "file_reader_close" {
+        "file_reader_close"
+    } else {
+        "file_release"
+    };
+    return files_api_command(command, handle, out, instance), true;
 }
