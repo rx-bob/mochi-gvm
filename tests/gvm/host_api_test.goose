@@ -162,6 +162,67 @@ fn test_host_focus_commands(t: goosetest::Test&) {
     t.assert_true(vm::mrb_is_false(empty_val));
 }
 
+fn test_pointer_commands_component_owner(t: goosetest::Test&) {
+    vm::host_reset();
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+
+    // MochiPointer is a static facade; the component frame is lower in the
+    // call stack and remains the owner attached to the host command.
+    let class_id = vm::state_define_class(machine.pool, vm::intern_symbol("PointerOwner"),
+        vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(machine.pool, class_id);
+    t.assert_true(vm::state_register_component(machine.pool, instance));
+    machine.frames.push(vm::CallFrame {
+            self_value: instance,
+            ..
+        });
+    machine.frames.push(vm::CallFrame {
+            self_value: vm::mrb_fixnum(900),
+            ..
+        });
+    let capture_args: vm::MrbValue[2] = [
+        vm::mrb_fixnum(17),
+        vm::scratch_alloc_string(scratch, "drag_handle"),
+    ];
+    let captured, capture_ok = vm::vm_call_mochi_builtin(machine, "pointer_capture", capture_args[..]);
+    t.assert_true(capture_ok);
+    t.assert_true(vm::mrb_is_true(captured));
+    var expected: u8[>..] = [];
+    expected.append("{\"__host\":\"pointer_capture\",\"pointer_id\":17,");
+    expected.append("\"reference\":\"drag_handle\",\"instance\":\"");
+    vm::mrb_format_fixnum(expected, instance as!i64);
+    expected.append("\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+
+    vm::host_clear_outbox();
+    let release_args: vm::MrbValue[1] = [vm::mrb_fixnum(17)];
+    let released, release_ok = vm::vm_call_mochi_builtin(machine, "pointer_release", release_args[..]);
+    t.assert_true(release_ok);
+    t.assert_true(vm::mrb_is_true(released));
+    expected.clear();
+    expected.append("{\"__host\":\"pointer_release\",\"pointer_id\":17,");
+    expected.append("\"reference\":\"\",\"instance\":\"");
+    vm::mrb_format_fixnum(expected, instance as!i64);
+    expected.append("\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+    machine.frames.clear();
+    vm::host_reset();
+}
+
 fn test_host_route_timer_and_get_attr(t: goosetest::Test&) {
     vm::host_reset();
     var file: vm::RiteFile = vm::RiteFile {

@@ -126,6 +126,22 @@ fn host_current_instance(machine: Vm&) -> MrbValue, bool {
     return machine.frames[machine.frames.len - 1].self_value, true;
 }
 
+// A static MochiPointer helper runs with the class as self. Resolve the
+// nearest live component frame so pointer requests retain the owning mount.
+fn host_current_component_instance(machine: Vm&) -> MrbValue, bool {
+    var frame_index = machine.frames.len - 1;
+    while frame_index >= 0 {
+        let candidate = machine.frames[frame_index].self_value;
+        for component in machine.pool.components {
+            if mrb_value_identical(candidate, component) {
+                return candidate, true;
+            }
+        }
+        frame_index -= 1;
+    }
+    return mrb_nil(), false;
+}
+
 fn host_outbox_bytes() -> const u8[:] {
     return g_host_outbox[..];
 }
@@ -310,6 +326,47 @@ fn vm_call_mochi_focus(
     return mrb_nil(), false;
 }
 
+fn vm_call_mochi_pointer(
+    machine: Vm&, name: u8[:], args: MrbValue[:]
+) -> MrbValue, bool {
+    if name != "pointer_capture" && name != "pointer_release" {
+        return mrb_nil(), false;
+    }
+    if args.len < 1 || args.len > 2 || !mrb_is_fixnum(args[0]) ||
+    mrb_fixnum_value(args[0]) < 0 {
+        machine.error = if args.len < 1 || args.len > 2 {
+            VmError.WrongArity
+        } else {
+            VmError.TypeMismatch
+        };
+        return mrb_nil(), true;
+    }
+    let instance, has_instance = host_current_component_instance(machine);
+    if !has_instance {
+        machine.error = VmError.TypeMismatch;
+        return mrb_nil(), true;
+    }
+    var reference_buffer: u8[>..] = [];
+    var reference: u8[>..] = [];
+    if args.len == 2 && !mrb_is_nil(args[1]) {
+        reference.append(host_arg_text(machine, args[1], reference_buffer));
+        if reference.len == 0 || reference.len > 128 {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+    }
+    g_host_outbox.append("{\"__host\":");
+    host_append_json_escaped(g_host_outbox, name);
+    g_host_outbox.append(",\"pointer_id\":");
+    mrb_format_fixnum(g_host_outbox, mrb_fixnum_value(args[0]));
+    g_host_outbox.append(",\"reference\":");
+    host_append_json_escaped(g_host_outbox, reference[..]);
+    g_host_outbox.append(",\"instance\":\"");
+    mrb_format_fixnum(g_host_outbox, instance as!i64);
+    g_host_outbox.append("\"}\n");
+    return mrb_true(), true;
+}
+
 fn vm_call_mochi_route(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
@@ -416,6 +473,10 @@ fn vm_call_mochi_operation(
     let focus_val, focus_ok = vm_call_mochi_focus(machine, name, args);
     if focus_ok {
         return focus_val, true;
+    }
+    let pointer_val, pointer_ok = vm_call_mochi_pointer(machine, name, args);
+    if pointer_ok {
+        return pointer_val, true;
     }
     let route_val, route_ok = vm_call_mochi_route(machine, name, args);
     if route_ok {
