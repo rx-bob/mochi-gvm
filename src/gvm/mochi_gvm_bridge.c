@@ -37,10 +37,6 @@ MOCHI_EXPORT const char *mochi_capacity_profile(void) {
 
 /* Offset accessors return wasm32 addresses, matching the loader's memory
  * model; a native host test for these must run in a 32-bit process. */
-#define MOCHI_PATCH_CAPACITY (64 * 1024)
-#define MOCHI_FETCH_CAPACITY (64 * 1024)
-#define MOCHI_EMIT_CAPACITY (16 * 1024)
-#define MOCHI_EVENT_ARGS_CAPACITY 8192
 #define MOCHI_ERROR_CAPACITY 256
 #define MOCHI_CALLBACK_CAPACITY 128
 
@@ -129,7 +125,6 @@ static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
 static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
 static int32_t g_error_len = 0;
-#define MOCHI_HOST_CAPACITY 8192
 static uint8_t g_host_output[MOCHI_HOST_CAPACITY];
 static char g_host_args[MOCHI_HOST_CAPACITY];
 static char g_host_error[MOCHI_ERROR_CAPACITY];
@@ -210,7 +205,7 @@ EM_JS(int, mochi_host_dispatch_js,
     if (typeof operationFn !== "function") {
       throw new Error("host capability '" + name + "' has no sync operation '" + op + "'");
     }
-    var result = operationFn.call(adapter.sync, UTF8ToString(args));
+    var result = operationFn.call(adapter.sync, UTF8ToString(args), adapter.limits);
     if (result && typeof result.then === "function") {
       throw new Error("host capability '" + name + "' operation '" + op +
                       "' returned a promise from a synchronous operation");
