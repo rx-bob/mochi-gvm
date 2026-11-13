@@ -2,6 +2,7 @@
 namespace vm;
 
 import.builtins;
+import.capacity_config;
 import.collection_arena;
 import.scratch_reclaim;
 import.state_pool;
@@ -255,6 +256,312 @@ recursive fn vm_array_aggregate_block(
     return result;
 }
 
+// Compares supported Array sort keys using Ruby's numeric and String order.
+fn vm_sort_key_compare(machine: Vm&, left: MrbValue, right: MrbValue) -> i64, bool {
+    if num_is_number(machine.scratch, machine.pool, left)
+        && num_is_number(machine.scratch, machine.pool, right) {
+        return num_compare(machine.scratch, machine.pool, left, right);
+    }
+    if vm_is_string_value(machine, left) && vm_is_string_value(machine, right) {
+        let a = builtin_string_bytes(machine.pool, machine.scratch, left);
+        let b = builtin_string_bytes(machine.pool, machine.scratch, right);
+        var index = 0;
+        while index < a.len && index < b.len {
+            if a[index] < b[index] {
+                return -1, true;
+            }
+            if a[index] > b[index] {
+                return 1, true;
+            }
+            index += 1;
+        }
+        if a.len < b.len {
+            return -1, true;
+        }
+        if a.len > b.len {
+            return 1, true;
+        }
+        return 0, true;
+    }
+    return 0, false;
+}
+
+recursive fn vm_sort_compare(
+    machine: Vm&, left: MrbValue, right: MrbValue, closure: MrbValue,
+    self_value: MrbValue, comparator_block: bool
+) -> i64, bool {
+    if !comparator_block {
+        let order, comparable = vm_sort_key_compare(machine, left, right);
+        if !comparable {
+            machine.error = VmError.TypeMismatch;
+        }
+        return order, comparable;
+    }
+    let pair: MrbValue[2] = [left, right];
+    let result = vm_invoke_block_args(machine, closure, self_value, pair[..]);
+    if machine.error != VmError.Ok {
+        return 0, false;
+    }
+    let order, comparable = num_compare(machine.scratch, machine.pool, result, mrb_fixnum(0));
+    if !comparable {
+        machine.error = VmError.TypeMismatch;
+        return 0, false;
+    }
+    return order, true;
+}
+
+// Bottom-up linked-list merge sort keeps workspace proportional to the
+// returned array and avoids indexed access over Mochi's linked-list arrays.
+recursive fn vm_sort_merge_runs(
+    machine: Vm&, result: MrbValue, keys_array: MrbValue, by_key: bool,
+    closure: MrbValue, self_value: MrbValue, comparator_block: bool, length: i64
+) -> bool {
+    let result_index = mrb_arena_index(result)as i64;
+    let keys_index = if by_key {
+        mrb_arena_index(keys_array)as i64
+    } else {
+        -1
+    };
+    var width = 1;
+    while width < length {
+        var current_value = machine.scratch.objects[result_index].items_first_index;
+        var current_key = if by_key {
+            machine.scratch.objects[keys_index].items_first_index
+        } else {
+            -1
+        };
+        var result_first = -1;
+        var result_last = -1;
+        var keys_first = -1;
+        var keys_last = -1;
+        var remaining = length;
+        while remaining > 0 {
+            let left_count = if remaining < width {
+                remaining
+            } else {
+                width
+            };
+            let right_count = if remaining - left_count < width {
+                remaining - left_count
+            } else {
+                width
+            };
+            var left_value = current_value;
+            var left_key = current_key;
+            var after_left_value = current_value;
+            var after_left_key = current_key;
+            var advance = 0;
+            while advance < left_count {
+                after_left_value = machine.scratch.slots[after_left_value].next_index;
+                if by_key {
+                    after_left_key = machine.scratch.slots[after_left_key].next_index;
+                }
+                advance += 1;
+            }
+            var right_value = after_left_value;
+            var right_key = after_left_key;
+            var next_run_value = right_value;
+            var next_run_key = right_key;
+            advance = 0;
+            while advance < right_count {
+                next_run_value = machine.scratch.slots[next_run_value].next_index;
+                if by_key {
+                    next_run_key = machine.scratch.slots[next_run_key].next_index;
+                }
+                advance += 1;
+            }
+            var left_remaining = left_count;
+            var right_remaining = right_count;
+            while left_remaining > 0 || right_remaining > 0 {
+                var take_left = false;
+                if right_remaining == 0 {
+                    take_left = true;
+                } else if left_remaining > 0 {
+                    let left_value_key = if by_key {
+                        machine.scratch.slots[left_key].value
+                    } else {
+                        machine.scratch.slots[left_value].value
+                    };
+                    let right_value_key = if by_key {
+                        machine.scratch.slots[right_key].value
+                    } else {
+                        machine.scratch.slots[right_value].value
+                    };
+                    let order, comparable = vm_sort_compare(
+                        machine, left_value_key, right_value_key, closure, self_value, comparator_block
+                    );
+                    if !comparable {
+                        return false;
+                    }
+                    take_left = order <= 0;
+                }
+                var selected_value = -1;
+                var selected_key = -1;
+                if take_left {
+                    selected_value = left_value;
+                    left_value = machine.scratch.slots[left_value].next_index;
+                    if by_key {
+                        selected_key = left_key;
+                        left_key = machine.scratch.slots[left_key].next_index;
+                    }
+                    left_remaining -= 1;
+                } else {
+                    selected_value = right_value;
+                    right_value = machine.scratch.slots[right_value].next_index;
+                    if by_key {
+                        selected_key = right_key;
+                        right_key = machine.scratch.slots[right_key].next_index;
+                    }
+                    right_remaining -= 1;
+                }
+                machine.scratch.slots[selected_value].previous_index = result_last;
+                machine.scratch.slots[selected_value].next_index = -1;
+                if result_last >= 0 {
+                    machine.scratch.slots[result_last].next_index = selected_value;
+                } else {
+                    result_first = selected_value;
+                }
+                result_last = selected_value;
+                if by_key {
+                    machine.scratch.slots[selected_key].previous_index = keys_last;
+                    machine.scratch.slots[selected_key].next_index = -1;
+                    if keys_last >= 0 {
+                        machine.scratch.slots[keys_last].next_index = selected_key;
+                    } else {
+                        keys_first = selected_key;
+                    }
+                    keys_last = selected_key;
+                }
+            }
+            current_value = next_run_value;
+            current_key = next_run_key;
+            remaining -= left_count + right_count;
+        }
+        machine.scratch.objects[result_index].items_first_index = result_first;
+        machine.scratch.objects[result_index].items_last_index = result_last;
+        if by_key {
+            machine.scratch.objects[keys_index].items_first_index = keys_first;
+            machine.scratch.objects[keys_index].items_last_index = keys_last;
+        }
+        width *= 2;
+    }
+    return true;
+}
+
+recursive fn vm_array_sort_block(
+    machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue,
+    self_value: MrbValue, args: MrbValue[:]
+) -> MrbValue {
+    if args.len != 0 {
+        machine.error = VmError.WrongArity;
+        return mrb_nil();
+    }
+    if name != "sort" && name != "sort_by" {
+        machine.error = VmError.NoMethod;
+        return mrb_nil();
+    }
+
+    let root_mark = scratch_root_begin(machine);
+    scratch_root(machine, array);
+    scratch_root(machine, closure);
+    scratch_root(machine, self_value);
+    let length = builtin_array_length(machine.pool, machine.scratch, array);
+    if length > SCRATCH_CAPACITY_SLOTS / 2 {
+        machine.error = VmError.ScratchFull;
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+    let by_key = name == "sort_by";
+    let result = builtin_array_new(machine.scratch);
+    if mrb_is_nil(result) {
+        machine.error = VmError.ScratchFull;
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+    scratch_root(machine, result);
+    let source = if mrb_is_scratch(array) {
+        let object, ok = scratch_object(machine.scratch, array);
+        if !ok || object.kind != ArenaObjectKind.Array {
+            machine.error = VmError.TypeMismatch;
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        var slot = object.items_first_index;
+        while slot >= 0 {
+            if !builtin_array_push(
+                machine.pool, machine.scratch, result, machine.scratch.slots[slot].value
+            ) {
+                machine.error = VmError.ScratchFull;
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            slot = machine.scratch.slots[slot].next_index;
+        }
+        true
+    } else {
+        let object, ok = state_object(machine.pool, array);
+        if !ok || object.kind != ArenaObjectKind.Array {
+            machine.error = VmError.TypeMismatch;
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        var slot = object.items_first_index;
+        while slot >= 0 {
+            if !builtin_array_push(
+                machine.pool, machine.scratch, result, machine.pool.slots[slot].value
+            ) {
+                machine.error = VmError.ScratchFull;
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            slot = machine.pool.slots[slot].next_index;
+        }
+        true
+    };
+    if !source || builtin_array_length(machine.pool, machine.scratch, result) != length {
+        machine.error = VmError.TypeMismatch;
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+
+    var keys = mrb_nil();
+    if by_key {
+        keys = builtin_array_new(machine.scratch);
+        if mrb_is_nil(keys) {
+            machine.error = VmError.ScratchFull;
+            scratch_root_end(machine, root_mark);
+            return mrb_nil();
+        }
+        scratch_root(machine, keys);
+        let object_index = mrb_arena_index(result)as i64;
+        var slot = machine.scratch.objects[object_index].items_first_index;
+        while slot >= 0 {
+            let key = vm_invoke_block(
+                machine, closure, self_value, machine.scratch.slots[slot].value
+            );
+            if machine.error != VmError.Ok {
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            if !builtin_array_push(machine.pool, machine.scratch, keys, key) {
+                machine.error = VmError.ScratchFull;
+                scratch_root_end(machine, root_mark);
+                return mrb_nil();
+            }
+            slot = machine.scratch.slots[slot].next_index;
+        }
+    }
+
+    if length > 1 && !vm_sort_merge_runs(
+        machine, result, keys, by_key, closure, self_value, name == "sort", length
+    ) {
+        scratch_root_end(machine, root_mark);
+        return mrb_nil();
+    }
+    scratch_root_end(machine, root_mark);
+    return result;
+}
+
 recursive fn vm_array_block_ext(
     machine: Vm&, array: MrbValue, name: u8[:], closure: MrbValue,
     self_value: MrbValue, args: MrbValue[:]
@@ -268,7 +575,9 @@ recursive fn vm_array_block_ext(
     }
     var result = mrb_nil();
     var handled = true;
-    if name == "sum" || name == "min" || name == "max" {
+    if name == "sort" || name == "sort_by" {
+        result = vm_array_sort_block(machine, array, name, closure, self_value, args);
+    } else if name == "sum" || name == "min" || name == "max" {
         result = vm_array_aggregate_block(machine, array, name, closure, self_value, args);
     } else if name == "each_with_index" {
         result = vm_array_each_with_index(machine, array, closure, self_value);
