@@ -6,6 +6,20 @@ import std;
 import goosetest;
 import vm;
 
+fn test_download_parts_are_bounded_typed_views(t: goosetest::Test&) {
+    vm::abi_open();
+    let text = vm::abi_make_string("abc");
+    t.assert_eq(1, vm::abi_download_part_count(text));
+    t.assert_eq(text, vm::abi_download_part(text, 0));
+    t.assert_true(vm::mrb_is_nil(vm::abi_download_part(text, 1)));
+    t.assert_eq(-1, vm::abi_download_part_count(vm::mrb_fixnum(3)));
+    // Arrays must belong to the ABI VM; decode one via its host-result entry.
+    let parts = vm::abi_host_result("{\"ok\":true,\"value\":[\"a\",\"b\",3]}");
+    t.assert_eq(3, vm::abi_download_part_count(parts));
+    t.assert_eq("a", vm::abi_string_bytes(vm::abi_download_part(parts, 0)));
+    t.assert_true(vm::mrb_is_nil(vm::abi_download_part(parts, 2)));
+}
+
 let COUNTER_CHI: const u8[:] = embed_file("../fixtures/counter.chi");
 let TODO_CHI: const u8[:] = embed_file("../fixtures/todo.chi");
 let USERS_CHI: const u8[:] = embed_file("../fixtures/users.chi");

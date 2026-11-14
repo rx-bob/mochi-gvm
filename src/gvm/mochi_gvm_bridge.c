@@ -81,6 +81,8 @@ extern const uint8_t *goose_vm_value_json(uint64_t value, int64_t *out_len);
 extern uint8_t goose_vm_event_payload_valid(uint64_t value);
 extern uint64_t goose_vm_make_scratch_string(goose_u8_slice bytes);
 extern uint64_t goose_vm_current_self(void);
+extern int64_t goose_vm_download_part_count(uint64_t value);
+extern uint64_t goose_vm_download_part(uint64_t value, int64_t index);
 extern const uint8_t *goose_vm_fetch_request_json(
     int64_t fetch_id, uint64_t instance, uint64_t url, uint64_t callback,
     uint64_t options, int64_t *out_len);
@@ -327,6 +329,76 @@ static mrb_value mochi_capability_sync(
     return mrb_nil_value();
   }
   return result;
+}
+
+#ifdef __EMSCRIPTEN__
+EM_JS(int, mochi_download_js,
+      (const char *owner, const char *filename, int filename_len,
+       const char *mime, int mime_len, const uint32_t *parts, int count,
+       char *err, int err_cap), {
+  try {
+    var adapter = Module.__mochiHostCapabilities && Module.__mochiHostCapabilities.download;
+    if (!adapter || !Module.__mochiHostOwner) throw new Error("download capability is unavailable");
+    var context = Module.__mochiHostOwner(UTF8ToString(owner), "download");
+    var decoder = new TextDecoder("utf-8", {fatal:true});
+    var name = decoder.decode(HEAPU8.subarray(filename, filename + filename_len));
+    var type = decoder.decode(HEAPU8.subarray(mime, mime + mime_len));
+    var values = [];
+    var total = 0;
+    for (var i = 0; i < count; i++) {
+      var pointer = HEAPU32[(parts >>> 2) + i * 2];
+      var length = HEAPU32[(parts >>> 2) + i * 2 + 1];
+      total += length;
+      if (total > adapter.limits.bytes) throw new Error("download: content exceeds configured byte limit");
+      values.push(HEAPU8.subarray(pointer, pointer + length));
+    }
+    adapter.sync.save(name, type, values, adapter.limits, context);
+    return 0;
+  } catch (error) {
+    stringToUTF8(String(error && error.message || error), err, err_cap);
+    return -1;
+  }
+});
+#else
+static int mochi_download_js(const char *owner, const char *filename, int filename_len,
+                            const char *mime, int mime_len, const uint32_t *parts, int count,
+                            char *err, int err_cap) {
+  snprintf(err, (size_t)err_cap, "download requires a browser host");
+  return -1;
+}
+#endif
+
+static mrb_value mochi_download_native(mrb_state *mrb, mrb_value self) {
+  mrb_value filename, mime, content;
+  uint32_t parts[1024 * 2];
+  char owner[32];
+  int64_t count;
+  (void)self;
+  if (mrb_get_args(mrb, "ooo", &filename, &mime, &content) != 3 ||
+      !mrb_string_p(filename) || !mrb_string_p(mime)) {
+    return mochi_host_failure(mrb, "download: filename and content type must be Strings");
+  }
+  if (RSTRING_LEN(filename) < 1 || RSTRING_LEN(filename) > 255 ||
+      RSTRING_LEN(mime) < 1 || RSTRING_LEN(mime) > 127) {
+    return mochi_host_failure(mrb, "download: filename or content type exceeds metadata limits");
+  }
+  count = goose_vm_download_part_count(content);
+  if (count < 0 || count > 1024) {
+    return mochi_host_failure(mrb, "download: content must be a String or at most 1024 String parts");
+  }
+  for (int64_t index = 0; index < count; index++) {
+    mrb_value part = goose_vm_download_part(content, index);
+    if (!mrb_string_p(part)) return mochi_host_failure(mrb, "download: every part must be a String");
+    parts[index * 2] = (uint32_t)(uintptr_t)RSTRING_PTR(part);
+    parts[index * 2 + 1] = (uint32_t)RSTRING_LEN(part);
+  }
+  snprintf(owner, sizeof(owner), "%llu", (unsigned long long)goose_vm_current_self());
+  if (mochi_download_js(owner, RSTRING_PTR(filename), (int)RSTRING_LEN(filename),
+      RSTRING_PTR(mime), (int)RSTRING_LEN(mime), parts, (int)count,
+      g_host_error, (int)sizeof(g_host_error)) != 0) {
+    return mochi_host_failure(mrb, g_host_error);
+  }
+  return mrb_true_value();
 }
 
 static mrb_value mochi_format_native(mrb_state *mrb, mrb_value self,
@@ -724,6 +796,7 @@ int32_t mochi_init_runtime(void) {
     return -1;
   }
   mochi = mrb_define_module(g_mrb, "Mochi");
+  mrb_define_module_function(g_mrb, mochi, "download", mochi_download_native, MRB_ARGS_REQ(3));
   mrb_define_module_function(g_mrb, mochi, "fetch", mochi_fetch_native,
                              MRB_ARGS_REQ(2) | MRB_ARGS_OPT(1));
   mrb_define_module_function(g_mrb, mochi, "cancel_fetch",

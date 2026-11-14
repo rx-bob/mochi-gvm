@@ -557,6 +557,37 @@ fn abi_is_string(value: u64) -> bool {
     return vm_is_string_value(g_abi_machine, value);
 }
 
+fn abi_download_part_count(value: u64) -> i64 {
+    if abi_is_string(value) {
+        return 1;
+    }
+    if vm_is_array_value(g_abi_machine, value) {
+        return binding_array_length(g_abi_machine, value);
+    }
+    return -1;
+}
+
+fn abi_download_part(value: u64, index: i64) -> u64 {
+    if abi_is_string(value) && index == 0 {
+        return value;
+    }
+    if vm_is_array_value(g_abi_machine, value) {
+        let part, found = binding_array_get(g_abi_machine, value, index);
+        if found && abi_is_string(part) {
+            return part;
+        }
+    }
+    return mrb_nil();
+}
+
+export fn goose_vm_download_part_count(value: u64) -> i64 {
+    return abi_download_part_count(value);
+}
+
+export fn goose_vm_download_part(value: u64, index: i64) -> u64 {
+    return abi_download_part(value, index);
+}
+
 fn abi_is_class(value: u64) -> bool {
     return mrb_is_class(value);
 }
