@@ -186,6 +186,78 @@ fn test_boolean_not_and_array_new(t: goosetest::Test&) {
     t.assert_true(vm::scratch_is_array(scratch, array));
 }
 
+fn test_is_a_builtin_and_custom_ancestry(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    var args: vm::MrbValue[1] = [vm::mrb_nil()];
+    let array = vm::builtin_array_new(scratch);
+    let hash = vm::state_alloc_hash(pool);
+    let text = vm::scratch_alloc_string(scratch, "x");
+    let wide = vm::scratch_alloc_int64(scratch, 1 << 40);
+    let floating = vm::scratch_alloc_float(scratch, 1.0);
+    let values: vm::MrbValue[10] = [vm::mrb_fixnum(1), wide, floating, text,
+        vm::mrb_symbol(vm::intern_symbol("x")), array, hash, vm::mrb_true(),
+        vm::mrb_false(), vm::mrb_nil()];
+    let expected: u32[10] = [vm::BUILTIN_INTEGER_CLASS_ID, vm::BUILTIN_INTEGER_CLASS_ID,
+        vm::BUILTIN_FLOAT_CLASS_ID, vm::BUILTIN_STRING_CLASS_ID, vm::BUILTIN_SYMBOL_CLASS_ID,
+        vm::BUILTIN_ARRAY_CLASS_ID, vm::BUILTIN_HASH_CLASS_ID, vm::BUILTIN_TRUE_CLASS_ID,
+        vm::BUILTIN_FALSE_CLASS_ID, vm::BUILTIN_NIL_CLASS_ID];
+    for index in 0..values.len {
+        args[0] = vm::mrb_class(expected[index]);
+        let result, handled = vm::vm_call_builtin(machine, values[index],
+            vm::intern_symbol("is_a?"), args[..]);
+        t.assert_true(handled);
+        t.assert_true(vm::mrb_is_true(result));
+        args[0] = vm::mrb_class(vm::BUILTIN_OBJECT_CLASS_ID);
+        let object_result, object_handled = vm::vm_call_builtin(machine, values[index],
+            vm::intern_symbol("is_a?"), args[..]);
+        t.assert_true(object_handled);
+        t.assert_true(vm::mrb_is_true(object_result));
+    }
+    args[0] = vm::mrb_class(vm::BUILTIN_FLOAT_CLASS_ID);
+    let integer_float, _ = vm::vm_call_builtin(machine, wide,
+        vm::intern_symbol("is_a?"), args[..]);
+    t.assert_true(vm::mrb_is_false(integer_float));
+    args[0] = vm::mrb_class(vm::BUILTIN_INTEGER_CLASS_ID);
+    let float_integer, _ = vm::vm_call_builtin(machine, floating,
+        vm::intern_symbol("is_a?"), args[..]);
+    t.assert_true(vm::mrb_is_false(float_integer));
+
+    let base = vm::state_define_class(pool, vm::intern_symbol("InspectionBase"),
+        vm::NULL_CLASS_ID);
+    let child = vm::state_define_class(pool, vm::intern_symbol("InspectionChild"), base);
+    let instance = vm::state_alloc_instance(pool, child);
+    args[0] = vm::mrb_class(base);
+    let inherited, _ = vm::vm_call_builtin(machine, instance,
+        vm::intern_symbol("is_a?"), args[..]);
+    t.assert_true(vm::mrb_is_true(inherited));
+    args[0] = vm::mrb_class(vm::BUILTIN_OBJECT_CLASS_ID);
+    let object, _ = vm::vm_call_builtin(machine, instance,
+        vm::intern_symbol("is_a?"), args[..]);
+    t.assert_true(vm::mrb_is_true(object));
+
+    var no_args: vm::MrbValue[0] = [];
+    vm::vm_call_builtin(machine, instance, vm::intern_symbol("is_a?"), no_args[..]);
+    t.assert_eq(vm::VmError.WrongArity, machine.error);
+    machine.error = vm::VmError.Ok;
+    args[0] = vm::mrb_fixnum(1);
+    vm::vm_call_builtin(machine, instance, vm::intern_symbol("is_a?"), args[..]);
+    t.assert_eq(vm::VmError.TypeMismatch, machine.error);
+}
+
 let EACH_ROWS_CHI: const u8[:] = embed_file("../fixtures/each_rows.chi");
 
 var g_each_rows_rite: u8[>..] = [];

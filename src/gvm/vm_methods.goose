@@ -17,6 +17,64 @@ import.vm_ops;
 
 // Reserved class IDs for constants that have no state-pool class definition.
 let BUILTIN_MOCHI_CLASS_ID: u32 = 0xFFFFFF02;
+
+fn vm_value_is_a(machine: Vm&, value: MrbValue, target_class: u32) -> bool {
+    if target_class == BUILTIN_OBJECT_CLASS_ID {
+        if mrb_is_arena(value) {
+            if mrb_is_scratch(value) {
+                let _, ok = scratch_object(machine.scratch, value);
+                return ok;
+            }
+            let _, ok = state_object(machine.pool, value);
+            return ok;
+        }
+        return mrb_is_nil(value) || mrb_is_bool(value) || mrb_is_fixnum(value)
+            || mrb_is_symbol(value) || mrb_is_class(value) || mrb_is_block(value);
+    }
+    if mrb_is_nil(value) {
+        return target_class == BUILTIN_NIL_CLASS_ID;
+    }
+    if mrb_is_true(value) {
+        return target_class == BUILTIN_TRUE_CLASS_ID;
+    }
+    if mrb_is_false(value) {
+        return target_class == BUILTIN_FALSE_CLASS_ID;
+    }
+    if mrb_is_symbol(value) {
+        return target_class == BUILTIN_SYMBOL_CLASS_ID;
+    }
+    let number_kind = num_kind(machine.scratch, machine.pool, value);
+    if number_kind == NumKind.Integer {
+        return target_class == BUILTIN_INTEGER_CLASS_ID;
+    }
+    if number_kind == NumKind.Float {
+        return target_class == BUILTIN_FLOAT_CLASS_ID;
+    }
+    if vm_is_array_value(machine, value) {
+        return target_class == BUILTIN_ARRAY_CLASS_ID;
+    }
+    if vm_is_hash_value(machine, value) {
+        return target_class == BUILTIN_HASH_CLASS_ID;
+    }
+    if vm_is_string_value(machine, value) {
+        return target_class == BUILTIN_STRING_CLASS_ID;
+    }
+    let object, ok = state_object(machine.pool, value);
+    if !ok || object.kind != ArenaObjectKind.Instance {
+        return false;
+    }
+    var current = object.class_index;
+    var steps = 0;
+    while current != NULL_CLASS_ID && current < state_class_count(machine.pool)as u32
+        && steps < MAX_STATE_CLASSES {
+        if current == target_class {
+            return true;
+        }
+        current = state_class_superclass_id(machine.pool, current);
+        steps += 1;
+    }
+    return target_class == BUILTIN_OBJECT_CLASS_ID;
+}
 let NATIVE_FAIL: u64 = 0xFFFFFFFFFFFFFFFF;
 
 extern fn goose_abi_native_set_arg(index: i64, value: u64);
@@ -283,6 +341,17 @@ fn vm_call_builtin(
     }
     if name == "nil?" {
         return mrb_bool(mrb_is_nil(receiver)), true;
+    }
+    if name == "is_a?" {
+        if args.len != 1 {
+            machine.error = VmError.WrongArity;
+            return mrb_nil(), true;
+        }
+        if !mrb_is_class(args[0]) {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        return mrb_bool(vm_value_is_a(machine, receiver, mrb_class_id(args[0]))), true;
     }
     if name == "to_s" {
         return builtin_to_s(machine, receiver), true;

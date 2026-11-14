@@ -16,7 +16,16 @@ let MAX_VM_REGS = 1024;
 let MAX_VM_CALL_DEPTH = 64;
 let MAX_VM_METHODS = 4096;
 let MAX_VM_ARGS = 8;
+let BUILTIN_OBJECT_CLASS_ID: u32 = 0xFFFFFF00;
 let BUILTIN_ARRAY_CLASS_ID: u32 = 0xFFFFFF01;
+let BUILTIN_HASH_CLASS_ID: u32 = 0xFFFFFF03;
+let BUILTIN_INTEGER_CLASS_ID: u32 = 0xFFFFFF04;
+let BUILTIN_FLOAT_CLASS_ID: u32 = 0xFFFFFF05;
+let BUILTIN_STRING_CLASS_ID: u32 = 0xFFFFFF06;
+let BUILTIN_SYMBOL_CLASS_ID: u32 = 0xFFFFFF07;
+let BUILTIN_TRUE_CLASS_ID: u32 = 0xFFFFFF08;
+let BUILTIN_FALSE_CLASS_ID: u32 = 0xFFFFFF09;
+let BUILTIN_NIL_CLASS_ID: u32 = 0xFFFFFF0A;
 
 // Opcode bytes from mruby 4.0 `include/mruby/ops.h`.
 let OP_NOP: u8 = 0;
@@ -312,8 +321,36 @@ fn vm_concat_text(machine: Vm&, left: MrbValue, right: MrbValue) -> MrbValue {
 
 // Finds a class definition by its interned name symbol.
 fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
-    if symbol_name(name_symbol) == "Array" {
+    let name = symbol_name(name_symbol);
+    if name == "Object" {
+        return BUILTIN_OBJECT_CLASS_ID, true;
+    }
+    if name == "Array" {
         return BUILTIN_ARRAY_CLASS_ID, true;
+    }
+    if name == "Hash" {
+        return BUILTIN_HASH_CLASS_ID, true;
+    }
+    if name == "Integer" {
+        return BUILTIN_INTEGER_CLASS_ID, true;
+    }
+    if name == "Float" {
+        return BUILTIN_FLOAT_CLASS_ID, true;
+    }
+    if name == "String" {
+        return BUILTIN_STRING_CLASS_ID, true;
+    }
+    if name == "Symbol" {
+        return BUILTIN_SYMBOL_CLASS_ID, true;
+    }
+    if name == "TrueClass" {
+        return BUILTIN_TRUE_CLASS_ID, true;
+    }
+    if name == "FalseClass" {
+        return BUILTIN_FALSE_CLASS_ID, true;
+    }
+    if name == "NilClass" {
+        return BUILTIN_NIL_CLASS_ID, true;
     }
     for index in 0..pool.classes.len {
         if pool.classes[index].name_symbol == name_symbol {
