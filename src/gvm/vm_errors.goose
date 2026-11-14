@@ -34,6 +34,9 @@ enum VmError {
     JsonType,
     TimeType,
     TimeRange,
+    TimerDelay,
+    TimerCallback,
+    TimerHandle,
 }
 
 struct ErrorContext {
@@ -82,6 +85,9 @@ fn vm_error_name(err: VmError) -> u8[:] {
         JsonType => "unsupported JSON value or non-string object key",
         TimeType => "Time.at expects Integer or Float Unix seconds",
         TimeRange => "Time.at seconds must be between -8640000000000 and 8640000000000",
+        TimerDelay => "timer delay must be an Integer from 0 through 2147483647 milliseconds",
+        TimerCallback => "timer callback must name a zero-required-argument component method",
+        TimerHandle => "timer handle must be a positive Integer returned by Mochi.after or Mochi.every",
     };
 }
 

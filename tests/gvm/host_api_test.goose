@@ -309,16 +309,105 @@ fn test_host_route_timer_and_get_attr(t: goosetest::Test&) {
     t.assert_true(vm::goose_vm_host_outbox().len > 0);
     vm::goose_vm_clear_host_outbox();
 
+    let class_id = vm::state_define_class(machine.pool,
+        vm::intern_symbol("TimerOwner"), vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(machine.pool, class_id);
+    t.assert_true(vm::state_register_component(machine.pool, instance));
+    machine.frames.push(vm::CallFrame {
+            self_value: instance,
+            ..
+        });
+    machine.methods.push(vm::MethodEntry {
+            class_id: class_id,
+            name_symbol: vm::intern_symbol("tick"),
+            irep_index: 0,
+            ..
+        });
+    machine.file.records.push(vm::IrepRecord {
+            ..
+        });
     let timer_args: vm::MrbValue[2] = [
-        vm::mrb_fixnum(250),
-        vm::scratch_alloc_string(scratch, "tick"),
+        vm::mrb_fixnum(0),
+        vm::mrb_symbol(vm::intern_symbol("tick")),
     ];
     let tid, t_ok = vm::vm_call_mochi_builtin(machine, "after", timer_args[..]);
     t.assert_true(t_ok);
     t.assert_eq(1, vm::mrb_fixnum_value(tid));
+    var expected: u8[>..] = [];
+    expected.append("{\"__host\":\"timer\",\"kind\":\"after\",\"id\":1,\"ms\":0,\"instance\":\"");
+    vm::mrb_format_fixnum(expected, instance as!i64);
+    expected.append("\",\"callback\":\"tick\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+    vm::host_clear_outbox();
 
     let cancel_args: vm::MrbValue[1] = [tid];
     let c_val, c_ok = vm::vm_call_mochi_builtin(machine, "cancel_timer", cancel_args[..]);
     t.assert_true(c_ok);
     t.assert_true(vm::mrb_is_true(c_val));
+    expected.clear();
+    expected.append("{\"__host\":\"timer\",\"kind\":\"cancel\",\"id\":1,\"instance\":\"");
+    vm::mrb_format_fixnum(expected, instance as!i64);
+    expected.append("\"}\n");
+    t.assert_eq(expected[..], vm::host_outbox_bytes());
+    vm::host_clear_outbox();
+
+    let nil_handle: vm::MrbValue[1] = [vm::mrb_nil()];
+    let nil_cancel, nil_ok = vm::vm_call_mochi_builtin(machine, "cancel_timer", nil_handle[..]);
+    t.assert_true(nil_ok);
+    t.assert_true(vm::mrb_is_true(nil_cancel));
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+
+    let no_args: vm::MrbValue[0] = [];
+    let _, bad_arity_ok = vm::vm_call_mochi_builtin(machine, "every", no_args[..]);
+    t.assert_true(bad_arity_ok);
+    t.assert_eq(vm::VmError.WrongArity, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let extra_timer_args: vm::MrbValue[3] = [
+        vm::mrb_fixnum(1), vm::mrb_symbol(vm::intern_symbol("tick")), vm::mrb_nil(),
+    ];
+    let _, extra_timer_ok = vm::vm_call_mochi_builtin(machine, "after", extra_timer_args[..]);
+    t.assert_true(extra_timer_ok);
+    t.assert_eq(vm::VmError.WrongArity, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let negative_delay: vm::MrbValue[2] = [
+        vm::mrb_fixnum(-1), vm::mrb_symbol(vm::intern_symbol("tick")),
+    ];
+    let _, delay_ok = vm::vm_call_mochi_builtin(machine, "every", negative_delay[..]);
+    t.assert_true(delay_ok);
+    t.assert_eq(vm::VmError.TimerDelay, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let bad_callback: vm::MrbValue[2] = [
+        vm::mrb_fixnum(1), vm::mrb_symbol(vm::intern_symbol("missing_tick")),
+    ];
+    let _, callback_ok = vm::vm_call_mochi_builtin(machine, "after", bad_callback[..]);
+    t.assert_true(callback_ok);
+    t.assert_eq(vm::VmError.TimerCallback, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let callback_type: vm::MrbValue[2] = [vm::mrb_fixnum(1), vm::mrb_fixnum(7)];
+    let _, callback_type_ok = vm::vm_call_mochi_builtin(machine, "every", callback_type[..]);
+    t.assert_true(callback_type_ok);
+    t.assert_eq(vm::VmError.TimerCallback, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let extra_cancel_args: vm::MrbValue[2] = [tid, vm::mrb_nil()];
+    let _, extra_cancel_ok = vm::vm_call_mochi_builtin(machine, "cancel_timer", extra_cancel_args[..]);
+    t.assert_true(extra_cancel_ok);
+    t.assert_eq(vm::VmError.WrongArity, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
+    machine.error = vm::VmError.Ok;
+
+    let bad_handle: vm::MrbValue[1] = [vm::scratch_alloc_string(scratch, "not a timer")];
+    let _, handle_ok = vm::vm_call_mochi_builtin(machine, "cancel_timer", bad_handle[..]);
+    t.assert_true(handle_ok);
+    t.assert_eq(vm::VmError.TimerHandle, machine.error);
+    t.assert_eq(0, vm::host_outbox_bytes().len);
 }

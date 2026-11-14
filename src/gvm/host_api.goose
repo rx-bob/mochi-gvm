@@ -264,20 +264,63 @@ fn vm_call_mochi_events(
 fn vm_call_mochi_timer(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
-    if (name == "after" || name == "every") && args.len >= 2 && mrb_is_fixnum(args[0]) {
+    if name == "after" || name == "every" {
+        if args.len != 2 {
+            machine.error = VmError.WrongArity;
+            return mrb_nil(), true;
+        }
+        if !num_is_integer(machine.scratch, machine.pool, args[0]) {
+            machine.error = VmError.TypeMismatch;
+            return mrb_nil(), true;
+        }
+        let ms, ms_ok = num_integer_value(machine.scratch, machine.pool, args[0]);
+        if !ms_ok || ms < 0 || ms > 2147483647 {
+            machine.error = VmError.TimerDelay;
+            return mrb_nil(), true;
+        }
+        if !mrb_is_symbol(args[1]) && !vm_is_string_value(machine, args[1]) {
+            machine.error = VmError.TimerCallback;
+            return mrb_nil(), true;
+        }
         var cbuf: u8[>..] = [];
         let cb = host_arg_text(machine, args[1], cbuf);
         if cb.len == 0 {
-            return mrb_fixnum(-1), true;
+            machine.error = VmError.TimerCallback;
+            return mrb_nil(), true;
         }
-        let ms = mrb_fixnum_value(args[0]);
+
+        let instance, has_instance = host_current_component_instance(machine);
+        if !has_instance {
+            machine.error = VmError.TimerCallback;
+            return mrb_nil(), true;
+        }
+        let class_id, is_component = vm_owner_class_id(machine, instance);
+        if !is_component {
+            machine.error = VmError.TimerCallback;
+            return mrb_nil(), true;
+        }
+        let callback_symbol = if mrb_is_symbol(args[1]) {
+            mrb_symbol_id(args[1])
+        } else {
+            intern_symbol(cb)
+        };
+        let callback_irep, callback_found = vm_lookup_method(machine, class_id, callback_symbol);
+        if !callback_found || callback_irep < 0 || callback_irep >= machine.file.records.len {
+            machine.error = VmError.TimerCallback;
+            return mrb_nil(), true;
+        }
+        let callback_iseq = record_iseq(machine.file, machine.file.records[callback_irep]);
+        let required_args, has_enter = vm_required_args(callback_iseq);
+        if has_enter && required_args > 0 {
+            machine.error = VmError.WrongArity;
+            return mrb_nil(), true;
+        }
+        if g_host_next_timer_id > 9007199254740991 {
+            machine.error = VmError.TimerHandle;
+            return mrb_nil(), true;
+        }
         let timer_id = g_host_next_timer_id;
         g_host_next_timer_id += 1;
-        let self_val = if machine.frames.len > 0 {
-            machine.frames[machine.frames.len - 1].self_value
-        } else {
-            mrb_nil()
-        };
         g_host_outbox.append("{\"__host\":\"timer\",\"kind\":");
         host_append_json_escaped(g_host_outbox, name);
         g_host_outbox.append(",\"id\":");
@@ -285,16 +328,39 @@ fn vm_call_mochi_timer(
         g_host_outbox.append(",\"ms\":");
         mrb_format_fixnum(g_host_outbox, ms);
         g_host_outbox.append(",\"instance\":\"");
-        mrb_format_fixnum(g_host_outbox, self_val as!i64);
+        mrb_format_fixnum(g_host_outbox, instance as!i64);
         g_host_outbox.append("\",\"callback\":");
         host_append_json_escaped(g_host_outbox, cb);
         g_host_outbox.append("}\n");
         return mrb_fixnum(timer_id), true;
     }
-    if name == "cancel_timer" && args.len >= 1 && mrb_is_fixnum(args[0]) {
-        let timer_id = mrb_fixnum_value(args[0]);
+    if name == "cancel_timer" {
+        if args.len != 1 {
+            machine.error = VmError.WrongArity;
+            return mrb_nil(), true;
+        }
+        if mrb_is_nil(args[0]) {
+            return mrb_true(), true;
+        }
+        if !num_is_integer(machine.scratch, machine.pool, args[0]) {
+            machine.error = VmError.TimerHandle;
+            return mrb_nil(), true;
+        }
+        let timer_id, id_ok = num_integer_value(machine.scratch, machine.pool, args[0]);
+        if !id_ok || timer_id <= 0 || timer_id > 9007199254740991 {
+            machine.error = VmError.TimerHandle;
+            return mrb_nil(), true;
+        }
+        let instance, has_instance = host_current_component_instance(machine);
+        if !has_instance {
+            machine.error = VmError.TimerHandle;
+            return mrb_nil(), true;
+        }
         g_host_outbox.append("{\"__host\":\"timer\",\"kind\":\"cancel\",\"id\":");
         mrb_format_fixnum(g_host_outbox, timer_id);
+        g_host_outbox.append(",\"instance\":\"");
+        mrb_format_fixnum(g_host_outbox, instance as!i64);
+        g_host_outbox.append("\"");
         g_host_outbox.append("}\n");
         return mrb_true(), true;
     }
