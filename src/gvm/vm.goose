@@ -16,6 +16,7 @@ import.rite_types;
 import.scratch_alloc;
 import.signals;
 import.state_pool;
+import.time_value;
 import.value_arena;
 import.vm_blocks;
 import.vm_constants;

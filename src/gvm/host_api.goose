@@ -10,6 +10,7 @@ import.rite_types;
 import.scratch_alloc;
 import.signals;
 import.state_pool;
+import.time_value;
 import.value_arena;
 import.vm_core;
 import.vm_methods;
@@ -449,6 +450,9 @@ fn vm_call_mochi_attr(
 fn vm_call_mochi_builtin(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    if name == "time_at" {
+        return time_at(machine, args), true;
+    }
     let json_value, json_handled = vm_call_json(machine, name, args);
     if json_handled {
         return json_value, true;

@@ -32,6 +32,8 @@ enum VmError {
     JsonLimit,
     JsonCycle,
     JsonType,
+    TimeType,
+    TimeRange,
 }
 
 struct ErrorContext {
@@ -78,6 +80,8 @@ fn vm_error_name(err: VmError) -> u8[:] {
         JsonLimit => "JSON byte or nesting limit exceeded",
         JsonCycle => "cyclic JSON value",
         JsonType => "unsupported JSON value or non-string object key",
+        TimeType => "Time.at expects Integer or Float Unix seconds",
+        TimeRange => "Time.at seconds must be between -8640000000000 and 8640000000000",
     };
 }
 

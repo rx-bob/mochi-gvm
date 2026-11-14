@@ -353,6 +353,18 @@ static mrb_value mochi_format_date_native(mrb_state *mrb, mrb_value self) {
   return mochi_format_native(mrb, self, "date");
 }
 
+static mrb_value mochi_format_timestamp_native(mrb_state *mrb, mrb_value self) {
+  return mochi_format_native(mrb, self, "timestamp");
+}
+
+static mrb_value mochi_time_now_native(mrb_state *mrb, mrb_value self) {
+  (void)self;
+  if (mrb_get_args(mrb, "") != 0) {
+    return mochi_host_failure(mrb, "Time.now takes no arguments");
+  }
+  return mochi_capability_sync(mrb, "time", "now", NULL, NULL, 0);
+}
+
 /* Ruby-callable: Mochi.fetch(url, callback, options = {}).
  * Legacy form: Mochi.fetch(component_id, url, callback).
  * Appends one JSON request line to the outbox. New-form requests resolve the
@@ -726,6 +738,11 @@ int32_t mochi_init_runtime(void) {
   mrb_define_module_function(g_mrb, mochi, "format_date",
                              mochi_format_date_native,
                              MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "format_timestamp",
+                             mochi_format_timestamp_native,
+                             MRB_ARGS_REQ(1) | MRB_ARGS_OPT(1));
+  mrb_define_module_function(g_mrb, mochi, "time_now",
+                             mochi_time_now_native, MRB_ARGS_NONE());
   mrb_define_module_function(g_mrb, mochi, "host_async",
                              mochi_host_async_native,
                              MRB_ARGS_REQ(4));
