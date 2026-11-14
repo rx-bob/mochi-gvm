@@ -31,6 +31,8 @@ let JSON_CLOSE_OBJECT: u8 = 125;
 struct JsonCursor {
     at: i64,
     failed: bool,
+    transport: bool = true,
+    limit: bool = false,
 }
 
 fn json_skip_whitespace(data: const u8[:], cursor: JsonCursor&) {
@@ -430,11 +432,19 @@ recursive fn json_parse_value(
     if byte == JSON_QUOTE {
         return json_parse_string(scratch, data, cursor);
     }
+    if !cursor.transport && depth >= JSON_MAX_DEPTH && (byte == JSON_OPEN_OBJECT || byte == JSON_OPEN_ARRAY) {
+        cursor.failed = true;
+        cursor.limit = true;
+        return mrb_nil();
+    }
     if byte == JSON_OPEN_OBJECT {
         cursor.at += 1;
         let object = json_parse_object(pool, scratch, data, cursor, depth + 1);
         if cursor.failed {
             return mrb_nil();
+        }
+        if !cursor.transport {
+            return object;
         }
         let decoded, wrapped, wrapper_ok = json_number_wrapper(scratch, object);
         if wrapped {

@@ -28,6 +28,10 @@ enum VmError {
     NoConstant,
     ComputedEffect,
     ComputedReentry,
+    JsonInvalid,
+    JsonLimit,
+    JsonCycle,
+    JsonType,
 }
 
 struct ErrorContext {
@@ -70,6 +74,10 @@ fn vm_error_name(err: VmError) -> u8[:] {
         Disposed => "disposed instance",
         ComputedEffect => "computed evaluation must not mutate state or emit host effects",
         ComputedReentry => "reentrant computed evaluation",
+        JsonInvalid => "invalid JSON or UTF-8",
+        JsonLimit => "JSON byte or nesting limit exceeded",
+        JsonCycle => "cyclic JSON value",
+        JsonType => "unsupported JSON value or non-string object key",
     };
 }
 

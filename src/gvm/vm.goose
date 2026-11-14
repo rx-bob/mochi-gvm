@@ -8,6 +8,7 @@ import.builtins_ext;
 import.collection_arena;
 import.host_api;
 import.json_args;
+import.json_codec;
 import.rite_bytes;
 import.rite_parser;
 import.rite_pool;

@@ -5,6 +5,7 @@ import.builtins;
 import.drag_api;
 import.files_api;
 import.json_args;
+import.json_codec;
 import.rite_types;
 import.scratch_alloc;
 import.signals;
@@ -448,6 +449,10 @@ fn vm_call_mochi_attr(
 fn vm_call_mochi_builtin(
     machine: Vm&, name: u8[:], args: MrbValue[:]
 ) -> MrbValue, bool {
+    let json_value, json_handled = vm_call_json(machine, name, args);
+    if json_handled {
+        return json_value, true;
+    }
     if machine.pool.computed_depth > 0 {
         machine.error = VmError.ComputedEffect;
         return mrb_nil(), true;
