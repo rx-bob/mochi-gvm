@@ -189,20 +189,22 @@ fn test_unshift_capacity_failure_and_recovery(t: goosetest::Test&) {
     let array = vm::builtin_array_new(scratch);
     t.assert_true(vm::builtin_array_push(pool, scratch, array, vm::mrb_fixnum(3)));
     let filler = vm::builtin_array_new(scratch);
-    for _ in vm::SCRATCH_CAPACITY_SLOTS - 1 {
+    for _ in vm::SCRATCH_CAPACITY_SLOTS - 2 {
         t.assert_true(vm::builtin_array_push(pool, scratch, filler, vm::mrb_fixnum(0)));
     }
-    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
-    let failed = vm::builtin_array_unshift(pool, scratch, array, one[..]);
+    let two: vm::MrbValue[2] = [vm::mrb_fixnum(1), vm::mrb_fixnum(2)];
+    let failed = vm::builtin_array_unshift(pool, scratch, array, two[..]);
     t.assert_true(vm::mrb_is_nil(failed));
     t.assert_true(scratch.overflow);
     t.assert_eq(vm::ScratchResource.Slots, scratch.failure.resource);
-    t.assert_eq(1, vm::builtin_array_length(pool, scratch, array));
-    t.assert_eq(3, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, array, 0)));
+    t.assert_eq(2, vm::builtin_array_length(pool, scratch, array));
+    t.assert_eq(2, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, array, 0)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, array, 1)));
 
     vm::scratch_reset(scratch);
     let recovered = vm::builtin_array_new(scratch);
     t.assert_true(vm::builtin_array_push(pool, scratch, recovered, vm::mrb_fixnum(3)));
+    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
     let result = vm::builtin_array_unshift(pool, scratch, recovered, one[..]);
     t.assert_true(vm::mrb_value_identical(result, recovered));
     t.assert_eq(1, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, recovered, 0)));
@@ -228,25 +230,28 @@ fn test_unshift_state_capacity_and_recovery(t: goosetest::Test&) {
     let array = vm::state_alloc_array(pool);
     t.assert_true(vm::state_array_push(pool, array, vm::mrb_fixnum(3)));
     let filler = vm::state_alloc_array(pool);
-    for _ in vm::MAX_STATE_SLOTS - 1 {
+    for _ in vm::MAX_STATE_SLOTS - 2 {
         vm::state_array_push(pool, filler, vm::mrb_fixnum(0));
     }
-    t.assert_eq(vm::MAX_STATE_SLOTS - 1, vm::state_array_length(pool, filler));
-    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
-    let failed = vm::builtin_array_unshift(pool, scratch, array, one[..]);
+    t.assert_eq(vm::MAX_STATE_SLOTS - 2, vm::state_array_length(pool, filler));
+    let two: vm::MrbValue[2] = [vm::mrb_fixnum(1), vm::mrb_fixnum(2)];
+    let failed = vm::builtin_array_unshift(pool, scratch, array, two[..]);
     t.assert_true(vm::mrb_is_nil(failed));
     t.assert_eq(vm::VmError.StateCapacity, pool.error);
     t.assert_eq(vm::CapacityResource.StateSlots, pool.failure.resource);
-    t.assert_eq(1, vm::state_array_length(pool, array));
-    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 0)));
+    t.assert_eq(2, vm::state_array_length(pool, array));
+    t.assert_eq(2, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 0)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 1)));
 
     vm::vm_begin_entry(machine);
     t.assert_true(vm::mrb_is_fixnum(vm::state_array_pop(pool, filler)));
+    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
     let recovered = vm::builtin_array_unshift(pool, scratch, array, one[..]);
     t.assert_true(vm::mrb_value_identical(recovered, array));
-    t.assert_eq(2, vm::state_array_length(pool, array));
+    t.assert_eq(3, vm::state_array_length(pool, array));
     t.assert_eq(1, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 0)));
-    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 1)));
+    t.assert_eq(2, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 1)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 2)));
 }
 
 fn test_scratch_hash_get_set_and_update(t: goosetest::Test&) {
