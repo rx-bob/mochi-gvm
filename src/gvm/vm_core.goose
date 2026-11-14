@@ -93,6 +93,12 @@ let OP_MODULE: u8 = 104;
 let OP_EXEC: u8 = 105;
 let OP_TDEF: u8 = 107;
 let OP_SDEF: u8 = 108;
+let OP_METHOD: u8 = 99;
+let OP_DEF: u8 = 106;
+let OP_TCLASS: u8 = 112;
+let OP_EXT1: u8 = 115;
+let OP_EXT2: u8 = 116;
+let OP_EXT3: u8 = 117;
 let OP_STOP: u8 = 118;
 
 enum StepKind {
@@ -123,6 +129,8 @@ struct CallFrame {
     env_frame: i64 = -1,
     argc: i64 = 0,
     lexical_owner: u32 = NULL_CLASS_ID,
+    pending_method_irep: i64 = -1,
+    pending_method_register: i64 = -1,
 }
 
 struct Step {

@@ -89,3 +89,92 @@ fn lower(source: const u8[:], output: u8[>..]&) -> i64 {
     }
     return changed;
 }
+
+fn find_matching_brace_line(lines: const u8[:][:], start_index: i64) -> i64 {
+    var index = start_index + 1;
+    while index < lines.len {
+        if lines[index] == "}" {
+            return index;
+        }
+        index += 1;
+    }
+    return -1;
+}
+
+fn wasm_body_replacement(line: const u8[:]) -> const u8[:], bool {
+    if line == "static GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {" {
+        return "    (void)msg; (void)len; (void)file; (void)line;\n    __builtin_trap();", true;
+    }
+    if line == "static GS_NORETURN void gs_failf(const char *file, int line, const char *fmt, ...) {" {
+        return "    (void)file; (void)line; (void)fmt;\n    __builtin_trap();", true;
+    }
+    if line == "GS_API void gs_stack_stats(int64_t stacks) {" {
+        return "    (void)stacks;", true;
+    }
+    if line == "static void gs_fault_handler(int sig, siginfo_t *info, void *ctx) {" {
+        return "    (void)sig; (void)info; (void)ctx;\n    __builtin_trap();", true;
+    }
+    if line == "static void gs_regions_init(void) {" {
+        return "    gs_page_size = gs_os_page_size();", true;
+    }
+    if line == "static void gs_native_stack_init(void) {"
+        || line == "static void gs_native_stack_free(void) {"
+        || line == "static void gs_fault_uninstall(void) {" {
+        return "", true;
+    }
+    return "", false;
+}
+
+// Strip POSIX-only signal/stdio/setjmp runtime code and per-file bounds-check
+// metadata from the generated C when targeting Wasm.
+fn lower_wasm_runtime(source: const u8[:], output: u8[>..]&) -> bool {
+    let lines = split(source, '\n');
+    var index = 0;
+    while index < lines.len {
+        let line = lines[index];
+        let body, matched_fn = wasm_body_replacement(line);
+        if matched_fn {
+            let end_index = find_matching_brace_line(lines, index);
+            if end_index < 0 {
+                return false;
+            }
+            output.append(line);
+            output.push('\n');
+            if body.len > 0 {
+                output.append(body);
+                output.push('\n');
+            }
+            output.append("}");
+            if end_index + 1 < lines.len {
+                output.push('\n');
+            }
+            index = end_index + 1;
+            continue;
+        }
+        if line == "                                   : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))" {
+            output.append("                                   : (__builtin_trap(), (int64_t)0))");
+        } else if line == "    fprintf(stderr, \"goose runtime error: %s\\n\", msg);" {
+            output.append("    (void)msg; __builtin_trap();");
+        } else if line == "    for (;;) pause();" {
+            output.append("    __builtin_trap();");
+        } else if line == "    setvbuf(stdout, NULL, _IONBF, 0);"
+            || line == "    fflush(NULL);" {
+            output.append("    /* stripped for wasm */");
+        } else if starts_with(line, "static const char gs_file") {
+            let eq_at = find(line, " = \"");
+            if eq_at >= 0 {
+                output.append(line[..eq_at]);
+                output.append(" = \"\";");
+            } else {
+                output.append(line);
+            }
+        } else {
+            output.append(line);
+        }
+        if index + 1 < lines.len {
+            output.push('\n');
+        }
+        index += 1;
+    }
+    return true;
+}

@@ -551,7 +551,7 @@ fn test_abi_failed_initialize_rolls_back_mount(t: goosetest::Test&) {
     let failed = vm::abi_obj_new(vm::mrb_class_id(failing_class));
     t.assert_true(vm::mrb_is_nil(failed));
     t.assert_true(vm::abi_has_error());
-    t.assert_eq("FailingInit#missing_helper: unknown method", vm::abi_last_error());
+    t.assert_eq("FailingInit#missing_helper: unknown method missing_helper", vm::abi_last_error());
     t.assert_eq(0, vm::abi_binding_count());
     t.assert_eq(0, vm::abi_component_count());
 

@@ -25,3 +25,15 @@ fn test_changed_initialization_rejected(t: goosetest::Test&) {
     var output: u8[>..] = [];
     t.assert_eq(-1, static_storage::lower(changed, output));
 }
+
+fn test_lower_wasm_runtime(t: goosetest::Test&) {
+    let sample = "#define GS_IDX(i, n, f, l) \\\n    ((uint64_t)(i) < (uint64_t)(n) ? (i) \\\n                                   : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))\nstatic const char gs_file0[] = \"src/gvm/vm_num.goose\";\nstatic GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {\n    fprintf(stderr, \"fail\\n\");\n}\nstatic GS_NORETURN void gs_park(void) {\n    for (;;) pause();\n}\nstatic void gs_regions_init(void) {\n    sigaction(SIGSEGV, &sa, &gs_prev_segv);\n}\n";
+    var output: u8[>..] = [];
+    t.assert_true(static_storage::lower_wasm_runtime(sample, output));
+    t.assert_true(find(output[..], "__builtin_trap()") >= 0);
+    t.assert_true(find(output[..], "gs_idxfail") < 0);
+    t.assert_true(find(output[..], "src/gvm/vm_num.goose") < 0);
+    t.assert_true(find(output[..], "fprintf") < 0);
+    t.assert_true(find(output[..], "pause()") < 0);
+    t.assert_true(find(output[..], "sigaction") < 0);
+}

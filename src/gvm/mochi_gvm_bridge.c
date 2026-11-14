@@ -16,7 +16,6 @@
 #include "mochi_capacity_profile.h"
 
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -163,11 +162,82 @@ static void set_error_text(const char *text) {
   g_error_len = (int32_t)length;
 }
 
+static void copy_cstr_bounded(char *dst, size_t cap, const char *src) {
+  size_t length;
+  if (!dst || cap == 0) return;
+  if (!src) {
+    dst[0] = '\0';
+    return;
+  }
+  length = strlen(src);
+  if (length >= cap) length = cap - 1;
+  memcpy(dst, src, length);
+  dst[length] = '\0';
+}
+
+static int format_u64_decimal(char *dst, size_t cap, uint64_t value) {
+  char digits[21];
+  size_t count = 0;
+  size_t index;
+  if (!dst || cap < 2) return -1;
+  do {
+    digits[count++] = (char)('0' + (value % 10));
+    value /= 10;
+  } while (value > 0);
+  if (count + 1 > cap) return -1;
+  for (index = 0; index < count; index++) {
+    dst[index] = digits[count - 1 - index];
+  }
+  dst[count] = '\0';
+  return (int)count;
+}
+
+static int format_i64_decimal(char *dst, size_t cap, int64_t value) {
+  uint64_t magnitude;
+  size_t offset = 0;
+  int written;
+  if (!dst || cap < 2) return -1;
+  if (value < 0) {
+    dst[0] = '-';
+    offset = 1;
+    magnitude = (uint64_t)(-(value + 1)) + 1u;
+  } else {
+    magnitude = (uint64_t)value;
+  }
+  written = format_u64_decimal(dst + offset, cap - offset, magnitude);
+  if (written < 0) return -1;
+  return (int)offset + written;
+}
+
+static void append_cstr_bounded(char *dst, size_t cap, size_t *at, const char *src) {
+  size_t length;
+  if (!dst || !at || *at >= cap || !src) return;
+  length = strlen(src);
+  if (length > cap - 1 - *at) length = cap - 1 - *at;
+  if (length > 0) memcpy(dst + *at, src, length);
+  *at += length;
+  dst[*at] = '\0';
+}
+
+static void append_i64_bounded(char *dst, size_t cap, size_t *at, int64_t value) {
+  char digits[24];
+  int len = format_i64_decimal(digits, sizeof(digits), value);
+  if (len > 0) append_cstr_bounded(dst, cap, at, digits);
+}
+
 static void set_capacity_error(const char *resource, int64_t requested,
                                int64_t used, int64_t capacity) {
   char text[256];
-  snprintf(text, sizeof(text), "%s exhausted (requested %lld, used %lld of %lld)",
-           resource, (long long)requested, (long long)used, (long long)capacity);
+  size_t at = 0;
+  text[0] = '\0';
+  append_cstr_bounded(text, sizeof(text), &at, resource);
+  append_cstr_bounded(text, sizeof(text), &at, " exhausted (requested ");
+  append_i64_bounded(text, sizeof(text), &at, requested);
+  append_cstr_bounded(text, sizeof(text), &at, ", used ");
+  append_i64_bounded(text, sizeof(text), &at, used);
+  append_cstr_bounded(text, sizeof(text), &at, " of ");
+  append_i64_bounded(text, sizeof(text), &at, capacity);
+  append_cstr_bounded(text, sizeof(text), &at, ")");
   set_error_text(text);
 }
 
@@ -243,7 +313,7 @@ static int mochi_host_dispatch_js(const char *capability, const char *operation,
   (void)out;
   (void)cap;
   if (err && err_cap > 0) {
-    snprintf(err, (size_t)err_cap, "host capability is unavailable");
+    copy_cstr_bounded(err, (size_t)err_cap, "host capability is unavailable");
   }
   return -1;
 }
@@ -252,7 +322,7 @@ static int mochi_host_dispatch_js(const char *capability, const char *operation,
 static mrb_value mochi_host_failure(mrb_state *mrb, const char *text) {
   if (!text || text[0] == '\0') text = "host capability failed";
   if (text != g_host_error) {
-    snprintf(g_host_error, sizeof(g_host_error), "%s", text);
+    copy_cstr_bounded(g_host_error, sizeof(g_host_error), text);
   }
   goose_vm_set_host_error(slice_of(g_host_error, strlen(g_host_error)));
   mochi_abi_set_error(mrb, g_host_error);
@@ -363,7 +433,7 @@ EM_JS(int, mochi_download_js,
 static int mochi_download_js(const char *owner, const char *filename, int filename_len,
                             const char *mime, int mime_len, const uint32_t *parts, int count,
                             char *err, int err_cap) {
-  snprintf(err, (size_t)err_cap, "download requires a browser host");
+  copy_cstr_bounded(err, (size_t)err_cap, "download requires a browser host");
   return -1;
 }
 #endif
@@ -392,7 +462,7 @@ static mrb_value mochi_download_native(mrb_state *mrb, mrb_value self) {
     parts[index * 2] = (uint32_t)(uintptr_t)RSTRING_PTR(part);
     parts[index * 2 + 1] = (uint32_t)RSTRING_LEN(part);
   }
-  snprintf(owner, sizeof(owner), "%llu", (unsigned long long)goose_vm_current_self());
+  format_u64_decimal(owner, sizeof(owner), (uint64_t)goose_vm_current_self());
   if (mochi_download_js(owner, RSTRING_PTR(filename), (int)RSTRING_LEN(filename),
       RSTRING_PTR(mime), (int)RSTRING_LEN(mime), parts, (int)count,
       g_host_error, (int)sizeof(g_host_error)) != 0) {
@@ -472,8 +542,8 @@ static mrb_value mochi_fetch_native(mrb_state *mrb, mrb_value self) {
     if (!mrb_string_p(first)) return mrb_fixnum_value(-1);
     instance_handle = goose_vm_current_self();
     if (instance_handle == 0) return mrb_fixnum_value(-1);
-    instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
-                            (unsigned long long)instance_handle);
+    instance_len = format_u64_decimal(instance_text, sizeof(instance_text),
+                                      (uint64_t)instance_handle);
     if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
       return mrb_fixnum_value(-1);
     }
@@ -520,8 +590,8 @@ static mrb_value mochi_cancel_fetch_native(mrb_state *mrb, mrb_value self) {
   if (fetch_id <= 0) return mrb_false_value();
   instance_handle = goose_vm_current_self();
   if (instance_handle == 0) return mrb_false_value();
-  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
-                          (unsigned long long)instance_handle);
+  instance_len = format_u64_decimal(instance_text, sizeof(instance_text),
+                                    (uint64_t)instance_handle);
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mrb_false_value();
   }
@@ -593,8 +663,8 @@ static mrb_value mochi_emit_native(mrb_state *mrb, mrb_value self) {
   }
   instance_handle = goose_vm_current_self();
   if (instance_handle == 0) return mrb_fixnum_value(-1);
-  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
-                          (unsigned long long)instance_handle);
+  instance_len = format_u64_decimal(instance_text, sizeof(instance_text),
+                                    (uint64_t)instance_handle);
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mrb_fixnum_value(-1);
   }
@@ -682,8 +752,8 @@ static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
 
   instance_handle = goose_vm_current_self();
   if (instance_handle == 0) return mrb_fixnum_value(-1);
-  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
-                          (unsigned long long)instance_handle);
+  instance_len = format_u64_decimal(instance_text, sizeof(instance_text),
+                                    (uint64_t)instance_handle);
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mrb_fixnum_value(-1);
   }
@@ -752,8 +822,8 @@ static mrb_value mochi_host_async_native(mrb_state *mrb, mrb_value self) {
   if (instance_handle == 0) {
     return mochi_host_failure(mrb, "host_async must run inside a component");
   }
-  instance_len = snprintf(instance_text, sizeof(instance_text), "%llu",
-                          (unsigned long long)instance_handle);
+  instance_len = format_u64_decimal(instance_text, sizeof(instance_text),
+                                    (uint64_t)instance_handle);
   if (instance_len <= 0 || instance_len >= (int)sizeof(instance_text)) {
     return mochi_host_failure(mrb, "invalid component instance");
   }

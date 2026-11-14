@@ -60,9 +60,11 @@ fn generate_goose_c() {
     run(command[..]);
     var generated: u8[>..] = [];
     var lowered: u8[>..] = [];
+    var wasm_lowered: u8[>..] = [];
     if !read_file(GOOSE_C, generated)
         || static_storage::lower(generated, lowered) != 10
-        || !write_file(GOOSE_C, lowered) {
+        || !static_storage::lower_wasm_runtime(lowered, wasm_lowered)
+        || !write_file(GOOSE_C, wasm_lowered) {
         print("build_wasm failed: persistent storage initialization layout changed");
         exit(1);
     }
@@ -70,7 +72,7 @@ fn generate_goose_c() {
 
 fn compile_bridge() {
     var command: u8[>..] = [];
-    command.append("emcc -Oz -fwasm-exceptions -sSUPPORT_LONGJMP=wasm ");
+    command.append("emcc -Oz -flto -sFILESYSTEM=0 -sMALLOC=emmalloc --closure 1 ");
     command.append("-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE ");
     command.append("-sEXPORTED_FUNCTIONS='[\"_main\",\"_mochi_capacity_fingerprint\",\"_mochi_capacity_profile\",");
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
@@ -124,9 +126,8 @@ fn compile_bridge() {
 
 fn optimize_wasm() {
     var command: u8[>..] = [];
-    command.append("wasm-opt -Oz --strip-debug --strip-producers ");
-    command.append("--enable-bulk-memory --enable-exception-handling ");
-    command.append("--enable-nontrapping-float-to-int ");
+    command.append("wasm-opt -Oz --converge --strip-debug --strip-producers ");
+    command.append("--enable-bulk-memory --enable-nontrapping-float-to-int ");
     command.append(WASM_BIN);
     command.append(" -o ");
     command.append(WASM_OPT_BIN);

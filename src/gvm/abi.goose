@@ -73,8 +73,8 @@ fn abi_fail(text: u8[:]) {
 fn abi_format_error_context() -> u8[>..] {
     var text: u8[>..] = [];
     let class_id = g_abi_machine.error_context.class_id;
-    if class_id < state_class_count(g_abi_pool)as u32 {
-        text.append(symbol_name(state_class_name_symbol(g_abi_pool, class_id)));
+    if class_id < state_class_count(g_abi_machine.pool)as u32 {
+        text.append(symbol_name(state_class_name_symbol(g_abi_machine.pool, class_id)));
         if g_abi_machine.error_context.method_symbol != NULL_SYMBOL {
             text.append("#");
             text.append(symbol_name(g_abi_machine.error_context.method_symbol));
@@ -166,7 +166,7 @@ fn abi_reset() {
     g_abi_pool.tracking_instance_generation = 0;
     g_abi_pool.error = VmError.Ok;
 
-    scratch_reset(g_abi_scratch);
+    scratch_reset(g_abi_machine.scratch);
     g_abi_scratch.allocated_objects_total = 0;
     g_abi_scratch.allocated_bytes_total = 0;
     g_abi_scratch.reset_count = 0;
@@ -207,18 +207,18 @@ fn abi_define_class(name_symbol: u32, superclass_id: u32) -> u32 {
     if builtin != NULL_CLASS_ID {
         return builtin;
     }
-    let existing, found = vm_find_class(g_abi_pool, name_symbol);
+    let existing, found = vm_find_class(g_abi_machine.pool, name_symbol);
     if found {
         return existing;
     }
-    if state_class_count(g_abi_pool) >= MAX_STATE_CLASSES {
-        state_fail_capacity(g_abi_pool, CapacityResource.Classes, 1,
-            state_class_count(g_abi_pool), MAX_STATE_CLASSES);
+    if state_class_count(g_abi_machine.pool) >= MAX_STATE_CLASSES {
+        state_fail_capacity(g_abi_machine.pool, CapacityResource.Classes, 1,
+            state_class_count(g_abi_machine.pool), MAX_STATE_CLASSES);
         g_abi_machine.error = VmError.StateCapacity;
         abi_record_vm_error(g_abi_machine);
         return NULL_CLASS_ID;
     }
-    return state_define_class(g_abi_pool, name_symbol, superclass_id);
+    return state_define_class(g_abi_machine.pool, name_symbol, superclass_id);
 }
 
 fn abi_open() -> i64 {
@@ -296,7 +296,7 @@ fn abi_define_native(
 ) -> i64 {
     abi_clear_error();
     let builtin = class_id >= BUILTIN_ARRAY_CLASS_ID || class_id == ABI_OBJECT_CLASS_ID;
-    if !builtin && class_id >= state_class_count(g_abi_pool)as u32 {
+    if !builtin && class_id >= state_class_count(g_abi_machine.pool)as u32 {
         abi_fail("unknown class");
         return -1;
     }
@@ -323,7 +323,7 @@ fn abi_const_get(name_symbol: u32) -> u64 {
         abi_record_vm_error(g_abi_machine);
         return mrb_nil();
     }
-    let class_id, found = vm_find_class(g_abi_pool, name_symbol);
+    let class_id, found = vm_find_class(g_abi_machine.pool, name_symbol);
     if !found {
         abi_fail("unknown class");
         return mrb_nil();
@@ -333,11 +333,11 @@ fn abi_const_get(name_symbol: u32) -> u64 {
 
 fn abi_obj_new(class_id: u32) -> u64 {
     abi_clear_error();
-    if class_id >= BUILTIN_ARRAY_CLASS_ID || class_id >= state_class_count(g_abi_pool)as u32 {
+    if class_id >= BUILTIN_ARRAY_CLASS_ID || class_id >= state_class_count(g_abi_machine.pool)as u32 {
         abi_fail("unknown class");
         return mrb_nil();
     }
-    let name_symbol = state_class_name_symbol(g_abi_pool, class_id);
+    let name_symbol = state_class_name_symbol(g_abi_machine.pool, class_id);
     let value = vm_instantiate(g_abi_machine, name_symbol);
     abi_record_vm_error(g_abi_machine);
     return value;
@@ -348,11 +348,11 @@ fn abi_obj_new(class_id: u32) -> u64 {
 // after it so initialization cannot overwrite a parent-supplied input.
 fn abi_obj_new_with_props(class_id: u32, props_json: const u8[:]) -> u64 {
     abi_clear_error();
-    if class_id >= BUILTIN_ARRAY_CLASS_ID || class_id >= state_class_count(g_abi_pool)as u32 {
+    if class_id >= BUILTIN_ARRAY_CLASS_ID || class_id >= state_class_count(g_abi_machine.pool)as u32 {
         abi_fail("unknown class");
         return mrb_nil();
     }
-    let name_symbol = state_class_name_symbol(g_abi_pool, class_id);
+    let name_symbol = state_class_name_symbol(g_abi_machine.pool, class_id);
     let value = vm_instantiate_with_props(g_abi_machine, name_symbol, props_json);
     abi_record_vm_error(g_abi_machine);
     return value;
@@ -404,26 +404,32 @@ fn abi_method_req_argc(receiver: u64, method_symbol: u32) -> i64 {
     return required;
 }
 
+fn abi_call_json_on(
+    machine: Vm&, receiver: u64, method_symbol: u32, json: const u8[:]
+) -> u64 {
+    abi_clear_error();
+    machine.error = VmError.Ok;
+    vm_begin_entry(machine);
+    var args: MrbValue[>..] = [];
+    if !json_parse_args(machine.pool, machine.scratch, json, args) {
+        abi_record_call_context(receiver, method_symbol);
+        abi_input_failure("bad JSON argument list");
+        vm_end_entry(machine);
+        return mrb_nil();
+    }
+    let result = vm_call_args_prepared(machine, receiver, method_symbol, args[..]);
+    abi_record_call_context(receiver, method_symbol);
+    abi_record_vm_error(machine);
+    if machine.error != VmError.Ok {
+        vm_end_entry(machine);
+    }
+    return result;
+}
+
 // Decodes a JSON argument array into tick-arena values and invokes the method
 // without resetting the arena between decoding and dispatch.
 fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
-    abi_clear_error();
-    g_abi_machine.error = VmError.Ok;
-    vm_begin_entry(g_abi_machine);
-    var args: MrbValue[>..] = [];
-    if !json_parse_args(g_abi_pool, g_abi_scratch, json, args) {
-        abi_record_call_context(receiver, method_symbol);
-        abi_input_failure("bad JSON argument list");
-        vm_end_entry(g_abi_machine);
-        return mrb_nil();
-    }
-    let result = vm_call_args_prepared(g_abi_machine, receiver, method_symbol, args[..]);
-    abi_record_call_context(receiver, method_symbol);
-    abi_record_vm_error(g_abi_machine);
-    if g_abi_machine.error != VmError.Ok {
-        vm_end_entry(g_abi_machine);
-    }
-    return result;
+    return abi_call_json_on(g_abi_machine, receiver, method_symbol, json);
 }
 
 // Checks whether a receiver implements a method without invoking it. The host
@@ -431,7 +437,7 @@ fn abi_call_json(receiver: u64, method_symbol: u32, json: const u8[:]) -> u64 {
 fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
-    if state_instance_disposed(g_abi_pool, receiver) {
+    if state_instance_disposed(g_abi_machine.pool, receiver) {
         return false;
     }
     let class_id, is_instance = vm_owner_class_id(g_abi_machine, receiver);
@@ -449,11 +455,11 @@ fn abi_has_method(receiver: u64, method_symbol: u32) -> bool {
 fn abi_register_binding(instance: u64, binding_id: u32, getter_symbol: u32) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
-    if state_instance_disposed(g_abi_pool, instance) {
+    if state_instance_disposed(g_abi_machine.pool, instance) {
         abi_fail("disposed instance");
         return -1;
     }
-    let result = binding_register(g_abi_pool, instance, binding_id, getter_symbol);
+    let result = binding_register(g_abi_machine.pool, instance, binding_id, getter_symbol);
     if result != 0 {
         let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
         if is_instance {
@@ -488,15 +494,15 @@ fn abi_component_count() -> i64 {
 // Test/debug inspection of reclamation. These counts are not telemetry: the
 // loader reads them only from `debugStats` in lifetime tests.
 fn abi_state_object_count() -> i64 {
-    return state_object_count(g_abi_pool);
+    return state_object_count(g_abi_machine.pool);
 }
 
 fn abi_state_allocated_count() -> i64 {
-    return state_allocated_object_count(g_abi_pool);
+    return state_allocated_object_count(g_abi_machine.pool);
 }
 
 fn abi_state_free_bytes() -> i64 {
-    return state_free_byte_count(g_abi_pool);
+    return state_free_byte_count(g_abi_machine.pool);
 }
 
 // Flushes the instance's dirty bindings into the module patch buffer. The buffer
@@ -521,34 +527,34 @@ fn abi_patch_bytes() -> const u8[:] {
 // for props) rather than rely on the handle alone.
 fn abi_make_string(bytes: const u8[:]) -> u64 {
     abi_clear_error();
-    if !state_has_object_capacity(g_abi_pool)
-        || !state_has_byte_capacity(g_abi_pool, bytes.len) {
-        if !state_has_object_capacity(g_abi_pool) {
-            state_fail_capacity(g_abi_pool, CapacityResource.StateObjects, 1,
-                state_object_count(g_abi_pool), MAX_STATE_OBJECTS);
+    if !state_has_object_capacity(g_abi_machine.pool)
+        || !state_has_byte_capacity(g_abi_machine.pool, bytes.len) {
+        if !state_has_object_capacity(g_abi_machine.pool) {
+            state_fail_capacity(g_abi_machine.pool, CapacityResource.StateObjects, 1,
+                state_object_count(g_abi_machine.pool), MAX_STATE_OBJECTS);
         } else {
-            state_fail_capacity(g_abi_pool, CapacityResource.StateBytes, bytes.len,
-                state_bytes_used(g_abi_pool), MAX_STATE_BYTES);
+            state_fail_capacity(g_abi_machine.pool, CapacityResource.StateBytes, bytes.len,
+                state_bytes_used(g_abi_machine.pool), MAX_STATE_BYTES);
         }
         g_abi_machine.error = VmError.StateCapacity;
         abi_record_vm_error(g_abi_machine);
         return mrb_nil();
     }
-    return state_alloc_string(g_abi_pool, bytes);
+    return state_alloc_string(g_abi_machine.pool, bytes);
 }
 
 // Temporary strings for native calls live in the tick arena. They survive only
 // until the next entry, which is enough for one fetch request to be serialized.
 fn abi_make_scratch_string(bytes: const u8[:]) -> u64 {
-    return scratch_alloc_string(g_abi_scratch, bytes);
+    return scratch_alloc_string(g_abi_machine.scratch, bytes);
 }
 
 fn abi_string_bytes(value: u64) -> const u8[:] {
     if mrb_is_scratch(value) {
-        return scratch_string_bytes(g_abi_scratch, value);
+        return scratch_string_bytes(g_abi_machine.scratch, value);
     }
     if mrb_is_state(value) {
-        return state_string_bytes(g_abi_pool, value);
+        return state_string_bytes(g_abi_machine.pool, value);
     }
     return "";
 }
@@ -605,7 +611,9 @@ fn abi_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
         abi_fail("bad Hash payload");
         return mrb_nil();
     }
-    return builtin_hash_get(g_abi_pool, g_abi_scratch, hash, mrb_symbol(key_symbol));
+    return builtin_hash_get(
+        g_abi_machine.pool, g_abi_machine.scratch, hash, mrb_symbol(key_symbol)
+    );
 }
 
 // Serializes one value for the host. The returned view points at a module-owned
@@ -613,8 +621,10 @@ fn abi_hash_get_symbol(hash: u64, key_symbol: u32) -> u64 {
 fn abi_value_json(value: u64) -> const u8[:] {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
+    var out: u8[>..] = [];
+    binding_json_append_value(g_abi_machine, out, value, 0);
     g_abi_json.clear();
-    binding_json_append_value(g_abi_machine, g_abi_json, value, 0);
+    g_abi_json.append(out[..]);
     return g_abi_json[..];
 }
 
@@ -654,21 +664,23 @@ fn abi_fetch_request_json(
         abi_fail("bad fetch request");
         return "";
     }
-    g_abi_fetch_json.append("{\"id\":");
-    mrb_format_fixnum(g_abi_fetch_json, fetch_id);
-    g_abi_fetch_json.append(",\"instance\":");
-    binding_json_append_value(g_abi_machine, g_abi_fetch_json, instance, 0);
-    g_abi_fetch_json.append(",\"url\":");
-    binding_json_append_value(g_abi_machine, g_abi_fetch_json, url, 0);
-    g_abi_fetch_json.append(",\"callback\":");
-    binding_json_append_key(g_abi_machine, g_abi_fetch_json, callback);
-    g_abi_fetch_json.append(",\"options\":");
+    var out: u8[>..] = [];
+    out.append("{\"id\":");
+    mrb_format_fixnum(out, fetch_id);
+    out.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, out, instance, 0);
+    out.append(",\"url\":");
+    binding_json_append_value(g_abi_machine, out, url, 0);
+    out.append(",\"callback\":");
+    binding_json_append_key(g_abi_machine, out, callback);
+    out.append(",\"options\":");
     if mrb_is_nil(options) {
-        g_abi_fetch_json.append("{}");
+        out.append("{}");
     } else {
-        binding_json_append_value(g_abi_machine, g_abi_fetch_json, options, 0);
+        binding_json_append_value(g_abi_machine, out, options, 0);
     }
-    g_abi_fetch_json.append("}\n");
+    out.append("}\n");
+    g_abi_fetch_json.append(out[..]);
     return g_abi_fetch_json[..];
 }
 
@@ -681,18 +693,22 @@ fn abi_fetch_cancel_json(fetch_id: i64, instance: u64) -> const u8[:] {
         abi_fail("bad fetch cancellation");
         return "";
     }
-    g_abi_fetch_json.append("{\"id\":");
-    mrb_format_fixnum(g_abi_fetch_json, fetch_id);
-    g_abi_fetch_json.append(",\"instance\":");
-    binding_json_append_value(g_abi_machine, g_abi_fetch_json, instance, 0);
-    g_abi_fetch_json.append(",\"cancel\":true}\n");
+    var out: u8[>..] = [];
+    out.append("{\"id\":");
+    mrb_format_fixnum(out, fetch_id);
+    out.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, out, instance, 0);
+    out.append(",\"cancel\":true}\n");
+    g_abi_fetch_json.append(out[..]);
     return g_abi_fetch_json[..];
 }
 
 // Parses the loader's response envelope and fills in the stable response keys.
-fn abi_fetch_response(envelope: const u8[:]) -> u64 {
-    let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
-    if !parsed || !vm_is_hash_value(g_abi_machine, value) {
+fn abi_fetch_response_on(machine: Vm&, envelope: const u8[:]) -> u64 {
+    let value, parsed = json_parse_document(
+        machine.pool, machine.scratch, envelope
+    );
+    if !parsed || !vm_is_hash_value(machine, value) {
         abi_input_failure("bad fetch response");
         return mrb_nil();
     }
@@ -701,64 +717,110 @@ fn abi_fetch_response(envelope: const u8[:]) -> u64 {
     let body_key = mrb_symbol(intern_symbol("body"));
     let data_key = mrb_symbol(intern_symbol("data"));
     let error_key = mrb_symbol(intern_symbol("error"));
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, status_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, status_key, mrb_fixnum(0));
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, status_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, status_key, mrb_fixnum(0)
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, ok_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, ok_key, mrb_false());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, ok_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, ok_key, mrb_false()
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, body_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, body_key,
-            scratch_alloc_string(g_abi_scratch, ""));
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, body_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, body_key,
+            scratch_alloc_string(machine.scratch, "")
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, data_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, data_key, mrb_nil());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, data_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, data_key, mrb_nil()
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, error_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, error_key, mrb_nil());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, error_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, error_key, mrb_nil()
+        );
     }
     return value;
+}
+
+fn abi_fetch_response(envelope: const u8[:]) -> u64 {
+    return abi_fetch_response_on(g_abi_machine, envelope);
 }
 
 // Normalizes one host capability result. The loader always sends an object,
 // but a malformed adapter response must fail with an actionable build-facing
 // error rather than reaching Ruby as an unknown shape.
-fn abi_host_result_hash(envelope: const u8[:]) -> u64 {
-    let value, parsed = json_parse_document(g_abi_pool, g_abi_scratch, envelope);
-    if !parsed || !vm_is_hash_value(g_abi_machine, value) {
+fn abi_host_result_hash_on(machine: Vm&, envelope: const u8[:]) -> u64 {
+    let value, parsed = json_parse_document(
+        machine.pool, machine.scratch, envelope
+    );
+    if !parsed || !vm_is_hash_value(machine, value) {
         abi_input_failure("bad host capability result");
         return mrb_nil();
     }
     let ok_key = mrb_symbol(intern_symbol("ok"));
     let value_key = mrb_symbol(intern_symbol("value"));
     let error_key = mrb_symbol(intern_symbol("error"));
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, ok_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, ok_key, mrb_false());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, ok_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, ok_key, mrb_false()
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, value_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, value_key, mrb_nil());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, value_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, value_key, mrb_nil()
+        );
     }
-    if mrb_is_nil(builtin_hash_get(g_abi_pool, g_abi_scratch, value, error_key)) {
-        builtin_hash_set(g_abi_pool, g_abi_scratch, value, error_key, mrb_nil());
+    if mrb_is_nil(builtin_hash_get(
+        machine.pool, machine.scratch, value, error_key
+        )) {
+        builtin_hash_set(
+            machine.pool, machine.scratch, value, error_key, mrb_nil()
+        );
     }
     return value;
+}
+
+fn abi_host_result_hash(envelope: const u8[:]) -> u64 {
+    return abi_host_result_hash_on(g_abi_machine, envelope);
 }
 
 // Converts a successful synchronous host result into its typed Ruby value.
 // A failed result publishes the adapter's error text through the VM's host
 // error slot so the Ruby caller sees the capability failure directly.
-fn abi_host_result(envelope: const u8[:]) -> u64 {
+fn abi_host_result_on(machine: Vm&, envelope: const u8[:]) -> u64 {
     abi_clear_error();
-    g_abi_machine.error = VmError.Ok;
-    let result = abi_host_result_hash(envelope);
+    machine.error = VmError.Ok;
+    let result = abi_host_result_hash_on(machine, envelope);
     if abi_has_error() {
         return mrb_nil();
     }
     let ok_key = mrb_symbol(intern_symbol("ok"));
-    if !mrb_is_true(builtin_hash_get(g_abi_pool, g_abi_scratch, result, ok_key)) {
+    if !mrb_is_true(builtin_hash_get(
+        machine.pool, machine.scratch, result, ok_key
+        )) {
         let error_key = mrb_symbol(intern_symbol("error"));
-        let error_value = builtin_hash_get(g_abi_pool, g_abi_scratch, result, error_key);
-        if vm_is_string_value(g_abi_machine, error_value) {
+        let error_value = builtin_hash_get(
+            machine.pool, machine.scratch, result, error_key
+        );
+        if vm_is_string_value(machine, error_value) {
             abi_fail(abi_string_bytes(error_value));
         } else {
             abi_fail("host capability failed");
@@ -766,7 +828,13 @@ fn abi_host_result(envelope: const u8[:]) -> u64 {
         return mrb_nil();
     }
     let value_key = mrb_symbol(intern_symbol("value"));
-    return builtin_hash_get(g_abi_pool, g_abi_scratch, result, value_key);
+    return builtin_hash_get(
+        machine.pool, machine.scratch, result, value_key
+    );
+}
+
+fn abi_host_result(envelope: const u8[:]) -> u64 {
+    return abi_host_result_on(g_abi_machine, envelope);
 }
 
 fn abi_deliver_host_result(
@@ -774,7 +842,7 @@ fn abi_deliver_host_result(
 ) -> i64 {
     abi_clear_error();
     g_abi_machine.error = VmError.Ok;
-    if state_instance_disposed(g_abi_pool, instance) {
+    if state_instance_disposed(g_abi_machine.pool, instance) {
         abi_fail("disposed instance");
         return -1;
     }
@@ -786,7 +854,7 @@ fn abi_deliver_host_result(
         vm_end_entry(g_abi_machine);
         return -1;
     }
-    let args: MrbValue[1] = [result];
+    var args: MrbValue[1] = [result];
     vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
     abi_record_call_context(instance, callback_symbol);
     abi_record_vm_error(g_abi_machine);
@@ -814,23 +882,25 @@ fn abi_capability_request_json(
         abi_fail("bad host capability request");
         return "";
     }
-    g_abi_capability_json.append("{\"__host\":\"capability_async\",\"id\":");
-    mrb_format_fixnum(g_abi_capability_json, request_id);
-    g_abi_capability_json.append(",\"instance\":");
-    binding_json_append_value(g_abi_machine, g_abi_capability_json, instance, 0);
-    g_abi_capability_json.append(",\"capability\":");
-    binding_json_append_value(g_abi_machine, g_abi_capability_json, capability, 0);
-    g_abi_capability_json.append(",\"operation\":");
-    binding_json_append_value(g_abi_machine, g_abi_capability_json, operation, 0);
-    g_abi_capability_json.append(",\"args\":");
+    var out: u8[>..] = [];
+    out.append("{\"__host\":\"capability_async\",\"id\":");
+    mrb_format_fixnum(out, request_id);
+    out.append(",\"instance\":");
+    binding_json_append_value(g_abi_machine, out, instance, 0);
+    out.append(",\"capability\":");
+    binding_json_append_value(g_abi_machine, out, capability, 0);
+    out.append(",\"operation\":");
+    binding_json_append_value(g_abi_machine, out, operation, 0);
+    out.append(",\"args\":");
     if mrb_is_nil(args) {
-        g_abi_capability_json.append("[]");
+        out.append("[]");
     } else {
-        binding_json_append_value(g_abi_machine, g_abi_capability_json, args, 0);
+        binding_json_append_value(g_abi_machine, out, args, 0);
     }
-    g_abi_capability_json.append(",\"callback\":");
-    binding_json_append_key(g_abi_machine, g_abi_capability_json, callback);
-    g_abi_capability_json.append("}\n");
+    out.append(",\"callback\":");
+    binding_json_append_key(g_abi_machine, out, callback);
+    out.append("}\n");
+    g_abi_capability_json.append(out[..]);
     return g_abi_capability_json[..];
 }
 
@@ -845,7 +915,7 @@ fn abi_deliver_fetch(instance: u64, callback_symbol: u32, envelope: const u8[:])
         vm_end_entry(g_abi_machine);
         return -1;
     }
-    let args: MrbValue[1] = [response];
+    var args: MrbValue[1] = [response];
     vm_call_args_prepared(g_abi_machine, instance, callback_symbol, args[..]);
     abi_record_call_context(instance, callback_symbol);
     abi_record_vm_error(g_abi_machine);
@@ -1062,13 +1132,13 @@ fn abi_reclaim_quiescent() {
 // failure; the host reads the message through `goose_vm_last_error`. Writing a
 // value identical to the stored one is still success and marks no dirty bit,
 // so a host that echoes the current attribute cannot create an update loop.
-export fn goose_vm_set_ivar_string(
-    instance: u64, name: const u8[:], value: const u8[:]
+fn abi_set_ivar_string_on(
+    machine: Vm&, instance: u64, name: const u8[:], value: const u8[:]
 ) -> i64 {
     abi_clear_error();
-    g_abi_machine.error = VmError.Ok;
-    g_abi_pool.error = VmError.Ok;
-    if state_instance_disposed(g_abi_pool, instance) {
+    machine.error = VmError.Ok;
+    machine.pool.error = VmError.Ok;
+    if state_instance_disposed(machine.pool, instance) {
         abi_fail("disposed instance");
         return -1;
     }
@@ -1086,16 +1156,16 @@ export fn goose_vm_set_ivar_string(
     if abi_has_error() {
         return -1;
     }
-    if !state_set_ivar(g_abi_pool, g_abi_scratch, instance, sym, str_val) {
-        if g_abi_pool.error == VmError.Ok {
+    if !state_set_ivar(machine.pool, machine.scratch, instance, sym, str_val) {
+        if machine.pool.error == VmError.Ok {
             abi_fail("unknown component instance");
         } else {
-            g_abi_machine.error = g_abi_pool.error;
-            let class_id, is_instance = vm_owner_class_id(g_abi_machine, instance);
+            machine.error = machine.pool.error;
+            let class_id, is_instance = vm_owner_class_id(machine, instance);
             if is_instance {
-                vm_set_error_context(g_abi_machine, class_id, NULL_SYMBOL, -1);
+                vm_set_error_context(machine, class_id, NULL_SYMBOL, -1);
             }
-            abi_record_vm_error(g_abi_machine);
+            abi_record_vm_error(machine);
         }
         return -1;
     }
@@ -1105,37 +1175,49 @@ export fn goose_vm_set_ivar_string(
     return 0;
 }
 
-// Host typed-prop update. The JSON object may contain any subset of the
-// component's declared props. All values are installed by one call to the
-// generated `__mochi_apply_props` before the host flushes patches, which keeps
-// related inputs consistent for observers.
-export fn goose_vm_set_props_json(instance: u64, json: const u8[:]) -> i64 {
+export fn goose_vm_set_ivar_string(
+    instance: u64, name: const u8[:], value: const u8[:]
+) -> i64 {
+    return abi_set_ivar_string_on(g_abi_machine, instance, name, value);
+}
+
+fn abi_set_props_json_on(machine: Vm&, instance: u64, json: const u8[:]) -> i64 {
     abi_clear_error();
-    g_abi_machine.error = VmError.Ok;
-    g_abi_pool.error = VmError.Ok;
-    if state_instance_disposed(g_abi_pool, instance) {
+    machine.error = VmError.Ok;
+    machine.pool.error = VmError.Ok;
+    if state_instance_disposed(machine.pool, instance) {
         abi_fail("disposed instance");
         return -1;
     }
-    vm_begin_entry(g_abi_machine);
-    let props, parsed = json_parse_document(g_abi_pool, g_abi_scratch, json);
-    if !parsed || !vm_is_hash_value(g_abi_machine, props) {
+    vm_begin_entry(machine);
+    let props, parsed = json_parse_document(
+        machine.pool, machine.scratch, json
+    );
+    if !parsed || !vm_is_hash_value(machine, props) {
         abi_record_call_context(instance, intern_symbol("__mochi_apply_props"));
         abi_input_failure("bad props payload");
-        vm_end_entry(g_abi_machine);
+        vm_end_entry(machine);
         return -1;
     }
-    if !vm_apply_component_props(g_abi_machine, instance, props, false) {
-        abi_record_vm_error(g_abi_machine);
-        vm_end_entry(g_abi_machine);
+    if !vm_apply_component_props(machine, instance, props, false) {
+        abi_record_vm_error(machine);
+        vm_end_entry(machine);
         return -1;
     }
-    vm_end_entry(g_abi_machine);
+    vm_end_entry(machine);
     // Replacing a prop snapshot is a host mutation. Running reclaim here lets
     // repeated parent updates return the previous array/hash before the next
     // allocation needs the space.
     abi_reclaim_quiescent();
     return 0;
+}
+
+// Host typed-prop update. The JSON object may contain any subset of the
+// component's declared props. All values are installed by one call to the
+// generated `__mochi_apply_props` before the host flushes patches, which keeps
+// related inputs consistent for observers.
+export fn goose_vm_set_props_json(instance: u64, json: const u8[:]) -> i64 {
+    return abi_set_props_json_on(g_abi_machine, instance, json);
 }
 
 export fn goose_vm_eval_each_expr(
@@ -1144,7 +1226,9 @@ export fn goose_vm_eval_each_expr(
     let result = abi_call_json(receiver, method_symbol, json);
     g_abi_json.clear();
     if !abi_has_error() && g_abi_machine.error == VmError.Ok {
-        vm_append_value_text(g_abi_machine, g_abi_json, result);
+        var out: u8[>..] = [];
+        vm_append_value_text(g_abi_machine, out, result);
+        g_abi_json.append(out[..]);
     }
     vm_end_entry(g_abi_machine);
     return g_abi_json[..];

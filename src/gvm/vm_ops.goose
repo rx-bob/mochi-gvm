@@ -15,8 +15,10 @@ import.value_arena;
 import.vm_constants;
 import.vm_core;
 import.vm_dispatch;
+import.vm_method_definitions;
 import.vm_num;
 import.vm_ops_collections;
+import.vm_ops_control;
 
 // Runs the root IREP once per loaded program. Each root advances `booted_roots`
 // before executing so a runtime failure in one class body does not leave later
@@ -113,7 +115,7 @@ recursive fn vm_exec_frame(
 
     while running && pc < iseq.len {
         let op = iseq[pc];
-        let step = vm_exec_step(machine, frame, record, iseq, pc + 1, op);
+        let step = vm_exec_step(machine, frame_index, record, iseq, pc + 1, op);
         pc = step.pc;
         machine.frames[frame_index].pc = pc;
         if machine.pool.error != VmError.Ok && machine.error == VmError.Ok {
@@ -159,12 +161,29 @@ fn vm_initialize_registers(machine: Vm&, count: i64, self_value: MrbValue, args:
 
 // Routes one opcode byte to its handler family.
 fn vm_exec_step(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+    machine: Vm&, frame_index: i64, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
 ) -> Step {
+    let frame = machine.frames[frame_index];
     // Between instructions every live value is in a register window, so a
     // collection here cannot invalidate an in-flight expression.
     gc_maybe_collect(machine);
     scratch_maybe_collect(machine);
+    let definition, is_definition = vm_definition_step(machine, DefinitionInstruction {
+            frame_index: frame_index,
+            record: record,
+            iseq: iseq,
+            pc: pc,
+            op: op,
+        });
+    if is_definition {
+        return definition;
+    }
+    return vm_exec_other_step(machine, frame, record, iseq, pc, op);
+}
+
+fn vm_exec_other_step(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
+) -> Step {
     if machine.pool.computed_depth > 0 && (op == OP_SETIV || op == OP_SETCONST) {
         return vm_fail(machine, VmError.ComputedEffect, pc);
     }
@@ -446,6 +465,9 @@ fn vm_op_tdef(
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
     }
+    if ops.a > record.nregs || (op == OP_SDEF && ops.a >= record.nregs) {
+        return vm_fail(machine, VmError.BadOperand, pc + 3);
+    }
     let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
     let child = vm_child_record(machine.file, frame.record_index, ops.c);
     var target = machine.regs[frame.base];
@@ -460,67 +482,11 @@ fn vm_op_tdef(
         return vm_fail(machine, VmError.TypeMismatch, pc + 3);
     }
     vm_define_method(machine, mrb_class_id(target), symbol, child, frame.lexical_owner);
-    if !vm_write_register(machine, record, frame.base, ops.a, mrb_symbol(symbol)) {
+    // mrbc's fused definition can name its ignored expression-result register
+    // one past nregs in a class body. Definitions in statement position do
+    // not consume that value; all other invalid register references still fail.
+    if ops.a < record.nregs && !vm_write_register(machine, record, frame.base, ops.a, mrb_symbol(symbol)) {
         return vm_fail(machine, VmError.BadOperand, pc + 3);
     }
     return vm_step_continue(pc + 3);
-}
-
-fn vm_op_control(
-    machine: Vm&, frame: CallFrame, record: IrepRecord, iseq: u8[:], pc: i64, op: u8
-) -> Step {
-    if op == OP_ENTER {
-        let ops = vm_read_operands(iseq, pc, 3);
-        if !ops.valid {
-            return vm_fail(machine, VmError.BadOperand, pc);
-        }
-        let aspec = (ops.a << 16) | (ops.b << 8) | ops.c;
-        let required = (aspec >> 18) & 0x1f;
-        let optional = (aspec >> 13) & 0x1f;
-        let rest = (aspec >> 12) & 1;
-        let post = (aspec >> 7) & 0x1f;
-        let key = (aspec >> 2) & 0x1f;
-        let kdict = (aspec >> 1) & 1;
-        if rest != 0 || post != 0 || key != 0 || kdict != 0 {
-            return vm_fail(machine, VmError.BadOperand, pc + 3);
-        }
-        if optional > 0 {
-            var provided = frame.argc - required;
-            if provided < 0 {
-                provided = 0;
-            }
-            if provided > optional {
-                provided = optional;
-            }
-            return vm_step_continue(pc + 3 + provided * 3);
-        }
-        return vm_step_continue(pc + 3);
-    }
-    if op == OP_RETURN {
-        let ops = vm_read_operands(iseq, pc, 1);
-        if !ops.valid {
-            return vm_fail(machine, VmError.BadOperand, pc);
-        }
-        let value, value_ok = vm_read_register(machine, record, frame.base, ops.a);
-        if !value_ok {
-            return vm_fail(machine, VmError.BadOperand, pc + 1);
-        }
-        return vm_step_return(pc + 1, value);
-    }
-    if op == OP_RETSELF {
-        return vm_step_return(pc, machine.regs[frame.base]);
-    }
-    if op == OP_RETNIL {
-        return vm_step_return(pc, mrb_nil());
-    }
-    if op == OP_RETTRUE {
-        return vm_step_return(pc, mrb_true());
-    }
-    if op == OP_RETFALSE {
-        return vm_step_return(pc, mrb_false());
-    }
-    if op == OP_STOP {
-        return vm_step_stop(pc);
-    }
-    return vm_fail(machine, VmError.BadOpcode, pc);
 }

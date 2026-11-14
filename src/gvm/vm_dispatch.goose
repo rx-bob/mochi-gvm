@@ -364,6 +364,7 @@ fn vm_op_send(
         if context_class != NULL_CLASS_ID {
             vm_set_error_context(machine, context_class, symbol, machine.error_context.binding_id);
         }
+        machine.error_context.reference_symbol = symbol;
         return vm_fail(machine, VmError.NoMethod, pc + count);
     }
     if !vm_write_register(machine, record, frame.base, ops.a, result) {
