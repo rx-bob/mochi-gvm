@@ -40,12 +40,7 @@ fn scratch_is_hash(arena: ScratchArena&, value: MrbValue) -> bool {
     return ok && object.kind == ArenaObjectKind.Hash;
 }
 
-// Appends one slot to `object_index`'s linked list and returns its index.
-fn scratch_append_slot(arena: ScratchArena&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
-    if object_index < 0 || object_index >= arena.objects.len {
-        arena.overflow = true;
-        return false;
-    }
+fn scratch_take_slot(arena: ScratchArena&) -> i64 {
     var slot_index = -1;
     if arena.free_slots.len > 0 {
         slot_index = arena.free_slots.pop();
@@ -53,16 +48,29 @@ fn scratch_append_slot(arena: ScratchArena&, object_index: i64, key: MrbValue, v
         if arena.slots.len >= SCRATCH_CAPACITY_SLOTS {
             scratch_fail(arena, ScratchResource.Slots, 1, arena.slots.len,
                 SCRATCH_CAPACITY_SLOTS);
-            return false;
+            return -1;
         }
         slot_index = arena.slots.len;
         arena.slots.push(ArenaSlot {
-                key: key,
-                value: value,
+                key: mrb_nil(),
+                value: mrb_nil(),
                 previous_index: -1,
                 next_index: -1,
                 allocated: true,
             });
+    }
+    return slot_index;
+}
+
+// Appends one slot to `object_index`'s linked list and returns its index.
+fn scratch_append_slot(arena: ScratchArena&, object_index: i64, key: MrbValue, value: MrbValue) -> bool {
+    if object_index < 0 || object_index >= arena.objects.len {
+        arena.overflow = true;
+        return false;
+    }
+    let slot_index = scratch_take_slot(arena);
+    if slot_index < 0 {
+        return false;
     }
     let previous = arena.objects[object_index].items_last_index;
     arena.slots[slot_index] = ArenaSlot {
@@ -103,6 +111,34 @@ fn scratch_array_push(arena: ScratchArena&, array: MrbValue, value: MrbValue) ->
         return false;
     }
     return scratch_append_slot(arena, mrb_arena_index(array), mrb_nil(), value);
+}
+
+fn scratch_array_unshift(arena: ScratchArena&, array: MrbValue, value: MrbValue) -> bool {
+    let object, ok = scratch_object(arena, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return false;
+    }
+    let object_index = mrb_arena_index(array)as i64;
+    let slot_index = scratch_take_slot(arena);
+    if slot_index < 0 {
+        return false;
+    }
+    let first = arena.objects[object_index].items_first_index;
+    arena.slots[slot_index] = ArenaSlot {
+        key: mrb_nil(),
+        value: value,
+        previous_index: -1,
+        next_index: first,
+        allocated: true,
+    };
+    if first >= 0 {
+        arena.slots[first].previous_index = slot_index;
+    } else {
+        arena.objects[object_index].items_last_index = slot_index;
+    }
+    arena.objects[object_index].items_first_index = slot_index;
+    arena.objects[object_index].item_count += 1;
+    return true;
 }
 
 fn scratch_array_pop(arena: ScratchArena&, array: MrbValue) -> MrbValue, bool {

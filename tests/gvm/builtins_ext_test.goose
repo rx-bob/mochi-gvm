@@ -37,6 +37,40 @@ fn test_to_s_and_to_i_conversions(t: goosetest::Test&) {
     t.assert_eq(0, vm::mrb_fixnum_value(vm::builtin_to_i(machine, vm::mrb_nil())));
 }
 
+fn test_array_unshift_dispatch(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let array = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, array, vm::mrb_fixnum(3)));
+    let args: vm::MrbValue[2] = [vm::mrb_fixnum(1), vm::mrb_fixnum(2)];
+    let result, handled = vm::vm_call_builtin(machine, array,
+        vm::intern_symbol("unshift"), args[..]);
+    t.assert_true(handled);
+    t.assert_true(vm::mrb_value_identical(result, array));
+    let joined = vm::builtin_array_join(pool, scratch, array,
+        vm::scratch_alloc_string(scratch, ","));
+    t.assert_true(vm::builtin_string_bytes(pool, scratch, joined) == "1,2,3");
+    var no_args: vm::MrbValue[>..] = [];
+    let unchanged, empty_handled = vm::vm_call_builtin(machine, array,
+        vm::intern_symbol("unshift"), no_args[..]);
+    t.assert_true(empty_handled);
+    t.assert_true(vm::mrb_value_identical(unchanged, array));
+    t.assert_eq(3, vm::builtin_array_length(pool, scratch, array));
+}
+
 fn test_fixnum_method_dispatch(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..

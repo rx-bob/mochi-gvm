@@ -133,6 +133,122 @@ fn test_state_array_promotes_and_mutates(t: goosetest::Test&) {
     t.assert_eq(1, vm::builtin_array_length(pool, scratch, durable));
 }
 
+fn test_unshift_order_identity_and_state_promotion(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let scratch_array = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, scratch_array, vm::mrb_fixnum(3)));
+    let nested = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, nested, vm::mrb_fixnum(9)));
+    let args: vm::MrbValue[4] = [vm::mrb_fixnum(1), nested, nested, vm::mrb_fixnum(2)];
+    let scratch_result = vm::builtin_array_unshift(pool, scratch, scratch_array, args[..]);
+    t.assert_true(vm::mrb_value_identical(scratch_result, scratch_array));
+    t.assert_eq(5, vm::builtin_array_length(pool, scratch, scratch_array));
+    t.assert_eq(1, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, scratch_array, 0)));
+    t.assert_true(vm::mrb_value_identical(
+        vm::builtin_array_get(pool, scratch, scratch_array, 1), nested));
+    t.assert_true(vm::mrb_value_identical(
+        vm::builtin_array_get(pool, scratch, scratch_array, 2), nested));
+    t.assert_eq(2, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, scratch_array, 3)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, scratch_array, 4)));
+    let no_args: vm::MrbValue[0] = [];
+    t.assert_true(vm::mrb_value_identical(
+        vm::builtin_array_unshift(pool, scratch, scratch_array, no_args[..]), scratch_array));
+    t.assert_eq(5, vm::builtin_array_length(pool, scratch, scratch_array));
+
+    let state_array = vm::state_alloc_array(pool);
+    t.assert_true(vm::state_array_push(pool, state_array, vm::mrb_fixnum(3)));
+    let state_nested = vm::state_alloc_array(pool);
+    t.assert_true(vm::state_array_push(pool, state_nested, vm::mrb_fixnum(7)));
+    let temporary = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, temporary, vm::mrb_fixnum(8)));
+    let state_args: vm::MrbValue[3] = [temporary, temporary, state_nested];
+    let state_result = vm::builtin_array_unshift(pool, scratch, state_array, state_args[..]);
+    t.assert_true(vm::mrb_value_identical(state_result, state_array));
+    t.assert_eq(4, vm::state_array_length(pool, state_array));
+    let first_copy = vm::state_array_get(pool, state_array, 0);
+    let second_copy = vm::state_array_get(pool, state_array, 1);
+    t.assert_true(vm::mrb_is_state(first_copy));
+    t.assert_true(vm::mrb_value_identical(first_copy, second_copy));
+    t.assert_true(vm::mrb_value_identical(
+        vm::state_array_get(pool, state_array, 2), state_nested));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, state_array, 3)));
+}
+
+fn test_unshift_capacity_failure_and_recovery(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    let array = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, array, vm::mrb_fixnum(3)));
+    let filler = vm::builtin_array_new(scratch);
+    for _ in vm::SCRATCH_CAPACITY_SLOTS - 1 {
+        t.assert_true(vm::builtin_array_push(pool, scratch, filler, vm::mrb_fixnum(0)));
+    }
+    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
+    let failed = vm::builtin_array_unshift(pool, scratch, array, one[..]);
+    t.assert_true(vm::mrb_is_nil(failed));
+    t.assert_true(scratch.overflow);
+    t.assert_eq(vm::ScratchResource.Slots, scratch.failure.resource);
+    t.assert_eq(1, vm::builtin_array_length(pool, scratch, array));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, array, 0)));
+
+    vm::scratch_reset(scratch);
+    let recovered = vm::builtin_array_new(scratch);
+    t.assert_true(vm::builtin_array_push(pool, scratch, recovered, vm::mrb_fixnum(3)));
+    let result = vm::builtin_array_unshift(pool, scratch, recovered, one[..]);
+    t.assert_true(vm::mrb_value_identical(result, recovered));
+    t.assert_eq(1, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, recovered, 0)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::builtin_array_get(pool, scratch, recovered, 1)));
+}
+
+fn test_unshift_state_capacity_and_recovery(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let array = vm::state_alloc_array(pool);
+    t.assert_true(vm::state_array_push(pool, array, vm::mrb_fixnum(3)));
+    let filler = vm::state_alloc_array(pool);
+    for _ in vm::MAX_STATE_SLOTS - 1 {
+        vm::state_array_push(pool, filler, vm::mrb_fixnum(0));
+    }
+    t.assert_eq(vm::MAX_STATE_SLOTS - 1, vm::state_array_length(pool, filler));
+    let one: vm::MrbValue[1] = [vm::mrb_fixnum(1)];
+    let failed = vm::builtin_array_unshift(pool, scratch, array, one[..]);
+    t.assert_true(vm::mrb_is_nil(failed));
+    t.assert_eq(vm::VmError.StateCapacity, pool.error);
+    t.assert_eq(vm::CapacityResource.StateSlots, pool.failure.resource);
+    t.assert_eq(1, vm::state_array_length(pool, array));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 0)));
+
+    vm::vm_begin_entry(machine);
+    t.assert_true(vm::mrb_is_fixnum(vm::state_array_pop(pool, filler)));
+    let recovered = vm::builtin_array_unshift(pool, scratch, array, one[..]);
+    t.assert_true(vm::mrb_value_identical(recovered, array));
+    t.assert_eq(2, vm::state_array_length(pool, array));
+    t.assert_eq(1, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 0)));
+    t.assert_eq(3, vm::mrb_fixnum_value(vm::state_array_get(pool, array, 1)));
+}
+
 fn test_scratch_hash_get_set_and_update(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

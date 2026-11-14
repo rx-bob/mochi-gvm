@@ -119,6 +119,52 @@ fn builtin_array_push(pool: StatePool&, scratch: ScratchArena&, array: MrbValue,
     return false;
 }
 
+fn builtin_array_unshift(
+    pool: StatePool&, scratch: ScratchArena&, array: MrbValue, args: MrbValue[:]
+) -> MrbValue {
+    if args.len == 0 {
+        return array;
+    }
+    if mrb_is_state(array) && pool.computed_depth > 0 {
+        pool.error = VmError.ComputedEffect;
+        return mrb_nil();
+    }
+    var offset = 0;
+    while offset < args.len {
+        let argument_index = args.len - 1 - offset;
+        var value = args[argument_index];
+        if mrb_is_state(array) {
+            var reused = false;
+            var later = argument_index + 1;
+            while later < args.len {
+                if mrb_value_identical(args[argument_index], args[later]) {
+                    value = builtin_array_get(pool, scratch, array, later - argument_index - 1);
+                    reused = true;
+                    break;
+                }
+                later += 1;
+            }
+            if !reused {
+                value = promote_to_state(pool, scratch, value);
+                if pool.error != VmError.Ok {
+                    return mrb_nil();
+                }
+            }
+            if !state_array_unshift(pool, array, value) {
+                return mrb_nil();
+            }
+        } else if mrb_is_scratch(array) {
+            if !scratch_array_unshift(scratch, array, value) {
+                return mrb_nil();
+            }
+        } else {
+            return mrb_nil();
+        }
+        offset += 1;
+    }
+    return array;
+}
+
 fn builtin_array_pop(pool: StatePool&, scratch: ScratchArena&, array: MrbValue) -> MrbValue {
     if pool.computed_depth > 0 && mrb_is_state(array) {
         pool.error = VmError.ComputedEffect;

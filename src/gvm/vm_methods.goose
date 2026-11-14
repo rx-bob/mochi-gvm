@@ -187,6 +187,9 @@ fn vm_call_array_builtin(
     if name == "pop" {
         return builtin_array_pop(machine.pool, machine.scratch, receiver), true;
     }
+    if name == "unshift" {
+        return builtin_array_unshift(machine.pool, machine.scratch, receiver, args), true;
+    }
     if name == "last" {
         return builtin_array_last(machine.pool, machine.scratch, receiver), true;
     }
@@ -326,7 +329,7 @@ fn vm_call_builtin(
     let name = symbol_name(method_symbol);
     if machine.pool.computed_depth > 0 && mrb_is_state(receiver)
         && (name == "<<" || name == "push" || name == "pop" || name == "clear"
-        || name == "delete" || name == "[]=" || name == "concat") {
+        || name == "delete" || name == "[]=" || name == "concat" || name == "unshift") {
         machine.error = VmError.ComputedEffect;
         return mrb_nil(), true;
     }

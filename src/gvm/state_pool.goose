@@ -498,6 +498,35 @@ fn state_array_push(pool: StatePool&, array: MrbValue, value: MrbValue) -> bool 
     return pushed;
 }
 
+fn state_array_unshift(pool: StatePool&, array: MrbValue, value: MrbValue) -> bool {
+    let object, ok = state_object(pool, array);
+    if !ok || object.kind != ArenaObjectKind.Array {
+        return false;
+    }
+    let object_index = mrb_arena_index(array)as i64;
+    let slot_index = state_take_slot(pool);
+    if slot_index < 0 {
+        return false;
+    }
+    let first = pool.objects[object_index].items_first_index;
+    pool.slots[slot_index] = ArenaSlot {
+        key: mrb_nil(),
+        value: value,
+        previous_index: -1,
+        next_index: first,
+        allocated: true,
+    };
+    if first >= 0 {
+        pool.slots[first].previous_index = slot_index;
+    } else {
+        pool.objects[object_index].items_last_index = slot_index;
+    }
+    pool.objects[object_index].items_first_index = slot_index;
+    pool.objects[object_index].item_count += 1;
+    state_mark_collection_mutated(pool, array);
+    return true;
+}
+
 fn state_array_pop(pool: StatePool&, array: MrbValue) -> MrbValue, bool {
     let object, ok = state_object(pool, array);
     if !ok || object.kind != ArenaObjectKind.Array || object.item_count == 0 {
