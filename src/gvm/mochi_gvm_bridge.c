@@ -270,18 +270,22 @@ EM_JS(int, mochi_host_dispatch_js,
       (const char *capability, const char *operation, const char *args, char *out,
        int cap, char *err, int err_cap), {
   try {
-    var hosts = Module.__mochiHostCapabilities;
+    // Keep these public loader bridge keys quoted so Closure/ESM minification
+    // cannot rename them differently when the GVM is rebuilt with extra
+    // exports (for example, fixture instrumentation).
+    var hosts = Module["__mochiHostCapabilities"];
     var name = UTF8ToString(capability);
     var op = UTF8ToString(operation);
     var adapter = hosts && hosts[name];
     if (!adapter) {
       throw new Error("host capability '" + name + "' is not registered");
     }
-    var operationFn = adapter.sync && adapter.sync[op];
+    var sync = adapter["sync"];
+    var operationFn = sync && sync[op];
     if (typeof operationFn !== "function") {
       throw new Error("host capability '" + name + "' has no sync operation '" + op + "'");
     }
-    var result = operationFn.call(adapter.sync, UTF8ToString(args), adapter.limits);
+    var result = operationFn.call(sync, UTF8ToString(args), adapter["limits"]);
     if (result && typeof result.then === "function") {
       throw new Error("host capability '" + name + "' operation '" + op +
                       "' returned a promise from a synchronous operation");
@@ -407,9 +411,11 @@ EM_JS(int, mochi_download_js,
        const char *mime, int mime_len, const uint32_t *parts, int count,
        char *err, int err_cap), {
   try {
-    var adapter = Module.__mochiHostCapabilities && Module.__mochiHostCapabilities.download;
-    if (!adapter || !Module.__mochiHostOwner) throw new Error("download capability is unavailable");
-    var context = Module.__mochiHostOwner(UTF8ToString(owner), "download");
+    var hosts = Module["__mochiHostCapabilities"];
+    var adapter = hosts && hosts["download"];
+    var hostOwner = Module["__mochiHostOwner"];
+    if (!adapter || !hostOwner) throw new Error("download capability is unavailable");
+    var context = hostOwner(UTF8ToString(owner), "download");
     var decoder = new TextDecoder("utf-8", {fatal:true});
     var name = decoder.decode(HEAPU8.subarray(filename, filename + filename_len));
     var type = decoder.decode(HEAPU8.subarray(mime, mime + mime_len));
@@ -419,10 +425,11 @@ EM_JS(int, mochi_download_js,
       var pointer = HEAPU32[(parts >>> 2) + i * 2];
       var length = HEAPU32[(parts >>> 2) + i * 2 + 1];
       total += length;
-      if (total > adapter.limits.bytes) throw new Error("download: content exceeds configured byte limit");
+      if (total > adapter["limits"].bytes) throw new Error("download: content exceeds configured byte limit");
       values.push(HEAPU8.subarray(pointer, pointer + length));
     }
-    adapter.sync.save(name, type, values, adapter.limits, context);
+    var sync = adapter["sync"];
+    sync["save"](name, type, values, adapter["limits"], context);
     return 0;
   } catch (error) {
     stringToUTF8(String(error && error.message || error), err, err_cap);
