@@ -7,6 +7,8 @@ namespace vm;
 
 import std;
 
+import.slab;
+
 let RITE_HEADER_BYTES = 20;
 let RITE_SECTION_HEADER_BYTES = 8;
 let IREP_SECTION_HEADER_BYTES = 12;
@@ -22,6 +24,7 @@ let MAX_IREP_POOL_ENTRIES = 16384;
 let MAX_IREP_SYMBOL_ENTRIES = 16384;
 let MAX_SYMBOL_ENTRIES = 16384;
 let NULL_SYMBOL: u32 = 0xFFFFFFFF;
+let NO_PACKAGE_ID: u32 = 0xFFFFFFFF;
 let MRB_NULL_SYM_LENGTH = 0xFFFF;
 
 let RITE_MAGIC: const u8[:] = "RITE";
@@ -83,6 +86,7 @@ struct IrepRecord {
     first_child_index: i64,
     next_sibling_index: i64,
     depth: u16,
+    package_id: u32 = NO_PACKAGE_ID,
 }
 
 // One literal pool entry. `text_offset_bytes` and `text_length_bytes` view a
@@ -93,6 +97,7 @@ struct PoolEntry {
     text_length_bytes: i64,
     int_value: i64,
     float_value: f64,
+    package_id: u32 = NO_PACKAGE_ID,
 }
 
 // A compact symbol handle. `NULL_SYMBOL` marks an entry that mruby dumped as
@@ -108,9 +113,9 @@ struct SymbolEntry {
 }
 
 // The process-wide symbol table. Names are appended once, so IDs stay stable
-// across repeated parses and across separately loaded components.
+// across repeated parses and across separately loaded components. The bytes
+// live in the C slab's 16 KB blocks; entries hold absolute block offsets.
 root struct SymbolTable {
-    blob: u8[>..] = [],
     entries: SymbolEntry[>..] = [],
 }
 
@@ -132,6 +137,7 @@ root struct RiteFile {
     binary_size_bytes: u32 = 0,
     irep_section_offset_bytes: i64 = 0,
     irep_section_size_bytes: u32 = 0,
+    current_package_id: u32 = NO_PACKAGE_ID,
 }
 
 var g_symbol_table = SymbolTable {
@@ -232,8 +238,9 @@ fn root_truncate(file: RiteFile&, count: i64) {
     file.roots.resize(count);
 }
 
-// Symbol table accessors. IDs index `entries`; each entry views `blob` without
-// copying, and appending a name keeps existing IDs stable.
+// Symbol table accessors. IDs index `entries`; each entry views the C slab's
+// 16 KB string blocks without copying, and appending a name keeps existing IDs
+// stable.
 
 fn symbol_entry_at(index: u32) -> SymbolEntry {
     return g_symbol_table.entries[index];
@@ -244,20 +251,22 @@ fn symbol_entry_push(entry: SymbolEntry) {
 }
 
 fn symbol_blob_length() -> i64 {
-    return g_symbol_table.blob.len;
-}
-
-fn symbol_blob_append(name: u8[:]) {
-    g_symbol_table.blob.append(name);
+    return slab_symbol_blob_length();
 }
 
 fn symbol_blob_slice(start: i64, stop: i64) -> const u8[:] {
-    return g_symbol_table.blob[start..stop];
+    if start < 0 || stop <= start {
+        return "";
+    }
+    if stop > g_slab_symbol_view.len {
+        return "";
+    }
+    return g_slab_symbol_view[start..stop];
 }
 
 fn symbol_table_truncate(entries: i64, blob_length: i64) {
     g_symbol_table.entries.resize(entries);
-    g_symbol_table.blob.resize(blob_length);
+    slab_truncate_symbol_bytes(blob_length);
 }
 
 // Returns a human-readable name for a parse result.
@@ -298,41 +307,68 @@ fn symbol_count() -> i64 {
 
 // Returns the ID of `name`, appending it once when the table has no equal name.
 fn intern_symbol(name: u8[:]) -> u32 {
+    let id, ok = intern_symbol_checked(name);
+    if !ok {
+        return NULL_SYMBOL;
+    }
+    return id;
+}
+
+// Interning variant for callers that must distinguish a slab rejection from
+// `NULL_SYMBOL`. A failed call leaves the table unchanged.
+fn intern_symbol_checked(name: u8[:]) -> u32, bool {
     for index in 0..symbol_count() {
         let entry = symbol_entry_at(index as u32);
         if entry.text_length_bytes == name.len {
             let start = entry.text_offset_bytes;
             let stop = start + entry.text_length_bytes;
             if compare(symbol_blob_slice(start, stop), name) == 0 {
-                return index as u32;
+                return index as u32, true;
             }
         }
     }
-    let offset = symbol_blob_length();
+    let offset = slab_intern_bytes(name);
+    if offset < 0 {
+        return NULL_SYMBOL, false;
+    }
     let id = symbol_count()as u32;
-    symbol_blob_append(name);
     symbol_entry_push(SymbolEntry {
             text_offset_bytes: offset,
             text_length_bytes: name.len,
         });
-    return id;
+    return id, true;
 }
 
-// Returns the instruction bytes of `record` as a view of the parsed buffer.
+// Returns the bytes for `entry` from its owning package or the standalone parse
+// buffer. Package views live in immutable C slab allocations.
+fn pool_bytes(file: RiteFile&, entry: PoolEntry) -> const u8[:] {
+    let start = entry.text_offset_bytes;
+    let stop = start + entry.text_length_bytes;
+    if entry.package_id == NO_PACKAGE_ID {
+        if start < 0 || stop < start || stop > file.data.len {
+            return "";
+        }
+        return file.data[start..stop];
+    }
+    return slab_package_bytes(entry.package_id, start, stop - start);
+}
+
+// Returns the instruction bytes of `record` as a view of its parsed buffer.
 fn record_iseq(file: RiteFile&, record: IrepRecord) -> const u8[:] {
     let start = record.iseq_offset_bytes;
     let stop = start + record.iseq_length_bytes;
-    return file.data[start..stop];
+    if record.package_id == NO_PACKAGE_ID {
+        return file.data[start..stop];
+    }
+    return slab_package_bytes(record.package_id, start, stop - start);
 }
 
-// Returns the text of a string pool entry as a view of the parsed buffer.
+// Returns the text of a string pool entry as a view of its parsed buffer.
 fn pool_text(file: RiteFile&, entry: PoolEntry) -> const u8[:] {
     if entry.tag != 0 {
         return "";
     }
-    let start = entry.text_offset_bytes;
-    let stop = start + entry.text_length_bytes;
-    return file.data[start..stop];
+    return pool_bytes(file, entry);
 }
 
 // Returns the first child of `record`, or -1 when it has none.

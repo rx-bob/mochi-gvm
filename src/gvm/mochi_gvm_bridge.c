@@ -51,30 +51,229 @@ _Static_assert(offsetof(goose_u8_slice, len) == sizeof(void *),
 _Static_assert(sizeof(goose_u8_slice) == sizeof(void *) + sizeof(int64_t),
                "Goose u8 slice must have no padding");
 
-/* Shrinks a Goose-owned growable byte buffer in place. Goose's borrow checker
- * conservatively forbids resizing a global buffer while another global may
- * view it, so the rollback path drops the runtime header's length after the
- * view is cleared. These structs mirror Goose's generated `gs_rhdr`,
- * `gs_stack` and `gs_rref` layouts, all emitted under
- * `#pragma pack(push, 1)`. */
-typedef struct __attribute__((packed)) {
-  uint8_t *base;
+/* C slab for immutable package bytecode and 16 KB symbol string blocks.
+ *
+ * Each category owns one growable region. Goose cannot return a C-owned slice
+ * from an extern fn, so the region publishes a single global byte view through
+ * an exported attach callback. A single view has an exact root, so generated
+ * Goose code can slice package bytes and symbol names without copying. */
+#define MOCHI_SLAB_SYMBOL_BLOCK_BYTES 16384
+#define MOCHI_SLAB_DEFAULT_LIMIT 67108864
+
+typedef struct {
+  uint8_t *data;
+  int64_t used;
+  int64_t capacity;
+} mochi_slab_region;
+
+typedef struct {
+  int64_t offset;
   int64_t len;
-} mochi_rhdr;
+} mochi_slab_package;
 
-typedef struct __attribute__((packed)) {
-  uint8_t *top;
-} mochi_stack;
+typedef struct {
+  int64_t offset;
+  int64_t used;
+} mochi_slab_symbol_block;
 
-typedef struct __attribute__((packed)) {
-  mochi_rhdr *hdr;
-  mochi_stack *stk;
-} mochi_rref;
+static mochi_slab_region g_slab_package_region = {NULL, 0, 0};
+static mochi_slab_region g_slab_symbol_region = {NULL, 0, 0};
 
-void mochi_truncate_bytes(mochi_rref bytes, int64_t length) {
-  if (length >= 0 && length <= bytes.hdr->len) {
-    bytes.hdr->len = length;
-    bytes.stk->top = bytes.hdr->base + length;
+static mochi_slab_package *g_slab_packages = NULL;
+static int64_t g_slab_package_count = 0;
+static int64_t g_slab_package_capacity = 0;
+static int64_t g_slab_package_bytes = 0;
+
+static mochi_slab_symbol_block *g_slab_symbol_blocks = NULL;
+static int64_t g_slab_symbol_block_count = 0;
+static int64_t g_slab_symbol_block_capacity = 0;
+
+static int64_t g_slab_bytes_used = 0;
+static int64_t g_slab_bytes_limit = MOCHI_SLAB_DEFAULT_LIMIT;
+
+extern uint8_t goose_slab_attach_packages(goose_u8_slice bytes);
+extern uint8_t goose_slab_attach_symbols(goose_u8_slice bytes);
+
+static void *mochi_slab_grow_entries(void *entries, int64_t *capacity, int64_t need,
+                                     size_t entry_size) {
+  void *grown;
+  int64_t next = *capacity > 0 ? *capacity : 8;
+  if (need <= *capacity) return entries;
+  while (next < need) {
+    if (next > INT64_MAX / 2) return NULL;
+    next *= 2;
+  }
+  if ((uint64_t)next > SIZE_MAX / entry_size) return NULL;
+  grown = realloc(entries, (size_t)next * entry_size);
+  if (!grown) return NULL;
+  *capacity = next;
+  return grown;
+}
+
+static int mochi_slab_reserve_region(mochi_slab_region *region, int64_t extra) {
+  uint8_t *grown;
+  int64_t need;
+  int64_t capacity;
+  if (extra < 0 || region->used > INT64_MAX - extra) return 0;
+  need = region->used + extra;
+  if (need <= region->capacity) return 1;
+  capacity = region->capacity > 0 ? region->capacity : 4096;
+  while (capacity < need) {
+    if (capacity > INT64_MAX / 2) {
+      capacity = need;
+      break;
+    }
+    capacity *= 2;
+  }
+  if ((uint64_t)capacity > SIZE_MAX) return 0;
+  grown = (uint8_t *)realloc(region->data, (size_t)capacity);
+  if (!grown) return 0;
+  region->data = grown;
+  region->capacity = capacity;
+  return 1;
+}
+
+static int mochi_slab_publish_packages(void) {
+  goose_u8_slice view;
+  if (!g_slab_package_region.data) return 1;
+  view.data = g_slab_package_region.data;
+  view.len = g_slab_package_region.capacity;
+  return goose_slab_attach_packages(view) != 0;
+}
+
+static int mochi_slab_publish_symbols(void) {
+  goose_u8_slice view;
+  if (!g_slab_symbol_region.data) return 1;
+  view.data = g_slab_symbol_region.data;
+  view.len = g_slab_symbol_region.capacity;
+  return goose_slab_attach_symbols(view) != 0;
+}
+
+static int64_t mochi_slab_symbol_blob_bytes(void) {
+  if (g_slab_symbol_block_count <= 0) return 0;
+  return g_slab_symbol_blocks[g_slab_symbol_block_count - 1].offset +
+         g_slab_symbol_blocks[g_slab_symbol_block_count - 1].used;
+}
+
+void mochi_slab_set_limit(int64_t limit) {
+  g_slab_bytes_limit = limit >= 0 ? limit : 0;
+}
+
+int64_t mochi_slab_used_bytes(void) { return g_slab_bytes_used; }
+
+int64_t mochi_slab_limit_bytes(void) { return g_slab_bytes_limit; }
+
+int64_t mochi_slab_package_bytes_used(void) { return g_slab_package_bytes; }
+
+int64_t mochi_slab_package_count(void) { return g_slab_package_count; }
+
+int64_t mochi_slab_package_offset(int64_t id) {
+  if (id < 0 || id >= g_slab_package_count) return -1;
+  return g_slab_packages[id].offset;
+}
+
+int64_t mochi_slab_push_package(goose_u8_slice bytes) {
+  int64_t id;
+  int64_t offset;
+  void *grown;
+  if (bytes.len < 0 || bytes.len > g_slab_bytes_limit ||
+      g_slab_bytes_used > g_slab_bytes_limit - bytes.len) {
+    return -1;
+  }
+  grown = mochi_slab_grow_entries(g_slab_packages, &g_slab_package_capacity,
+                                  g_slab_package_count + 1,
+                                  sizeof(mochi_slab_package));
+  if (!grown) return -1;
+  g_slab_packages = (mochi_slab_package *)grown;
+  if (!mochi_slab_reserve_region(&g_slab_package_region, bytes.len)) return -1;
+  if (!mochi_slab_publish_packages()) return -1;
+  offset = g_slab_package_region.used;
+  if (bytes.len > 0) {
+    memcpy(g_slab_package_region.data + offset, bytes.data, (size_t)bytes.len);
+  }
+  g_slab_package_region.used += bytes.len;
+  g_slab_bytes_used += bytes.len;
+  g_slab_package_bytes += bytes.len;
+  id = g_slab_package_count;
+  g_slab_packages[id].offset = offset;
+  g_slab_packages[id].len = bytes.len;
+  g_slab_package_count += 1;
+  return id;
+}
+
+void mochi_slab_truncate_packages(int64_t count) {
+  int64_t index;
+  if (count < 0) count = 0;
+  if (count > g_slab_package_count) count = g_slab_package_count;
+  for (index = count; index < g_slab_package_count; index += 1) {
+    g_slab_package_bytes -= g_slab_packages[index].len;
+    g_slab_bytes_used -= g_slab_packages[index].len;
+    g_slab_packages[index].offset = 0;
+    g_slab_packages[index].len = 0;
+  }
+  g_slab_package_count = count;
+  g_slab_package_region.used =
+      count > 0 ? g_slab_packages[count - 1].offset + g_slab_packages[count - 1].len
+                : 0;
+}
+
+int64_t mochi_slab_intern_bytes(goose_u8_slice name) {
+  mochi_slab_symbol_block *block;
+  int64_t offset;
+  void *grown;
+  if (name.len < 0 || name.len > MOCHI_SLAB_SYMBOL_BLOCK_BYTES) return -1;
+  if (name.len == 0) return 0;
+  if (g_slab_symbol_block_count <= 0 ||
+      g_slab_symbol_blocks[g_slab_symbol_block_count - 1].used + name.len >
+          MOCHI_SLAB_SYMBOL_BLOCK_BYTES) {
+    if (g_slab_bytes_limit < MOCHI_SLAB_SYMBOL_BLOCK_BYTES ||
+        g_slab_bytes_used >
+            g_slab_bytes_limit - MOCHI_SLAB_SYMBOL_BLOCK_BYTES) {
+      return -1;
+    }
+    grown = mochi_slab_grow_entries(
+        g_slab_symbol_blocks, &g_slab_symbol_block_capacity,
+        g_slab_symbol_block_count + 1, sizeof(mochi_slab_symbol_block));
+    if (!grown) return -1;
+    g_slab_symbol_blocks = (mochi_slab_symbol_block *)grown;
+    if (!mochi_slab_reserve_region(&g_slab_symbol_region,
+                                   MOCHI_SLAB_SYMBOL_BLOCK_BYTES)) {
+      return -1;
+    }
+    if (!mochi_slab_publish_symbols()) return -1;
+    block = &g_slab_symbol_blocks[g_slab_symbol_block_count];
+    block->offset = g_slab_symbol_region.used;
+    block->used = 0;
+    g_slab_symbol_region.used += MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
+    g_slab_bytes_used += MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
+    g_slab_symbol_block_count += 1;
+  }
+  block = &g_slab_symbol_blocks[g_slab_symbol_block_count - 1];
+  offset = block->offset + block->used;
+  memcpy(g_slab_symbol_region.data + offset, name.data, (size_t)name.len);
+  block->used += name.len;
+  return offset;
+}
+
+void mochi_slab_truncate_symbol_bytes(int64_t saved_offset) {
+  int64_t current = mochi_slab_symbol_blob_bytes();
+  int64_t keep;
+  int64_t index;
+  if (saved_offset < 0) saved_offset = 0;
+  if (saved_offset > current) saved_offset = current;
+  keep = saved_offset == 0
+             ? 0
+             : (saved_offset - 1) / MOCHI_SLAB_SYMBOL_BLOCK_BYTES + 1;
+  for (index = keep; index < g_slab_symbol_block_count; index += 1) {
+    g_slab_bytes_used -= MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
+    g_slab_symbol_blocks[index].offset = 0;
+    g_slab_symbol_blocks[index].used = 0;
+  }
+  g_slab_symbol_block_count = keep;
+  g_slab_symbol_region.used = keep * MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
+  if (keep > 0) {
+    g_slab_symbol_blocks[keep - 1].used =
+        saved_offset - (keep - 1) * MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
   }
 }
 

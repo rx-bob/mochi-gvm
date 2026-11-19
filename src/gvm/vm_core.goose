@@ -281,6 +281,12 @@ fn vm_append_irep(file: RiteFile&, bytes: u8[:], byte_offset: i64) -> ParseError
     return parse_rite_append(bytes, file, byte_offset);
 }
 
+// Appends one package whose bytes live in an immutable slab buffer. The
+// package id resolves record and pool offsets without `file.data`.
+fn vm_append_irep_package(file: RiteFile&, bytes: u8[:], package_id: u32) -> ParseError {
+    return parse_rite_package(bytes, file, package_id);
+}
+
 // Returns the bytes of a string value, or an empty view for any other kind.
 fn vm_string_value(machine: Vm&, value: MrbValue) -> const u8[:] {
     if mrb_is_scratch(value) {

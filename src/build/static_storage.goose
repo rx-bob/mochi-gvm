@@ -130,6 +130,7 @@ fn wasm_body_replacement(line: const u8[:]) -> const u8[:], bool {
 fn lower_wasm_runtime(source: const u8[:], output: u8[>..]&) -> bool {
     let lines = split(source, '\n');
     var index = 0;
+    var gap_lines = 0;
     while index < lines.len {
         let line = lines[index];
         let body, matched_fn = wasm_body_replacement(line);
@@ -160,6 +161,9 @@ fn lower_wasm_runtime(source: const u8[:], output: u8[>..]&) -> bool {
         } else if line == "    setvbuf(stdout, NULL, _IONBF, 0);"
             || line == "    fflush(NULL);" {
             output.append("    /* stripped for wasm */");
+        } else if line == "#define GS_STACK_GAP (1ull << 20)   /* Unmapped tail so runaway growth aborts. */" {
+            output.append("#define GS_STACK_GAP 0ull");
+            gap_lines += 1;
         } else if starts_with(line, "static const char gs_file") {
             let eq_at = find(line, " = \"");
             if eq_at >= 0 {
@@ -176,5 +180,5 @@ fn lower_wasm_runtime(source: const u8[:], output: u8[>..]&) -> bool {
         }
         index += 1;
     }
-    return true;
+    return gap_lines == 1;
 }

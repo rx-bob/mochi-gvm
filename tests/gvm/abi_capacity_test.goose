@@ -61,12 +61,19 @@ fn test_props_rejection_disposes_mount(t: goosetest::Test&) {
 
 fn test_bytecode_rejection_preserves_program(t: goosetest::Test&) {
     let instance = counter(t);
-    let previous = vm::g_abi_file.data.len;
+    let packages = vm::slab_package_count();
+    let package_bytes = vm::slab_package_bytes_used();
+    let used = vm::slab_used_bytes();
+    vm::slab_set_limit(used);
     var bytes: u8[>..] = [];
-    bytes.resize(vm::ABI_MAX_BYTECODE + 1, 0);
+    bytes.resize(16, 0);
     t.assert_eq(1, vm::abi_load_irep(bytes));
-    t.assert_true(starts_with(vm::abi_last_error(), "ABI bytecode bytes exhausted"));
-    t.assert_eq(previous, vm::g_abi_file.data.len);
+    t.assert_true(starts_with(vm::abi_last_error(), "metadata bytes exhausted"));
+    t.assert_eq(packages, vm::slab_package_count());
+    t.assert_eq(package_bytes, vm::slab_package_bytes_used());
+    t.assert_eq(used, vm::slab_used_bytes());
+    t.assert_eq(0, vm::g_abi_file.data.len);
+    vm::slab_use_default_limit();
     assert_recovered(t, instance);
 }
 
@@ -163,7 +170,9 @@ fn test_failed_irep_parse_rolls_back_partial(t: goosetest::Test&) {
     let syms = vm::symbol_ref_count(vm::g_abi_file);
     let symbols = vm::symbol_count();
     let symbol_bytes = vm::symbol_blob_length();
-    let bytecode = vm::g_abi_bytecode.len;
+    let packages = vm::slab_package_count();
+    let package_bytes = vm::slab_package_bytes_used();
+    let used = vm::slab_used_bytes();
 
     var bad = truncated_package();
     t.assert_eq(1, vm::abi_load_irep(bad[..]));
@@ -173,8 +182,10 @@ fn test_failed_irep_parse_rolls_back_partial(t: goosetest::Test&) {
     t.assert_eq(syms, vm::symbol_ref_count(vm::g_abi_file));
     t.assert_eq(symbols, vm::symbol_count());
     t.assert_eq(symbol_bytes, vm::symbol_blob_length());
-    t.assert_eq(bytecode, vm::g_abi_bytecode.len);
-    t.assert_eq(bytecode, vm::g_abi_file.data.len);
+    t.assert_eq(packages, vm::slab_package_count());
+    t.assert_eq(package_bytes, vm::slab_package_bytes_used());
+    t.assert_eq(used, vm::slab_used_bytes());
+    t.assert_eq(0, vm::g_abi_file.data.len);
 
     vm::abi_call(instance, vm::intern_symbol("increment"), 0);
     t.assert_false(vm::abi_has_error(), "existing component survives a rejected package");
@@ -198,17 +209,19 @@ fn fill_methods(limit: i64) {
     }
 }
 
-fn test_failed_irep_parse_after_reset_keeps_view(t: goosetest::Test&) {
+fn test_failed_parse_after_reset_frees_package(t: goosetest::Test&) {
     vm::abi_open();
-    let bytecode = vm::g_abi_bytecode.len;
     t.assert_eq(0, vm::g_abi_file.data.len);
+    t.assert_eq(0, vm::slab_package_count());
+    let used = vm::slab_used_bytes();
 
     var bad = truncated_package();
     t.assert_eq(1, vm::abi_load_irep(bad[..]));
     t.assert_true(starts_with(vm::abi_last_error(), "truncated"));
-    t.assert_eq(bytecode, vm::g_abi_bytecode.len);
+    t.assert_eq(0, vm::slab_package_count());
+    t.assert_eq(used, vm::slab_used_bytes());
     t.assert_eq(0, vm::g_abi_file.data.len,
-        "rolled-back load reopens the pre-call view, not the whole buffer");
+        "rolled-back load leaves the package slab empty");
     vm::abi_close();
 }
 

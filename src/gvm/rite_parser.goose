@@ -46,6 +46,7 @@ fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
     file.binary_size_bytes = 0;
     file.irep_section_offset_bytes = 0;
     file.irep_section_size_bytes = 0;
+    file.current_package_id = NO_PACKAGE_ID;
     return parse_rite_window(data, file, 0, true);
 }
 
@@ -54,8 +55,18 @@ fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
 fn parse_rite_append(data: u8[:], file: RiteFile&, data_base: i64) -> ParseError {
     file.data = data;
     file.error = ParseError.Ok;
+    file.current_package_id = NO_PACKAGE_ID;
     parse_rite_clear_capacity(file);
     return parse_rite_window(data, file, data_base, false);
+}
+
+// Parses one package whose bytes live in an immutable slab buffer. `file.data`
+// stays untouched, so records and pool entries resolve through `package_id`.
+fn parse_rite_package(data: u8[:], file: RiteFile&, package_id: u32) -> ParseError {
+    file.error = ParseError.Ok;
+    file.current_package_id = package_id;
+    parse_rite_clear_capacity(file);
+    return parse_rite_window(data, file, 0, true);
 }
 
 fn parse_rite_window(
@@ -192,7 +203,9 @@ fn parse_rite_irep(
 }
 
 // Parses the record tree that fills exactly one IREP section.
-fn parse_rite_irep_section(data: u8[:], at: i64, limit: i64, file: RiteFile&) -> ParseError {
+fn parse_rite_irep_section(
+    data: u8[:], at: i64, limit: i64, file: RiteFile&
+) -> ParseError {
     if at >= limit {
         return ParseError.Truncated;
     }
@@ -219,7 +232,9 @@ recursive fn parse_record(
     if header_err != ParseError.Ok {
         return 0, header_err;
     }
-    let record_index, body_err = parse_record_body(data, header, record_end, depth, parent_index, file);
+    let record_index, body_err = parse_record_body(
+        data, header, record_end, depth, parent_index, file
+    );
     if body_err != ParseError.Ok {
         return 0, body_err;
     }
@@ -237,7 +252,9 @@ recursive fn parse_record(
         } else {
             record_set_next_sibling(file, previous_child, child_index);
         }
-        let next_at, child_err = parse_record(data, child_at, limit, depth + 1, record_index, file);
+        let next_at, child_err = parse_record(
+            data, child_at, limit, depth + 1, record_index, file
+        );
         if child_err != ParseError.Ok {
             return 0, child_err;
         }
@@ -304,7 +321,9 @@ fn parse_record_body(
 ) -> i64, ParseError {
     var cursor = header.catch_offset_bytes + header.catch_count as i64 * IREP_CATCH_HANDLER_BYTES;
     let pool_first = pool_count(file);
-    let pool_cursor, pools_added, pool_err = parse_record_pool_block(data, cursor, record_end, file);
+    let pool_cursor, pools_added, pool_err = parse_record_pool_block(
+        data, cursor, record_end, file
+    );
     if pool_err != ParseError.Ok {
         return 0, pool_err;
     }
@@ -346,6 +365,7 @@ fn parse_record_body(
             first_child_index: -1,
             next_sibling_index: -1,
             depth: depth,
+            package_id: file.current_package_id,
         });
     return record_index, ParseError.Ok;
 }
@@ -371,7 +391,9 @@ fn parse_record_pool_block(
         if err != ParseError.Ok {
             return cursor, count, err;
         }
-        pool_push(file, entry);
+        var owned = entry;
+        owned.package_id = file.current_package_id;
+        pool_push(file, owned);
         cursor = next;
     }
     return cursor, count, ParseError.Ok;
@@ -420,7 +442,11 @@ fn parse_record_symbol_block(
         if data[name_end] != 0 {
             return cursor, count, ParseError.MissingTerminator;
         }
-        let id = intern_symbol(data[cursor..name_end]);
+        let id, interned = intern_symbol_checked(data[cursor..name_end]);
+        if !interned {
+            return cursor, count, parse_rite_fail_capacity(file, ParseResource.SymbolTable,
+                name_length, slab_used_bytes(), slab_limit_bytes());
+        }
         symbol_ref_push(file, SymbolId {
                 index: id
             });

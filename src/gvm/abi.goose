@@ -18,6 +18,7 @@ import.rite_parser;
 import.rite_types;
 import.scratch_alloc;
 import.signals;
+import.slab;
 import.state_pool;
 import.state_reclaim;
 import.value_arena;
@@ -45,9 +46,6 @@ var g_abi_machine: Vm = Vm {
     ..
 };
 var g_abi_call_args: MrbValue[..ABI_MAX_CALL_ARGS] = [];
-// `g_abi_file` keeps a view into this buffer, so loaded bytes are retained
-// rather than cleared. The bridge's component set fits well under the cap.
-var g_abi_bytecode: u8[>..] = [];
 var g_abi_error: bool = false;
 var g_abi_error_text: u8[>..] = [];
 // Set by a native host adapter before it returns NATIVE_FAIL. It makes a
@@ -57,8 +55,6 @@ var g_abi_patch_bytes: u8[>..] = [];
 var g_abi_json: u8[>..] = [];
 var g_abi_fetch_json: u8[>..] = [];
 var g_abi_capability_json: u8[>..] = [];
-
-extern fn mochi_truncate_bytes(bytes: u8[>..]&, length: i64);
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -139,8 +135,7 @@ fn abi_record_call_context(receiver: u64, method_symbol: u32) {
 // Everything one package load can append. A parse failure restores every field
 // so a rejected package leaves the runtime byte-for-byte as it found it.
 struct IrepCheckpoint {
-    bytecode_bytes: i64,
-    data_bytes: i64,
+    packages: i64,
     records: i64,
     pools: i64,
     syms: i64,
@@ -151,12 +146,12 @@ struct IrepCheckpoint {
     irep_section_offset_bytes: i64,
     irep_section_size_bytes: u32,
     error: ParseError,
+    current_package_id: u32,
 }
 
 fn abi_irep_checkpoint() -> IrepCheckpoint {
     return IrepCheckpoint {
-        bytecode_bytes: g_abi_bytecode.len,
-        data_bytes: g_abi_file.data.len,
+        packages: slab_package_count(),
         records: record_count(g_abi_file),
         pools: pool_count(g_abi_file),
         syms: symbol_ref_count(g_abi_file),
@@ -167,15 +162,8 @@ fn abi_irep_checkpoint() -> IrepCheckpoint {
         irep_section_offset_bytes: g_abi_file.irep_section_offset_bytes,
         irep_section_size_bytes: g_abi_file.irep_section_size_bytes,
         error: g_abi_file.error,
+        current_package_id: g_abi_file.current_package_id,
     };
-}
-
-// Releases the package's bytecode. `RiteFile.data` views this buffer, so it
-// must be cleared before the buffer shrinks and rebound afterwards.
-fn abi_bytecode_truncate(length: i64, data_length: i64) {
-    g_abi_file.data = "";
-    mochi_truncate_bytes(g_abi_bytecode, length);
-    g_abi_file.data = g_abi_bytecode[..data_length];
 }
 
 fn abi_restore_irep(checkpoint: IrepCheckpoint) {
@@ -184,11 +172,12 @@ fn abi_restore_irep(checkpoint: IrepCheckpoint) {
     symbol_ref_truncate(g_abi_file, checkpoint.syms);
     root_truncate(g_abi_file, checkpoint.roots);
     symbol_table_truncate(checkpoint.symbol_entries, checkpoint.symbol_blob_bytes);
-    abi_bytecode_truncate(checkpoint.bytecode_bytes, checkpoint.data_bytes);
+    slab_truncate_packages(checkpoint.packages);
     g_abi_file.binary_size_bytes = checkpoint.binary_size_bytes;
     g_abi_file.irep_section_offset_bytes = checkpoint.irep_section_offset_bytes;
     g_abi_file.irep_section_size_bytes = checkpoint.irep_section_size_bytes;
     g_abi_file.error = checkpoint.error;
+    g_abi_file.current_package_id = checkpoint.current_package_id;
     parse_rite_clear_capacity(g_abi_file);
 }
 
@@ -204,6 +193,7 @@ fn abi_capacity_for_parse_resource(resource: ParseResource) -> CapacityResource 
 
 fn abi_reset() {
     g_abi_file.data = "";
+    slab_truncate_packages(0);
     record_clear(g_abi_file);
     pool_clear(g_abi_file);
     symbol_ref_clear(g_abi_file);
@@ -213,6 +203,7 @@ fn abi_reset() {
     g_abi_file.binary_size_bytes = 0;
     g_abi_file.irep_section_offset_bytes = 0;
     g_abi_file.irep_section_size_bytes = 0;
+    g_abi_file.current_package_id = NO_PACKAGE_ID;
 
     state_class_clear(g_abi_pool);
     const_clear(g_abi_pool);
@@ -293,6 +284,7 @@ fn abi_define_class(name_symbol: u32, superclass_id: u32) -> u32 {
 }
 
 fn abi_open() -> i64 {
+    slab_use_default_limit();
     abi_reset();
     return 0;
 }
@@ -303,13 +295,14 @@ fn abi_close() {
 
 fn abi_load_irep(bytes: const u8[:]) -> i64 {
     abi_clear_error();
-    let offset = g_abi_bytecode.len;
-    if offset + bytes.len > ABI_MAX_BYTECODE {
+    let checkpoint = abi_irep_checkpoint();
+    let package_id = slab_push_package(bytes);
+    if package_id < 0 {
         g_abi_pool.failure = CapacityFailure {
-            resource: CapacityResource.AbiBytecode,
+            resource: CapacityResource.Metadata,
             requested: bytes.len,
-            used: offset,
-            capacity: ABI_MAX_BYTECODE,
+            used: slab_used_bytes(),
+            capacity: slab_limit_bytes(),
             active: true,
         };
         vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
@@ -317,11 +310,7 @@ fn abi_load_irep(bytes: const u8[:]) -> i64 {
         abi_record_vm_error(g_abi_machine);
         return 1;
     }
-    let checkpoint = abi_irep_checkpoint();
-    g_abi_file.data = "";
-    g_abi_bytecode.append(bytes);
-    g_abi_file.data = g_abi_bytecode[..];
-    let err = vm_append_irep(g_abi_file, g_abi_bytecode[..], offset);
+    let err = vm_append_irep_package(g_abi_file, bytes, package_id as u32);
     g_abi_machine.error = VmError.Ok;
     if err != ParseError.Ok {
         let resource = abi_capacity_for_parse_resource(g_abi_file.error_resource);

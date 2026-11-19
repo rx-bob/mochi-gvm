@@ -12,12 +12,10 @@ import.vm_core;
 import.vm_num;
 
 fn vm_bigint_literal(file: RiteFile&, entry: PoolEntry) -> i64, bool {
-    let start = entry.text_offset_bytes;
-    let stop = start + entry.text_length_bytes;
-    if start < 0 || stop > file.data.len || stop - start < 3 {
+    let blob = pool_bytes(file, entry);
+    if blob.len < 3 {
         return 0, false;
     }
-    let blob = file.data[start..stop];
     let digits = blob[0]as i64;
     if blob.len != digits + 2 {
         return 0, false;

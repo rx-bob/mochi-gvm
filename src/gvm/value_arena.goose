@@ -152,7 +152,6 @@ enum CapacityResource {
     Components,
     Bindings,
     Classes,
-    AbiBytecode,
     HostCommands,
     ComputedEntries,
     IrepRecords,
@@ -160,6 +159,7 @@ enum CapacityResource {
     IrepSymbols,
     SymbolTable,
     Methods,
+    Metadata,
 }
 
 struct CapacityFailure {

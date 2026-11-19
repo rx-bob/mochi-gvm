@@ -14,6 +14,27 @@ fn test_symbol_interning_deduplicates(t: goosetest::Test&) {
     t.assert_true(vm::symbol_count() > 0);
 }
 
+fn test_symbol_blob_spans_multiple_16kb_blocks(t: goosetest::Test&) {
+    let before = vm::symbol_blob_length();
+    var ids: u32[>..] = [];
+    for i in 0..2100 {
+        let id = vm::intern_symbol(str("symbol_block_probe_", i));
+        if id == vm::NULL_SYMBOL {
+            t.assert_true(false, "symbol interning failed");
+            return;
+        }
+        ids.push(id);
+    }
+    t.assert_true(vm::symbol_blob_length() - before > 32768);
+    for i in 0..ids.len {
+        let expected = str("symbol_block_probe_", i);
+        if vm::symbol_name(ids[i]) != expected {
+            t.assert_true(false, "symbol name view crossed a block boundary");
+            return;
+        }
+    }
+}
+
 fn test_null_symbol_has_no_name(t: goosetest::Test&) {
     t.assert_true(vm::symbol_name(vm::NULL_SYMBOL) == "");
 }

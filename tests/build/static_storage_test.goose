@@ -27,7 +27,7 @@ fn test_changed_initialization_rejected(t: goosetest::Test&) {
 }
 
 fn test_lower_wasm_runtime(t: goosetest::Test&) {
-    let sample = "#define GS_IDX(i, n, f, l) \\\n    ((uint64_t)(i) < (uint64_t)(n) ? (i) \\\n                                   : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))\nstatic const char gs_file0[] = \"src/gvm/vm_num.goose\";\nstatic GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {\n    fprintf(stderr, \"fail\\n\");\n}\nstatic GS_NORETURN void gs_park(void) {\n    for (;;) pause();\n}\nstatic void gs_regions_init(void) {\n    sigaction(SIGSEGV, &sa, &gs_prev_segv);\n}\n";
+    let sample = "#define GS_IDX(i, n, f, l) \\\n    ((uint64_t)(i) < (uint64_t)(n) ? (i) \\\n                                   : (gs_idxfail((int64_t)(i), (n), (f), (l)), (int64_t)0))\nstatic const char gs_file0[] = \"src/gvm/vm_num.goose\";\n#ifndef GS_STACK_GAP\n#define GS_STACK_GAP (1ull << 20)   /* Unmapped tail so runaway growth aborts. */\n#endif\nstatic GS_NORETURN void gs_fail(const void *msg, int64_t len, const char *file, int line) {\n    fprintf(stderr, \"fail\\n\");\n}\nstatic GS_NORETURN void gs_park(void) {\n    for (;;) pause();\n}\nstatic void gs_regions_init(void) {\n    sigaction(SIGSEGV, &sa, &gs_prev_segv);\n}\n";
     var output: u8[>..] = [];
     t.assert_true(static_storage::lower_wasm_runtime(sample, output));
     t.assert_true(find(output[..], "__builtin_trap()") >= 0);
@@ -36,4 +36,11 @@ fn test_lower_wasm_runtime(t: goosetest::Test&) {
     t.assert_true(find(output[..], "fprintf") < 0);
     t.assert_true(find(output[..], "pause()") < 0);
     t.assert_true(find(output[..], "sigaction") < 0);
+    t.assert_true(find(output[..], "#define GS_STACK_GAP 0ull") >= 0);
+    t.assert_true(find(output[..], "(1ull << 20)") < 0);
+}
+
+fn test_lower_wasm_requires_gap_anchor(t: goosetest::Test&) {
+    var output: u8[>..] = [];
+    t.assert_false(static_storage::lower_wasm_runtime("int gs_probe;\n", output));
 }
