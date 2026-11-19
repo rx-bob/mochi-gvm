@@ -49,6 +49,10 @@ fn computed_def_clear(machine: Vm&) {
     machine.computed_definitions.clear();
 }
 
+fn computed_def_truncate(machine: Vm&, count: i64) {
+    machine.computed_definitions.resize(count);
+}
+
 fn computed_root_count(machine: Vm&) -> i64 {
     return machine.computed_roots.len;
 }
@@ -63,6 +67,10 @@ fn computed_root_push(machine: Vm&, root: u32) {
 
 fn computed_root_clear(machine: Vm&) {
     machine.computed_roots.clear();
+}
+
+fn computed_root_truncate(machine: Vm&, count: i64) {
+    machine.computed_roots.resize(count);
 }
 
 fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue {
@@ -87,8 +95,14 @@ fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue
         }
     }
     let count = builtin_array_length(machine.pool, machine.scratch, args[1]);
-    if count > MAX_TRACKED_IVARS || computed_def_count(machine) >= MAX_VM_METHODS {
+    if count > MAX_TRACKED_IVARS {
         machine.error = VmError.InvalidArgument;
+        return mrb_nil();
+    }
+    if computed_def_count(machine) >= MAX_VM_METHODS {
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+            computed_def_count(machine), MAX_VM_METHODS);
+        machine.error = VmError.StateCapacity;
         return mrb_nil();
     }
     // Validate the entire slice before publishing a descriptor: a rejected

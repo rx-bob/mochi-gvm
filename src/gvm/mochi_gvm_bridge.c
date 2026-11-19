@@ -51,6 +51,33 @@ _Static_assert(offsetof(goose_u8_slice, len) == sizeof(void *),
 _Static_assert(sizeof(goose_u8_slice) == sizeof(void *) + sizeof(int64_t),
                "Goose u8 slice must have no padding");
 
+/* Shrinks a Goose-owned growable byte buffer in place. Goose's borrow checker
+ * conservatively forbids resizing a global buffer while another global may
+ * view it, so the rollback path drops the runtime header's length after the
+ * view is cleared. These structs mirror Goose's generated `gs_rhdr`,
+ * `gs_stack` and `gs_rref` layouts, all emitted under
+ * `#pragma pack(push, 1)`. */
+typedef struct __attribute__((packed)) {
+  uint8_t *base;
+  int64_t len;
+} mochi_rhdr;
+
+typedef struct __attribute__((packed)) {
+  uint8_t *top;
+} mochi_stack;
+
+typedef struct __attribute__((packed)) {
+  mochi_rhdr *hdr;
+  mochi_stack *stk;
+} mochi_rref;
+
+void mochi_truncate_bytes(mochi_rref bytes, int64_t length) {
+  if (length >= 0 && length <= bytes.hdr->len) {
+    bytes.hdr->len = length;
+    bytes.stk->top = bytes.hdr->base + length;
+  }
+}
+
 /* Symbols emitted by `abi.goose`; `mrb_abi_shim.c` declares most of them for
  * its own use, while the patch trio is only needed here. */
 extern int64_t goose_vm_load_irep(goose_u8_slice bytes);

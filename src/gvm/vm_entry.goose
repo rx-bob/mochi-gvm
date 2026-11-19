@@ -6,6 +6,7 @@ import.signals;
 import.state_pool;
 import.state_reclaim;
 import.value_arena;
+import.vm_boot;
 import.vm_core;
 import.vm_methods;
 import.vm_ops;

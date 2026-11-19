@@ -103,6 +103,10 @@ fn native_method_clear(machine: Vm&) {
     machine.native_methods.clear();
 }
 
+fn native_method_truncate(machine: Vm&, count: i64) {
+    machine.native_methods.resize(count);
+}
+
 fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native_id: u32) {
     for index in 0..native_method_count(machine) {
         let entry = native_method_at(machine, index);
@@ -114,7 +118,9 @@ fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native
         }
     }
     if native_method_count(machine) >= MAX_VM_METHODS {
-        machine.error = VmError.NoMethod;
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+            native_method_count(machine), MAX_VM_METHODS);
+        machine.error = VmError.StateCapacity;
         return;
     }
     native_method_push(machine, NativeMethod {

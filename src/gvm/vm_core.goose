@@ -206,6 +206,10 @@ fn method_clear(machine: Vm&) {
     machine.methods.clear();
 }
 
+fn method_truncate(machine: Vm&, count: i64) {
+    machine.methods.resize(count);
+}
+
 fn vm_step_continue(pc: i64) -> Step {
     return Step {
         pc: pc,
@@ -398,7 +402,9 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
         }
     }
     if method_count(machine) >= MAX_VM_METHODS {
-        machine.error = VmError.NoMethod;
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1, method_count(machine),
+            MAX_VM_METHODS);
+        machine.error = VmError.StateCapacity;
         return;
     }
     method_push(machine, MethodEntry {

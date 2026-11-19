@@ -14,12 +14,14 @@ import.host_api;
 import.host_api_exports;
 import.ivar_mask;
 import.json_args;
+import.rite_parser;
 import.rite_types;
 import.scratch_alloc;
 import.signals;
 import.state_pool;
 import.state_reclaim;
 import.value_arena;
+import.vm_boot;
 import.vm_core;
 import.vm_entry;
 import.vm_methods;
@@ -55,6 +57,8 @@ var g_abi_patch_bytes: u8[>..] = [];
 var g_abi_json: u8[>..] = [];
 var g_abi_fetch_json: u8[>..] = [];
 var g_abi_capability_json: u8[>..] = [];
+
+extern fn mochi_truncate_bytes(bytes: u8[>..]&, length: i64);
 
 fn abi_clear_error() {
     g_abi_error = false;
@@ -132,6 +136,72 @@ fn abi_record_call_context(receiver: u64, method_symbol: u32) {
     }
 }
 
+// Everything one package load can append. A parse failure restores every field
+// so a rejected package leaves the runtime byte-for-byte as it found it.
+struct IrepCheckpoint {
+    bytecode_bytes: i64,
+    data_bytes: i64,
+    records: i64,
+    pools: i64,
+    syms: i64,
+    roots: i64,
+    symbol_entries: i64,
+    symbol_blob_bytes: i64,
+    binary_size_bytes: u32,
+    irep_section_offset_bytes: i64,
+    irep_section_size_bytes: u32,
+    error: ParseError,
+}
+
+fn abi_irep_checkpoint() -> IrepCheckpoint {
+    return IrepCheckpoint {
+        bytecode_bytes: g_abi_bytecode.len,
+        data_bytes: g_abi_file.data.len,
+        records: record_count(g_abi_file),
+        pools: pool_count(g_abi_file),
+        syms: symbol_ref_count(g_abi_file),
+        roots: root_count(g_abi_file),
+        symbol_entries: symbol_count(),
+        symbol_blob_bytes: symbol_blob_length(),
+        binary_size_bytes: g_abi_file.binary_size_bytes,
+        irep_section_offset_bytes: g_abi_file.irep_section_offset_bytes,
+        irep_section_size_bytes: g_abi_file.irep_section_size_bytes,
+        error: g_abi_file.error,
+    };
+}
+
+// Releases the package's bytecode. `RiteFile.data` views this buffer, so it
+// must be cleared before the buffer shrinks and rebound afterwards.
+fn abi_bytecode_truncate(length: i64, data_length: i64) {
+    g_abi_file.data = "";
+    mochi_truncate_bytes(g_abi_bytecode, length);
+    g_abi_file.data = g_abi_bytecode[..data_length];
+}
+
+fn abi_restore_irep(checkpoint: IrepCheckpoint) {
+    record_truncate(g_abi_file, checkpoint.records);
+    pool_truncate(g_abi_file, checkpoint.pools);
+    symbol_ref_truncate(g_abi_file, checkpoint.syms);
+    root_truncate(g_abi_file, checkpoint.roots);
+    symbol_table_truncate(checkpoint.symbol_entries, checkpoint.symbol_blob_bytes);
+    abi_bytecode_truncate(checkpoint.bytecode_bytes, checkpoint.data_bytes);
+    g_abi_file.binary_size_bytes = checkpoint.binary_size_bytes;
+    g_abi_file.irep_section_offset_bytes = checkpoint.irep_section_offset_bytes;
+    g_abi_file.irep_section_size_bytes = checkpoint.irep_section_size_bytes;
+    g_abi_file.error = checkpoint.error;
+    parse_rite_clear_capacity(g_abi_file);
+}
+
+fn abi_capacity_for_parse_resource(resource: ParseResource) -> CapacityResource {
+    return match resource {
+        None => CapacityResource.None,
+        IrepRecords => CapacityResource.IrepRecords,
+        IrepPools => CapacityResource.IrepPools,
+        IrepSymbols => CapacityResource.IrepSymbols,
+        SymbolTable => CapacityResource.SymbolTable,
+    };
+}
+
 fn abi_reset() {
     g_abi_file.data = "";
     record_clear(g_abi_file);
@@ -139,6 +209,7 @@ fn abi_reset() {
     symbol_ref_clear(g_abi_file);
     root_clear(g_abi_file);
     g_abi_file.error = ParseError.Ok;
+    parse_rite_clear_capacity(g_abi_file);
     g_abi_file.binary_size_bytes = 0;
     g_abi_file.irep_section_offset_bytes = 0;
     g_abi_file.irep_section_size_bytes = 0;
@@ -246,13 +317,29 @@ fn abi_load_irep(bytes: const u8[:]) -> i64 {
         abi_record_vm_error(g_abi_machine);
         return 1;
     }
+    let checkpoint = abi_irep_checkpoint();
     g_abi_file.data = "";
     g_abi_bytecode.append(bytes);
     g_abi_file.data = g_abi_bytecode[..];
     let err = vm_append_irep(g_abi_file, g_abi_bytecode[..], offset);
     g_abi_machine.error = VmError.Ok;
     if err != ParseError.Ok {
-        abi_fail(parse_error_name(err));
+        let resource = abi_capacity_for_parse_resource(g_abi_file.error_resource);
+        let requested = g_abi_file.error_requested;
+        let used = g_abi_file.error_used;
+        let capacity = g_abi_file.error_capacity;
+        abi_restore_irep(checkpoint);
+        if resource != CapacityResource.None {
+            vm_set_error_context(g_abi_machine, NULL_CLASS_ID, NULL_SYMBOL, -1);
+            g_abi_machine.error_context.capacity_resource = resource;
+            g_abi_machine.error_context.capacity_requested = requested;
+            g_abi_machine.error_context.capacity_used = used;
+            g_abi_machine.error_context.capacity_limit = capacity;
+            g_abi_machine.error = VmError.StateCapacity;
+            abi_fail(abi_format_error_context());
+        } else {
+            abi_fail(parse_error_name(err));
+        }
         return 1;
     }
     return 0;

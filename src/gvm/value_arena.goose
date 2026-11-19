@@ -155,6 +155,11 @@ enum CapacityResource {
     AbiBytecode,
     HostCommands,
     ComputedEntries,
+    IrepRecords,
+    IrepPools,
+    IrepSymbols,
+    SymbolTable,
+    Methods,
 }
 
 struct CapacityFailure {

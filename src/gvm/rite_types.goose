@@ -52,6 +52,17 @@ enum ParseError {
     TooManyEntries,
 }
 
+// The append-only table that rejected a package for capacity. The ABI layer
+// maps these to `CapacityResource` so parser failures report the same named
+// resource and counts as runtime allocation failures.
+enum ParseResource {
+    None,
+    IrepRecords,
+    IrepPools,
+    IrepSymbols,
+    SymbolTable,
+}
+
 // One parsed IREP record. Every field is a scalar: the record is flat, has no
 // pointer graph, and addresses the payload only through offsets into the input.
 struct IrepRecord {
@@ -114,6 +125,10 @@ root struct RiteFile {
     syms: SymbolId[>..] = [],
     roots: i64[>..] = [],
     error: ParseError = ParseError.Ok,
+    error_resource: ParseResource = ParseResource.None,
+    error_requested: i64 = 0,
+    error_used: i64 = 0,
+    error_capacity: i64 = 0,
     binary_size_bytes: u32 = 0,
     irep_section_offset_bytes: i64 = 0,
     irep_section_size_bytes: u32 = 0,
@@ -153,6 +168,10 @@ fn record_clear(file: RiteFile&) {
     file.records.clear();
 }
 
+fn record_truncate(file: RiteFile&, count: i64) {
+    file.records.resize(count);
+}
+
 fn pool_count(file: RiteFile&) -> i64 {
     return file.pools.len;
 }
@@ -167,6 +186,10 @@ fn pool_push(file: RiteFile&, entry: PoolEntry) {
 
 fn pool_clear(file: RiteFile&) {
     file.pools.clear();
+}
+
+fn pool_truncate(file: RiteFile&, count: i64) {
+    file.pools.resize(count);
 }
 
 fn symbol_ref_count(file: RiteFile&) -> i64 {
@@ -185,6 +208,10 @@ fn symbol_ref_clear(file: RiteFile&) {
     file.syms.clear();
 }
 
+fn symbol_ref_truncate(file: RiteFile&, count: i64) {
+    file.syms.resize(count);
+}
+
 fn root_count(file: RiteFile&) -> i64 {
     return file.roots.len;
 }
@@ -199,6 +226,10 @@ fn root_push(file: RiteFile&, record_index: i64) {
 
 fn root_clear(file: RiteFile&) {
     file.roots.clear();
+}
+
+fn root_truncate(file: RiteFile&, count: i64) {
+    file.roots.resize(count);
 }
 
 // Symbol table accessors. IDs index `entries`; each entry views `blob` without
@@ -222,6 +253,11 @@ fn symbol_blob_append(name: u8[:]) {
 
 fn symbol_blob_slice(start: i64, stop: i64) -> const u8[:] {
     return g_symbol_table.blob[start..stop];
+}
+
+fn symbol_table_truncate(entries: i64, blob_length: i64) {
+    g_symbol_table.entries.resize(entries);
+    g_symbol_table.blob.resize(blob_length);
 }
 
 // Returns a human-readable name for a parse result.

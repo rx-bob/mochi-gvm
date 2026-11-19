@@ -42,6 +42,7 @@ fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
     symbol_ref_clear(file);
     root_clear(file);
     file.error = ParseError.Ok;
+    parse_rite_clear_capacity(file);
     file.binary_size_bytes = 0;
     file.irep_section_offset_bytes = 0;
     file.irep_section_size_bytes = 0;
@@ -53,6 +54,7 @@ fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
 fn parse_rite_append(data: u8[:], file: RiteFile&, data_base: i64) -> ParseError {
     file.data = data;
     file.error = ParseError.Ok;
+    parse_rite_clear_capacity(file);
     return parse_rite_window(data, file, data_base, false);
 }
 
@@ -226,7 +228,8 @@ recursive fn parse_record(
     var previous_child: i64 = -1;
     for _ in header.child_count {
         if record_count(file) >= MAX_IREP_RECORDS {
-            return 0, ParseError.TooManyEntries;
+            return 0, parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
+                record_count(file), MAX_IREP_RECORDS);
         }
         let child_index = record_count(file);
         if previous_child < 0 {
@@ -320,7 +323,8 @@ fn parse_record_body(
         return 0, ParseError.RecordSizeMismatch;
     }
     if record_count(file) >= MAX_IREP_RECORDS {
-        return 0, ParseError.TooManyEntries;
+        return 0, parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
+            record_count(file), MAX_IREP_RECORDS);
     }
 
     let record_index = record_count(file);
@@ -360,7 +364,8 @@ fn parse_record_pool_block(
     var cursor = at + 2;
     for _ in count {
         if pool_count(file) >= MAX_IREP_POOL_ENTRIES {
-            return cursor, count, ParseError.TooManyEntries;
+            return cursor, count, parse_rite_fail_capacity(file, ParseResource.IrepPools, 1,
+                pool_count(file), MAX_IREP_POOL_ENTRIES);
         }
         let entry, next, err = parse_pool_entry(data, cursor, limit);
         if err != ParseError.Ok {
@@ -385,9 +390,13 @@ fn parse_record_symbol_block(
     }
     var cursor = at + 2;
     for _ in count {
-        if symbol_ref_count(file) >= MAX_IREP_SYMBOL_ENTRIES ||
-        symbol_count() >= MAX_SYMBOL_ENTRIES {
-            return cursor, count, ParseError.TooManyEntries;
+        if symbol_ref_count(file) >= MAX_IREP_SYMBOL_ENTRIES {
+            return cursor, count, parse_rite_fail_capacity(file, ParseResource.IrepSymbols, 1,
+                symbol_ref_count(file), MAX_IREP_SYMBOL_ENTRIES);
+        }
+        if symbol_count() >= MAX_SYMBOL_ENTRIES {
+            return cursor, count, parse_rite_fail_capacity(file, ParseResource.SymbolTable, 1,
+                symbol_count(), MAX_SYMBOL_ENTRIES);
         }
         if cursor + 2 > limit {
             return cursor, count, ParseError.Truncated;
@@ -424,6 +433,25 @@ fn parse_record_symbol_block(
 fn parse_rite_fail(file: RiteFile&, err: ParseError) -> ParseError {
     file.error = err;
     return err;
+}
+
+// Records the table that rejected a package before marking the parse failed.
+fn parse_rite_fail_capacity(
+    file: RiteFile&, resource: ParseResource, requested: i64, used: i64, capacity: i64
+) -> ParseError {
+    file.error_resource = resource;
+    file.error_requested = requested;
+    file.error_used = used;
+    file.error_capacity = capacity;
+    return parse_rite_fail(file, ParseError.TooManyEntries);
+}
+
+// Clears the capacity detail from a previous parse attempt.
+fn parse_rite_clear_capacity(file: RiteFile&) {
+    file.error_resource = ParseResource.None;
+    file.error_requested = 0;
+    file.error_used = 0;
+    file.error_capacity = 0;
 }
 
 // A default header used on the error path of `parse_record_header`.

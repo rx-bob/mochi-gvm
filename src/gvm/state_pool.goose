@@ -141,6 +141,10 @@ fn state_class_clear(pool: StatePool&) {
     pool.classes.clear();
 }
 
+fn state_class_truncate(pool: StatePool&, count: i64) {
+    pool.classes.resize(count);
+}
+
 fn const_count(pool: StatePool&) -> i64 {
     return pool.consts.len;
 }
@@ -159,6 +163,10 @@ fn const_push(pool: StatePool&, entry: ConstEntry) {
 
 fn const_clear(pool: StatePool&) {
     pool.consts.clear();
+}
+
+fn const_truncate(pool: StatePool&, count: i64) {
+    pool.consts.resize(count);
 }
 
 fn state_component_count(pool: StatePool&) -> i64 {

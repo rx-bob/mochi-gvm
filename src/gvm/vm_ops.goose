@@ -6,6 +6,7 @@
 // IREP. Keeping the handlers out of `vm_core.goose` keeps every function small.
 namespace vm;
 
+import.capacity_config;
 import.rite_types;
 import.scratch_alloc;
 import.scratch_reclaim;
@@ -20,31 +21,8 @@ import.vm_num;
 import.vm_ops_collections;
 import.vm_ops_control;
 
-// Runs the root IREP once per loaded program. Each root advances `booted_roots`
-// before executing so a runtime failure in one class body does not leave later
-// components unbooted.
-fn vm_ensure_booted(machine: Vm&) {
-    if record_count(machine.file) == 0 {
-        machine.error = VmError.BadOpcode;
-        return;
-    }
-    var first_error = VmError.Ok;
-    while machine.booted_roots < root_count(machine.file) {
-        let root = root_at(machine.file, machine.booted_roots);
-        machine.booted_roots += 1;
-        vm_exec(machine, root, mrb_nil(), -1);
-        if machine.error != VmError.Ok {
-            if first_error == VmError.Ok {
-                first_error = machine.error;
-            }
-            machine.error = VmError.Ok;
-        }
-    }
-    if first_error != VmError.Ok {
-        machine.error = first_error;
-    }
-}
-
+// Runs one instruction stream. Root boot transacting lives in
+// `vm_boot.goose` so this file stays within the configured line ceiling.
 recursive fn vm_exec(
     machine: Vm&, record_index: i64, self_value: MrbValue, dst_register: i64
 ) -> MrbValue {
@@ -435,6 +413,11 @@ fn vm_op_class(
     let defined = if found {
         class_id
     } else {
+        if state_class_count(machine.pool) >= MAX_STATE_CLASSES {
+            state_fail_capacity(machine.pool, CapacityResource.Classes, 1,
+                state_class_count(machine.pool), MAX_STATE_CLASSES);
+            return vm_fail(machine, VmError.StateCapacity, pc + 2);
+        }
         state_define_class(machine.pool, symbol, superclass_id)
     };
     if !vm_write_register(machine, record, frame.base, ops.a, mrb_class(defined)) {

@@ -159,6 +159,11 @@ fn capacity_resource_name(resource: CapacityResource) -> u8[:] {
         Classes => "classes",
         AbiBytecode => "ABI bytecode bytes",
         HostCommands => "host command bytes",
+        IrepRecords => "IREP records",
+        IrepPools => "IREP literal pool entries",
+        IrepSymbols => "IREP symbol references",
+        SymbolTable => "symbol table entries",
+        Methods => "VM methods",
     };
 }
 
