@@ -11,6 +11,7 @@ import.computed;
 import.ivar_mask;
 import.scratch_alloc;
 import.signals;
+import.slab;
 import.value_arena;
 import.vm_core;
 import.vm_errors;
@@ -42,8 +43,7 @@ struct ByteRange {
 // `state_reclaim.goose` frees unreachable headers, ivars, slots and string
 // ranges into the free lists below at safe VM boundaries.
 root struct StatePool {
-    classes: ClassDef[>..] = [],
-    consts: ConstEntry[>..] = [],
+    metadata_handle: i64 = -1,
     // Back the advertised capacities directly. A Goose growable region uses
     // the small data-stack reservation; WASM cannot protect its guard pages.
     objects: ArenaObject[..MAX_STATE_OBJECTS] = [],
@@ -122,51 +122,72 @@ fn state_slot_count(pool: StatePool&) -> i64 {
     return pool.slots.len;
 }
 
-fn state_class_count(pool: StatePool&) -> i64 {
-    return pool.classes.len;
-}
-
 // Accessors for the class and constant tables. Class IDs are table positions;
 // callers use `class_at` instead of indexing the table directly.
 
-fn class_at(pool: StatePool&, class_id: u32) -> ClassDef {
-    return pool.classes[class_id];
+extern fn mochi_meta_class_at(handle: i64, index: i64) -> ClassDef;
+
+extern fn mochi_meta_class_push(handle: i64, entry: ClassDef) -> bool;
+
+extern fn mochi_meta_class_truncate(handle: i64, count: i64);
+
+extern fn mochi_meta_const_at(handle: i64, index: i64) -> ConstEntry;
+
+extern fn mochi_meta_const_set_at(handle: i64, index: i64, entry: ConstEntry);
+
+extern fn mochi_meta_const_push(handle: i64, entry: ConstEntry) -> bool;
+
+extern fn mochi_meta_const_truncate(handle: i64, count: i64);
+
+fn pool_metadata(pool: StatePool&) -> i64 {
+    if pool.metadata_handle < 0 {
+        pool.metadata_handle = mochi_meta_new_pool();
+    }
+    return pool.metadata_handle;
 }
 
-fn class_push(pool: StatePool&, definition: ClassDef) {
-    pool.classes.push(definition);
+fn state_class_count(pool: StatePool&) -> i64 {
+    return mochi_meta_count(pool_metadata(pool), 0);
+}
+
+fn class_at(pool: StatePool&, class_id: u32) -> ClassDef {
+    return mochi_meta_class_at(pool_metadata(pool), class_id);
+}
+
+fn class_push(pool: StatePool&, definition: ClassDef) -> bool {
+    return mochi_meta_class_push(pool_metadata(pool), definition);
 }
 
 fn state_class_clear(pool: StatePool&) {
-    pool.classes.clear();
+    mochi_meta_class_truncate(pool_metadata(pool), 0);
 }
 
 fn state_class_truncate(pool: StatePool&, count: i64) {
-    pool.classes.resize(count);
+    mochi_meta_class_truncate(pool_metadata(pool), count);
 }
 
 fn const_count(pool: StatePool&) -> i64 {
-    return pool.consts.len;
+    return mochi_meta_count(pool_metadata(pool), 1);
 }
 
 fn const_at(pool: StatePool&, index: i64) -> ConstEntry {
-    return pool.consts[index];
+    return mochi_meta_const_at(pool_metadata(pool), index);
 }
 
 fn const_set_at(pool: StatePool&, index: i64, entry: ConstEntry) {
-    pool.consts[index] = entry;
+    mochi_meta_const_set_at(pool_metadata(pool), index, entry);
 }
 
-fn const_push(pool: StatePool&, entry: ConstEntry) {
-    pool.consts.push(entry);
+fn const_push(pool: StatePool&, entry: ConstEntry) -> bool {
+    return mochi_meta_const_push(pool_metadata(pool), entry);
 }
 
 fn const_clear(pool: StatePool&) {
-    pool.consts.clear();
+    mochi_meta_const_truncate(pool_metadata(pool), 0);
 }
 
 fn const_truncate(pool: StatePool&, count: i64) {
-    pool.consts.resize(count);
+    mochi_meta_const_truncate(pool_metadata(pool), count);
 }
 
 fn state_component_count(pool: StatePool&) -> i64 {
@@ -216,12 +237,15 @@ fn state_has_byte_capacity(pool: StatePool&, length: i64) -> bool {
 
 // Appends a class definition and returns its immediate class ID.
 fn state_define_class(pool: StatePool&, name_symbol: u32, superclass_id: u32) -> u32 {
-    assert(state_class_count(pool) < MAX_STATE_CLASSES);
     let class_id = state_class_count(pool)as u32;
-    class_push(pool, ClassDef {
+    if !class_push(pool, ClassDef {
             name_symbol: name_symbol,
             superclass_id: superclass_id,
-        });
+        }) {
+        state_fail_capacity(pool, CapacityResource.Classes, 1,
+            slab_used_bytes(), slab_limit_bytes());
+        return NULL_CLASS_ID;
+    }
     return class_id;
 }
 
@@ -247,11 +271,14 @@ fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, v
             return;
         }
     }
-    const_push(pool, ConstEntry {
+    if !const_push(pool, ConstEntry {
             name_symbol: name_symbol,
             value: promoted,
             owner: owner,
-        });
+        }) {
+        state_fail_capacity(pool, CapacityResource.Metadata, 1,
+            slab_used_bytes(), slab_limit_bytes());
+    }
 }
 
 fn state_get_const(pool: StatePool&, name_symbol: u32, owner: u32 = NULL_CLASS_ID) -> MrbValue, bool {

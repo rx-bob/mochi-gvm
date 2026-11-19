@@ -6,6 +6,7 @@ import.capacity_config;
 import.collection_arena;
 import.ivar_mask;
 import.signals;
+import.slab;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -33,44 +34,58 @@ struct ComputedEntry {
 // Accessors for computed definitions and their symbol roots. Registration,
 // lookup and rollback all go through these helpers.
 
+extern fn mochi_meta_computed_def_at(handle: i64, index: i64) -> ComputedDefinition;
+
+extern fn mochi_meta_computed_def_push(
+    handle: i64, definition: ComputedDefinition
+) -> bool;
+
+extern fn mochi_meta_computed_def_truncate(handle: i64, count: i64);
+
+extern fn mochi_meta_computed_root_at(handle: i64, index: i64) -> u32;
+
+extern fn mochi_meta_computed_root_push(handle: i64, root: u32) -> bool;
+
+extern fn mochi_meta_computed_root_truncate(handle: i64, count: i64);
+
 fn computed_def_count(machine: Vm&) -> i64 {
-    return machine.computed_definitions.len;
+    return mochi_meta_count(vm_metadata(machine), 2);
 }
 
 fn computed_def_at(machine: Vm&, index: i64) -> ComputedDefinition {
-    return machine.computed_definitions[index];
+    return mochi_meta_computed_def_at(vm_metadata(machine), index);
 }
 
-fn computed_def_push(machine: Vm&, definition: ComputedDefinition) {
-    machine.computed_definitions.push(definition);
+fn computed_def_push(machine: Vm&, definition: ComputedDefinition) -> bool {
+    return mochi_meta_computed_def_push(vm_metadata(machine), definition);
 }
 
 fn computed_def_clear(machine: Vm&) {
-    machine.computed_definitions.clear();
+    mochi_meta_computed_def_truncate(vm_metadata(machine), 0);
 }
 
 fn computed_def_truncate(machine: Vm&, count: i64) {
-    machine.computed_definitions.resize(count);
+    mochi_meta_computed_def_truncate(vm_metadata(machine), count);
 }
 
 fn computed_root_count(machine: Vm&) -> i64 {
-    return machine.computed_roots.len;
+    return mochi_meta_count(vm_metadata(machine), 3);
 }
 
 fn computed_root_at(machine: Vm&, index: i64) -> u32 {
-    return machine.computed_roots[index];
+    return mochi_meta_computed_root_at(vm_metadata(machine), index);
 }
 
-fn computed_root_push(machine: Vm&, root: u32) {
-    machine.computed_roots.push(root);
+fn computed_root_push(machine: Vm&, root: u32) -> bool {
+    return mochi_meta_computed_root_push(vm_metadata(machine), root);
 }
 
 fn computed_root_clear(machine: Vm&) {
-    machine.computed_roots.clear();
+    mochi_meta_computed_root_truncate(vm_metadata(machine), 0);
 }
 
 fn computed_root_truncate(machine: Vm&, count: i64) {
-    machine.computed_roots.resize(count);
+    mochi_meta_computed_root_truncate(vm_metadata(machine), count);
 }
 
 fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue {
@@ -99,12 +114,6 @@ fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue
         machine.error = VmError.InvalidArgument;
         return mrb_nil();
     }
-    if computed_def_count(machine) >= MAX_VM_METHODS {
-        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
-            computed_def_count(machine), MAX_VM_METHODS);
-        machine.error = VmError.StateCapacity;
-        return mrb_nil();
-    }
     // Validate the entire slice before publishing a descriptor: a rejected
     // declaration must never leave a root range beyond the metadata table.
     for index in 0..count {
@@ -114,15 +123,28 @@ fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue
             return mrb_nil();
         }
     }
-    computed_def_push(machine, ComputedDefinition {
+    let root_start = computed_root_count(machine);
+    if !computed_def_push(machine, ComputedDefinition {
             class_id: class_id,
             method_symbol: method_symbol,
-            root_start: computed_root_count(machine),
+            root_start: root_start,
             root_count: count,
-        });
+        }) {
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+            slab_used_bytes(), slab_limit_bytes());
+        machine.error = VmError.StateCapacity;
+        return mrb_nil();
+    }
     for index in 0..count {
         let root = builtin_array_get(machine.pool, machine.scratch, args[1], index);
-        computed_root_push(machine, mrb_symbol_id(root));
+        if !computed_root_push(machine, mrb_symbol_id(root)) {
+            computed_root_truncate(machine, root_start);
+            computed_def_truncate(machine, computed_def_count(machine) - 1);
+            state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+                slab_used_bytes(), slab_limit_bytes());
+            machine.error = VmError.StateCapacity;
+            return mrb_nil();
+        }
     }
     return mrb_nil();
 }

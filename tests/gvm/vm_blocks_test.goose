@@ -213,7 +213,7 @@ fn test_sort_comparator_block_reverses_order(t: goosetest::Test&) {
         data: iseq[..],
         ..
     };
-    file.records.push(vm::IrepRecord {
+    vm::record_push(file, vm::IrepRecord {
             record_offset_bytes: 0,
             record_size_bytes: 0,
             nlocals: 3,
@@ -232,7 +232,7 @@ fn test_sort_comparator_block_reverses_order(t: goosetest::Test&) {
             next_sibling_index: -1,
             depth: 0,
         });
-    file.records.push(vm::IrepRecord {
+    vm::record_push(file, vm::IrepRecord {
             record_offset_bytes: 0,
             record_size_bytes: 0,
             nlocals: 1,
@@ -251,7 +251,7 @@ fn test_sort_comparator_block_reverses_order(t: goosetest::Test&) {
             next_sibling_index: -1,
             depth: 0,
         });
-    file.records.push(vm::IrepRecord {
+    vm::record_push(file, vm::IrepRecord {
             record_offset_bytes: 0,
             record_size_bytes: 0,
             nlocals: 2,
@@ -270,7 +270,7 @@ fn test_sort_comparator_block_reverses_order(t: goosetest::Test&) {
             next_sibling_index: -1,
             depth: 0,
         });
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: vm::intern_symbol("<=>")
         });
     var pool: vm::StatePool = vm::StatePool {

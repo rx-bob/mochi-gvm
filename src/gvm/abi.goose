@@ -273,14 +273,12 @@ fn abi_define_class(name_symbol: u32, superclass_id: u32) -> u32 {
     if found {
         return existing;
     }
-    if state_class_count(g_abi_machine.pool) >= MAX_STATE_CLASSES {
-        state_fail_capacity(g_abi_machine.pool, CapacityResource.Classes, 1,
-            state_class_count(g_abi_machine.pool), MAX_STATE_CLASSES);
+    let defined = state_define_class(g_abi_machine.pool, name_symbol, superclass_id);
+    if defined == NULL_CLASS_ID {
         g_abi_machine.error = VmError.StateCapacity;
         abi_record_vm_error(g_abi_machine);
-        return NULL_CLASS_ID;
     }
-    return state_define_class(g_abi_machine.pool, name_symbol, superclass_id);
+    return defined;
 }
 
 fn abi_open() -> i64 {

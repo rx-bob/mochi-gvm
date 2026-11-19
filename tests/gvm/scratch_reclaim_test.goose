@@ -40,7 +40,7 @@ fn test_scratch_collect_reclaims_strings(t: goosetest::Test&) {
             env_frame: -1,
             argc: 0,
         });
-    machine.file.records.push(vm::IrepRecord {
+    vm::record_push(machine.file, vm::IrepRecord {
             record_offset_bytes: 0,
             record_size_bytes: 0,
             nlocals: 1,

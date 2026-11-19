@@ -163,6 +163,27 @@ int64_t mochi_slab_used_bytes(void) { return g_slab_bytes_used; }
 
 int64_t mochi_slab_limit_bytes(void) { return g_slab_bytes_limit; }
 
+/* Shared budgeting for allocations that keep their own chunk directory.
+ * Package and symbol regions use their own contiguous regions above; metadata
+ * tables and the mruby ABI shim use these fixed-size blocks. */
+void *mochi_slab_take(int64_t bytes) {
+  void *block;
+  if (bytes < 0 || bytes > g_slab_bytes_limit ||
+      g_slab_bytes_used > g_slab_bytes_limit - bytes) {
+    return NULL;
+  }
+  block = malloc(bytes > 0 ? (size_t)bytes : 1);
+  if (!block) return NULL;
+  g_slab_bytes_used += bytes;
+  return block;
+}
+
+void mochi_slab_release(void *block, int64_t bytes) {
+  if (!block) return;
+  free(block);
+  g_slab_bytes_used -= bytes;
+}
+
 int64_t mochi_slab_package_bytes_used(void) { return g_slab_package_bytes; }
 
 int64_t mochi_slab_package_count(void) { return g_slab_package_count; }
@@ -275,6 +296,472 @@ void mochi_slab_truncate_symbol_bytes(int64_t saved_offset) {
     g_slab_symbol_blocks[keep - 1].used =
         saved_offset - (keep - 1) * MOCHI_SLAB_SYMBOL_BLOCK_BYTES;
   }
+}
+
+/* Segmented metadata tables.
+ *
+ * Each logical table is an array of 256-entry chunks. A chunk is allocated
+ * lazily from the shared slab budget and a truncate frees every chunk above
+ * the saved watermark. Logical indexes never move, so callers keep stable
+ * record, method and class identifiers across chunk growth. */
+#define MOCHI_META_CHUNK_ENTRIES 256
+#define MOCHI_META_MAX_SLOTS 4
+#define MOCHI_META_FILE_RECORDS 0
+#define MOCHI_META_FILE_POOLS 1
+#define MOCHI_META_FILE_SYMBOLS 2
+#define MOCHI_META_FILE_ROOTS 3
+#define MOCHI_META_VM_METHODS 0
+#define MOCHI_META_VM_NATIVE_METHODS 1
+#define MOCHI_META_VM_COMPUTED_DEFS 2
+#define MOCHI_META_VM_COMPUTED_ROOTS 3
+#define MOCHI_META_POOL_CLASSES 0
+#define MOCHI_META_POOL_CONSTS 1
+#define MOCHI_META_NO_PACKAGE_ID 0xFFFFFFFFu
+
+#pragma pack(push, 1)
+typedef struct {
+  int64_t record_offset_bytes;
+  uint32_t record_size_bytes;
+  uint16_t nlocals;
+  uint16_t nregs;
+  uint16_t child_count;
+  uint16_t catch_count;
+  uint32_t iseq_length_bytes;
+  int64_t iseq_offset_bytes;
+  int64_t catch_offset_bytes;
+  int64_t pool_first_index;
+  uint16_t pool_count;
+  int64_t syms_first_index;
+  uint16_t syms_count;
+  int64_t parent_index;
+  int64_t first_child_index;
+  int64_t next_sibling_index;
+  uint16_t depth;
+  uint32_t package_id;
+} mochi_irep_record;
+
+typedef struct {
+  uint8_t tag;
+  int64_t text_offset_bytes;
+  int64_t text_length_bytes;
+  int64_t int_value;
+  double float_value;
+  uint32_t package_id;
+} mochi_pool_entry;
+
+typedef struct {
+  uint32_t index;
+} mochi_symbol_id;
+
+typedef struct {
+  int64_t text_offset_bytes;
+  int64_t text_length_bytes;
+} mochi_symbol_entry;
+
+typedef struct {
+  uint32_t class_id;
+  uint32_t name_symbol;
+  int64_t irep_index;
+  uint32_t lexical_owner;
+} mochi_method_entry;
+
+typedef struct {
+  uint32_t class_id;
+  uint32_t name_symbol;
+  uint32_t native_id;
+} mochi_native_method;
+
+typedef struct {
+  uint32_t class_id;
+  uint32_t method_symbol;
+  int64_t root_start;
+  int64_t root_count;
+} mochi_computed_definition;
+
+typedef struct {
+  uint32_t name_symbol;
+  uint32_t superclass_id;
+} mochi_class_def;
+
+typedef struct {
+  uint32_t name_symbol;
+  uint64_t value;
+  uint32_t owner;
+} mochi_const_entry;
+#pragma pack(pop)
+
+typedef struct {
+  uint8_t **chunks;
+  int64_t chunk_count;
+  int64_t chunk_capacity;
+  int64_t len;
+  int64_t entry_size;
+} mochi_meta_table;
+
+typedef struct {
+  int64_t slot_count;
+  mochi_meta_table tables[MOCHI_META_MAX_SLOTS];
+} mochi_meta_set;
+
+static mochi_meta_set **g_meta_sets = NULL;
+static int64_t g_meta_set_count = 0;
+static int64_t g_meta_set_capacity = 0;
+
+static int64_t mochi_meta_new_set(int64_t slot_count, int64_t e0, int64_t e1,
+                                  int64_t e2, int64_t e3) {
+  mochi_meta_set **grown;
+  mochi_meta_set *set;
+  int64_t next;
+  if (g_meta_set_count >= g_meta_set_capacity) {
+    next = g_meta_set_capacity > 0 ? g_meta_set_capacity * 2 : 16;
+    grown = (mochi_meta_set **)realloc(g_meta_sets,
+                                       (size_t)next * sizeof(mochi_meta_set *));
+    if (!grown) return -1;
+    g_meta_sets = grown;
+    g_meta_set_capacity = next;
+  }
+  set = (mochi_meta_set *)calloc(1, sizeof(mochi_meta_set));
+  if (!set) return -1;
+  set->slot_count = slot_count;
+  set->tables[0].entry_size = e0;
+  set->tables[1].entry_size = e1;
+  set->tables[2].entry_size = e2;
+  set->tables[3].entry_size = e3;
+  g_meta_sets[g_meta_set_count] = set;
+  g_meta_set_count += 1;
+  return g_meta_set_count - 1;
+}
+
+int64_t mochi_meta_new_file(void) {
+  return mochi_meta_new_set(4, (int64_t)sizeof(mochi_irep_record),
+                            (int64_t)sizeof(mochi_pool_entry),
+                            (int64_t)sizeof(mochi_symbol_id),
+                            (int64_t)sizeof(int64_t));
+}
+
+int64_t mochi_meta_new_vm(void) {
+  return mochi_meta_new_set(4, (int64_t)sizeof(mochi_method_entry),
+                            (int64_t)sizeof(mochi_native_method),
+                            (int64_t)sizeof(mochi_computed_definition),
+                            (int64_t)sizeof(uint32_t));
+}
+
+int64_t mochi_meta_new_pool(void) {
+  return mochi_meta_new_set(2, (int64_t)sizeof(mochi_class_def),
+                            (int64_t)sizeof(mochi_const_entry), 0, 0);
+}
+
+int64_t mochi_meta_new_symbols(void) {
+  return mochi_meta_new_set(1, (int64_t)sizeof(mochi_symbol_entry), 0, 0, 0);
+}
+
+static mochi_meta_table *mochi_meta_table_for(int64_t handle, int64_t slot) {
+  if (handle < 0 || handle >= g_meta_set_count) return NULL;
+  if (slot >= g_meta_sets[handle]->slot_count) return NULL;
+  return &g_meta_sets[handle]->tables[slot];
+}
+
+int64_t mochi_meta_count(int64_t handle, int64_t slot) {
+  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+  return table ? table->len : 0;
+}
+
+static uint8_t *mochi_meta_slot(int64_t handle, int64_t slot, int64_t index) {
+  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+  int64_t chunk;
+  int64_t offset;
+  if (!table || index < 0 || index >= table->len) return NULL;
+  chunk = index >> 8;
+  offset = index & (MOCHI_META_CHUNK_ENTRIES - 1);
+  if (chunk >= table->chunk_count || !table->chunks[chunk]) return NULL;
+  return table->chunks[chunk] + offset * table->entry_size;
+}
+
+static int mochi_meta_push_bytes(int64_t handle, int64_t slot, const void *entry) {
+  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+  uint8_t **grown;
+  uint8_t *chunk;
+  int64_t chunk_index;
+  int64_t chunk_offset;
+  int64_t chunk_bytes;
+  int64_t next_capacity;
+  if (!table || !entry || table->entry_size <= 0) return 0;
+  if ((table->len & (MOCHI_META_CHUNK_ENTRIES - 1)) == 0) {
+    chunk_index = table->len >> 8;
+    if (chunk_index >= table->chunk_capacity) {
+      next_capacity = table->chunk_capacity > 0 ? table->chunk_capacity * 2 : 8;
+      grown = (uint8_t **)realloc(table->chunks,
+                                  (size_t)next_capacity * sizeof(uint8_t *));
+      if (!grown) return 0;
+      table->chunks = grown;
+      table->chunk_capacity = next_capacity;
+    }
+    chunk_bytes = MOCHI_META_CHUNK_ENTRIES * table->entry_size;
+    chunk = (uint8_t *)mochi_slab_take(chunk_bytes);
+    if (!chunk) return 0;
+    table->chunks[chunk_index] = chunk;
+    table->chunk_count = chunk_index + 1;
+  }
+  chunk_index = table->len >> 8;
+  chunk_offset = table->len & (MOCHI_META_CHUNK_ENTRIES - 1);
+  memcpy(table->chunks[chunk_index] + chunk_offset * table->entry_size, entry,
+         (size_t)table->entry_size);
+  table->len += 1;
+  return 1;
+}
+
+static void mochi_meta_truncate_slot(int64_t handle, int64_t slot, int64_t count) {
+  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+  int64_t keep_chunks;
+  int64_t chunk_bytes;
+  int64_t index;
+  if (!table) return;
+  if (count < 0) count = 0;
+  if (count > table->len) count = table->len;
+  keep_chunks = count == 0 ? 0
+                           : (count + MOCHI_META_CHUNK_ENTRIES - 1) /
+                                 MOCHI_META_CHUNK_ENTRIES;
+  chunk_bytes = MOCHI_META_CHUNK_ENTRIES * table->entry_size;
+  for (index = keep_chunks; index < table->chunk_count; index += 1) {
+    if (table->chunks[index]) {
+      mochi_slab_release(table->chunks[index], chunk_bytes);
+      table->chunks[index] = NULL;
+    }
+  }
+  table->chunk_count = keep_chunks;
+  table->len = count;
+  if (keep_chunks == 0) {
+    free(table->chunks);
+    table->chunks = NULL;
+    table->chunk_capacity = 0;
+  }
+}
+
+static mochi_symbol_entry mochi_empty_symbol(void) {
+  mochi_symbol_entry out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_method_entry mochi_empty_method(void) {
+  mochi_method_entry out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_native_method mochi_empty_native(void) {
+  mochi_native_method out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_computed_definition mochi_empty_computed(void) {
+  mochi_computed_definition out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_class_def mochi_empty_class(void) {
+  mochi_class_def out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_const_entry mochi_empty_const(void) {
+  mochi_const_entry out;
+  memset(&out, 0, sizeof(out));
+  return out;
+}
+
+static mochi_irep_record mochi_empty_record(void) {
+  mochi_irep_record out;
+  memset(&out, 0, sizeof(out));
+  out.first_child_index = -1;
+  out.next_sibling_index = -1;
+  out.parent_index = -1;
+  out.package_id = MOCHI_META_NO_PACKAGE_ID;
+  return out;
+}
+
+static mochi_pool_entry mochi_empty_pool(void) {
+  mochi_pool_entry out;
+  memset(&out, 0, sizeof(out));
+  out.package_id = MOCHI_META_NO_PACKAGE_ID;
+  return out;
+}
+
+mochi_irep_record mochi_meta_record_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_RECORDS, index);
+  return slot ? *(mochi_irep_record *)slot : mochi_empty_record();
+}
+
+uint8_t mochi_meta_record_push(int64_t h, mochi_irep_record entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_FILE_RECORDS, &entry);
+}
+
+void mochi_meta_record_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_FILE_RECORDS, count);
+}
+
+void mochi_meta_record_set_first_child(int64_t h, int64_t index, int64_t child) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_RECORDS, index);
+  if (slot) ((mochi_irep_record *)slot)->first_child_index = child;
+}
+
+void mochi_meta_record_set_next_sibling(int64_t h, int64_t index, int64_t sibling) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_RECORDS, index);
+  if (slot) ((mochi_irep_record *)slot)->next_sibling_index = sibling;
+}
+
+mochi_pool_entry mochi_meta_pool_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_POOLS, index);
+  return slot ? *(mochi_pool_entry *)slot : mochi_empty_pool();
+}
+
+uint8_t mochi_meta_pool_push(int64_t h, mochi_pool_entry entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_FILE_POOLS, &entry);
+}
+
+void mochi_meta_pool_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_FILE_POOLS, count);
+}
+
+mochi_symbol_id mochi_meta_symbol_ref_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_SYMBOLS, index);
+  mochi_symbol_id out;
+  if (!slot) {
+    out.index = 0;
+    return out;
+  }
+  return *(mochi_symbol_id *)slot;
+}
+
+uint8_t mochi_meta_symbol_ref_push(int64_t h, mochi_symbol_id entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_FILE_SYMBOLS, &entry);
+}
+
+void mochi_meta_symbol_ref_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_FILE_SYMBOLS, count);
+}
+
+int64_t mochi_meta_root_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_FILE_ROOTS, index);
+  return slot ? *(int64_t *)slot : 0;
+}
+
+uint8_t mochi_meta_root_push(int64_t h, int64_t entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_FILE_ROOTS, &entry);
+}
+
+void mochi_meta_root_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_FILE_ROOTS, count);
+}
+
+mochi_symbol_entry mochi_meta_symbol_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, 0, index);
+  return slot ? *(mochi_symbol_entry *)slot : mochi_empty_symbol();
+}
+
+uint8_t mochi_meta_symbol_push(int64_t h, mochi_symbol_entry entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, 0, &entry);
+}
+
+void mochi_meta_symbol_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, 0, count);
+}
+
+mochi_method_entry mochi_meta_method_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_METHODS, index);
+  return slot ? *(mochi_method_entry *)slot : mochi_empty_method();
+}
+
+void mochi_meta_method_set_at(int64_t h, int64_t index, mochi_method_entry entry) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_METHODS, index);
+  if (slot) memcpy(slot, &entry, sizeof(entry));
+}
+
+uint8_t mochi_meta_method_push(int64_t h, mochi_method_entry entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_VM_METHODS, &entry);
+}
+
+void mochi_meta_method_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_VM_METHODS, count);
+}
+
+mochi_native_method mochi_meta_native_method_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_NATIVE_METHODS, index);
+  return slot ? *(mochi_native_method *)slot : mochi_empty_native();
+}
+
+void mochi_meta_native_method_set_at(int64_t h, int64_t index,
+                                     mochi_native_method entry) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_NATIVE_METHODS, index);
+  if (slot) memcpy(slot, &entry, sizeof(entry));
+}
+
+uint8_t mochi_meta_native_method_push(int64_t h, mochi_native_method entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_VM_NATIVE_METHODS, &entry);
+}
+
+void mochi_meta_native_method_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_VM_NATIVE_METHODS, count);
+}
+
+mochi_computed_definition mochi_meta_computed_def_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_COMPUTED_DEFS, index);
+  return slot ? *(mochi_computed_definition *)slot : mochi_empty_computed();
+}
+
+uint8_t mochi_meta_computed_def_push(int64_t h, mochi_computed_definition entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_VM_COMPUTED_DEFS, &entry);
+}
+
+void mochi_meta_computed_def_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_VM_COMPUTED_DEFS, count);
+}
+
+uint32_t mochi_meta_computed_root_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_VM_COMPUTED_ROOTS, index);
+  return slot ? *(uint32_t *)slot : 0;
+}
+
+uint8_t mochi_meta_computed_root_push(int64_t h, uint32_t entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_VM_COMPUTED_ROOTS, &entry);
+}
+
+void mochi_meta_computed_root_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_VM_COMPUTED_ROOTS, count);
+}
+
+mochi_class_def mochi_meta_class_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_POOL_CLASSES, index);
+  return slot ? *(mochi_class_def *)slot : mochi_empty_class();
+}
+
+uint8_t mochi_meta_class_push(int64_t h, mochi_class_def entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_POOL_CLASSES, &entry);
+}
+
+void mochi_meta_class_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_POOL_CLASSES, count);
+}
+
+mochi_const_entry mochi_meta_const_at(int64_t h, int64_t index) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_POOL_CONSTS, index);
+  return slot ? *(mochi_const_entry *)slot : mochi_empty_const();
+}
+
+void mochi_meta_const_set_at(int64_t h, int64_t index, mochi_const_entry entry) {
+  uint8_t *slot = mochi_meta_slot(h, MOCHI_META_POOL_CONSTS, index);
+  if (slot) memcpy(slot, &entry, sizeof(entry));
+}
+
+uint8_t mochi_meta_const_push(int64_t h, mochi_const_entry entry) {
+  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_POOL_CONSTS, &entry);
+}
+
+void mochi_meta_const_truncate(int64_t h, int64_t count) {
+  mochi_meta_truncate_slot(h, MOCHI_META_POOL_CONSTS, count);
 }
 
 /* Symbols emitted by `abi.goose`; `mrb_abi_shim.c` declares most of them for

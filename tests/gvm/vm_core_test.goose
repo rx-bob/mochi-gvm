@@ -93,10 +93,11 @@ fn test_load_counter_irep(t: goosetest::Test&) {
     };
     t.assert_eq(vm::ParseError.Ok, load_error);
     t.assert_eq(vm::VmError.Ok, machine.error);
-    t.assert_eq(7, machine.file.records.len);
-    t.assert_eq(1, machine.file.records[0].child_count);
-    t.assert_eq(3, machine.file.records[0].nregs);
-    t.assert_eq(0, machine.methods.len);
+    t.assert_eq(7, vm::record_count(machine.file));
+    let record = vm::record_at(machine.file, 0);
+    t.assert_eq(1, record.child_count);
+    t.assert_eq(3, record.nregs);
+    t.assert_eq(0, vm::method_count(machine));
 }
 
 fn test_initialize_sets_default_ivars(t: goosetest::Test&) {
@@ -209,8 +210,8 @@ fn test_load_rejects_truncated_bytes(t: goosetest::Test&) {
         ..
     };
     t.assert_eq(vm::ParseError.Truncated, load_error);
-    t.assert_eq(0, machine.file.records.len);
-    t.assert_eq(0, machine.methods.len);
+    t.assert_eq(0, vm::record_count(machine.file));
+    t.assert_eq(0, vm::method_count(machine));
 }
 
 fn test_instantiate_unknown_class_fails(t: goosetest::Test&) {
@@ -355,4 +356,50 @@ fn test_repeated_renders_keep_state_flat(t: goosetest::Test&) {
     t.assert_eq(base_bytes, vm::state_bytes_used(pool));
     t.assert_eq(0, vm::scratch_bytes_used(scratch));
     t.assert_eq(0, vm::scratch_object_count(scratch));
+}
+
+fn test_segmented_tables_scale_past_16384_entries(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let class_name = vm::intern_symbol("SegmentedClass");
+    let method_name = vm::intern_symbol("segmented_method");
+    for _ in 0..1200 {
+        t.assert_true(vm::state_define_class(pool, class_name, vm::NULL_CLASS_ID) !=
+            vm::NULL_CLASS_ID);
+    }
+    for index in 0..20100 {
+        t.assert_true(vm::method_push(machine, vm::MethodEntry {
+                class_id: index as u32 % 1200,
+                name_symbol: method_name,
+                irep_index: index,
+            }));
+    }
+    t.assert_eq(1200, vm::state_class_count(pool));
+    t.assert_eq(20100, vm::method_count(machine));
+    for index in 0..1200 {
+        let definition = vm::class_at(pool, index as u32);
+        t.assert_eq(class_name, definition.name_symbol);
+        t.assert_eq(vm::NULL_CLASS_ID, definition.superclass_id);
+    }
+    for index in 0..20100 {
+        let entry = vm::method_at(machine, index);
+        t.assert_eq(index as u32 % 1200, entry.class_id);
+        t.assert_eq(method_name, entry.name_symbol);
+        t.assert_eq(index, entry.irep_index);
+    }
+    vm::method_clear(machine);
+    vm::state_class_clear(pool);
 }

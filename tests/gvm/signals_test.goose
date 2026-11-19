@@ -291,14 +291,14 @@ fn build_simple_getter_file(
     code.append(getter[..]);
     code.append(getter[..]);
     file.data = code[..];
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: count_symbol,
         });
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: label_symbol,
         });
-    file.records.push(make_getter_record(0, 7, 0, 1, 3));
-    file.records.push(make_getter_record(7, 7, 1, 1, 3));
+    vm::record_push(file, make_getter_record(0, 7, 0, 1, 3));
+    vm::record_push(file, make_getter_record(7, 7, 1, 1, 3));
 }
 
 fn prepare_simple_widget(
@@ -330,13 +330,13 @@ fn build_conditional_file(
     ];
     code.append(conditional[..]);
     file.data = code[..];
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: show_symbol,
         });
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: detail_symbol,
         });
-    file.records.push(make_getter_record(0, 14, 0, 2, 3));
+    vm::record_push(file, make_getter_record(0, 14, 0, 2, 3));
 }
 
 fn prepare_conditional_widget(

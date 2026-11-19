@@ -194,7 +194,7 @@ fn test_gc_marks_constant_and_argument_roots(t: goosetest::Test&) {
 
     machine.regs.clear();
     machine.entry_args.clear();
-    pool.consts.clear();
+    vm::const_clear(pool);
     t.assert_eq(3, reclaim_machine(machine));
 }
 

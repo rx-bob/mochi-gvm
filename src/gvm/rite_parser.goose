@@ -105,7 +105,10 @@ fn parse_rite_window(
     } else {
         file.binary_size_bytes += binary_size_raw;
     }
-    root_push(file, root_index);
+    if !root_push(file, root_index) {
+        return parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
+            slab_used_bytes(), slab_limit_bytes());
+    }
     return ParseError.Ok;
 }
 
@@ -242,10 +245,6 @@ recursive fn parse_record(
     var child_at = record_end;
     var previous_child: i64 = -1;
     for _ in header.child_count {
-        if record_count(file) >= MAX_IREP_RECORDS {
-            return 0, parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
-                record_count(file), MAX_IREP_RECORDS);
-        }
         let child_index = record_count(file);
         if previous_child < 0 {
             record_set_first_child(file, record_index, child_index);
@@ -341,13 +340,9 @@ fn parse_record_body(
     if cursor != record_end {
         return 0, ParseError.RecordSizeMismatch;
     }
-    if record_count(file) >= MAX_IREP_RECORDS {
-        return 0, parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
-            record_count(file), MAX_IREP_RECORDS);
-    }
 
     let record_index = record_count(file);
-    record_push(file, IrepRecord {
+    if !record_push(file, IrepRecord {
             record_offset_bytes: header.record_offset_bytes,
             record_size_bytes: header.record_size_bytes,
             nlocals: header.nlocals,
@@ -366,7 +361,11 @@ fn parse_record_body(
             next_sibling_index: -1,
             depth: depth,
             package_id: file.current_package_id,
-        });
+        }) {
+        return 0,
+        parse_rite_fail_capacity(file, ParseResource.IrepRecords, 1,
+            slab_used_bytes(), slab_limit_bytes());
+    }
     return record_index, ParseError.Ok;
 }
 
@@ -383,17 +382,16 @@ fn parse_record_pool_block(
     }
     var cursor = at + 2;
     for _ in count {
-        if pool_count(file) >= MAX_IREP_POOL_ENTRIES {
-            return cursor, count, parse_rite_fail_capacity(file, ParseResource.IrepPools, 1,
-                pool_count(file), MAX_IREP_POOL_ENTRIES);
-        }
         let entry, next, err = parse_pool_entry(data, cursor, limit);
         if err != ParseError.Ok {
             return cursor, count, err;
         }
         var owned = entry;
         owned.package_id = file.current_package_id;
-        pool_push(file, owned);
+        if !pool_push(file, owned) {
+            return cursor, count, parse_rite_fail_capacity(file, ParseResource.IrepPools, 1,
+                slab_used_bytes(), slab_limit_bytes());
+        }
         cursor = next;
     }
     return cursor, count, ParseError.Ok;
@@ -412,14 +410,6 @@ fn parse_record_symbol_block(
     }
     var cursor = at + 2;
     for _ in count {
-        if symbol_ref_count(file) >= MAX_IREP_SYMBOL_ENTRIES {
-            return cursor, count, parse_rite_fail_capacity(file, ParseResource.IrepSymbols, 1,
-                symbol_ref_count(file), MAX_IREP_SYMBOL_ENTRIES);
-        }
-        if symbol_count() >= MAX_SYMBOL_ENTRIES {
-            return cursor, count, parse_rite_fail_capacity(file, ParseResource.SymbolTable, 1,
-                symbol_count(), MAX_SYMBOL_ENTRIES);
-        }
         if cursor + 2 > limit {
             return cursor, count, ParseError.Truncated;
         }
@@ -429,9 +419,15 @@ fn parse_record_symbol_block(
         }
         cursor += 2;
         if length == MRB_NULL_SYM_LENGTH {
-            symbol_ref_push(file, SymbolId {
+            if !symbol_ref_push(file, SymbolId {
                     index: NULL_SYMBOL
-                });
+                }) {
+                return cursor,
+                count,
+                parse_rite_fail_capacity(
+                    file, ParseResource.IrepSymbols, 1,
+                    slab_used_bytes(), slab_limit_bytes());
+            }
             continue;
         }
         let name_length: i64 = length;
@@ -447,9 +443,15 @@ fn parse_record_symbol_block(
             return cursor, count, parse_rite_fail_capacity(file, ParseResource.SymbolTable,
                 name_length, slab_used_bytes(), slab_limit_bytes());
         }
-        symbol_ref_push(file, SymbolId {
+        if !symbol_ref_push(file, SymbolId {
                 index: id
-            });
+            }) {
+            return cursor,
+            count,
+            parse_rite_fail_capacity(
+                file, ParseResource.IrepSymbols, 1,
+                slab_used_bytes(), slab_limit_bytes());
+        }
         cursor = name_end + 1;
     }
     return cursor, count, ParseError.Ok;

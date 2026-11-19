@@ -10,6 +10,10 @@ import.vm_errors;
 import.vm_methods;
 import.vm_ops;
 
+extern fn mochi_shim_class_count() -> i64;
+
+extern fn mochi_shim_class_truncate(count: i64);
+
 // Runs one root IREP per loaded program. A failed root rolls its classes,
 // constants, methods and computed definitions back to the pre-root watermark
 // and leaves `booted_roots` unadvanced, so the same failure is reported again
@@ -27,6 +31,7 @@ fn vm_ensure_booted(machine: Vm&) {
         let saved_native_methods = native_method_count(machine);
         let saved_definitions = computed_def_count(machine);
         let saved_roots = computed_root_count(machine);
+        let saved_shim_classes = mochi_shim_class_count();
 
         machine.error = VmError.Ok;
         machine.pool.error = VmError.Ok;
@@ -47,6 +52,7 @@ fn vm_ensure_booted(machine: Vm&) {
             native_method_truncate(machine, saved_native_methods);
             computed_def_truncate(machine, saved_definitions);
             computed_root_truncate(machine, saved_roots);
+            mochi_shim_class_truncate(saved_shim_classes);
             return;
         }
         machine.booted_roots += 1;

@@ -413,13 +413,11 @@ fn vm_op_class(
     let defined = if found {
         class_id
     } else {
-        if state_class_count(machine.pool) >= MAX_STATE_CLASSES {
-            state_fail_capacity(machine.pool, CapacityResource.Classes, 1,
-                state_class_count(machine.pool), MAX_STATE_CLASSES);
-            return vm_fail(machine, VmError.StateCapacity, pc + 2);
-        }
         state_define_class(machine.pool, symbol, superclass_id)
     };
+    if defined == NULL_CLASS_ID {
+        return vm_fail(machine, VmError.StateCapacity, pc + 2);
+    }
     if !vm_write_register(machine, record, frame.base, ops.a, mrb_class(defined)) {
         return vm_fail(machine, VmError.BadOperand, pc + 2);
     }

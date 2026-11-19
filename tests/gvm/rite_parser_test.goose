@@ -41,7 +41,7 @@ struct RecordParts {
 }
 
 fn record_shape_matches(file: vm::RiteFile&, index: i64, expected: RecordShape) -> bool {
-    let record = file.records[index];
+    let record = vm::record_at(file, index);
     return record.nlocals == expected.nlocals
         && record.nregs == expected.nregs
         && record.child_count == expected.child_count
@@ -68,14 +68,14 @@ fn record_shape(
 fn symbol_is(
     file: vm::RiteFile&, record_index: i64, symbol_index: i64, expected: u8[:]
 ) -> bool {
-    let record = file.records[record_index];
-    let symbol = file.syms[record.syms_first_index + symbol_index];
+    let record = vm::record_at(file, record_index);
+    let symbol = vm::symbol_ref_at(file, record.syms_first_index + symbol_index);
     return vm::symbol_name(symbol.index) == expected;
 }
 
 fn pool_is(file: vm::RiteFile&, record_index: i64, pool_index: i64, expected: u8[:]) -> bool {
-    let record = file.records[record_index];
-    let entry = file.pools[record.pool_first_index + pool_index];
+    let record = vm::record_at(file, record_index);
+    let entry = vm::pool_at(file, record.pool_first_index + pool_index);
     return entry.tag == 0 && vm::pool_text(file, entry) == expected;
 }
 
@@ -91,7 +91,7 @@ fn test_counter_parses_structure_and_literals(t: goosetest::Test&) {
     t.assert_eq(vm::ParseError.Ok, err);
     t.assert_eq(751, file.binary_size_bytes);
     t.assert_eq(701, file.irep_section_size_bytes);
-    t.assert_eq(7, file.records.len);
+    t.assert_eq(7, vm::record_count(file));
     t.assert_true(record_shape_matches(file, 0, record_shape(1, 3, 1, 13, 0, 1)), "counter root");
     t.assert_true(record_shape_matches(file, 1, record_shape(1, 2, 5, 22, 0, 5)), "counter class");
     t.assert_true(record_shape_matches(file, 2, record_shape(2, 3, 0, 17, 1, 2)), "counter initialize");
@@ -100,12 +100,12 @@ fn test_counter_parses_structure_and_literals(t: goosetest::Test&) {
     t.assert_true(record_shape_matches(file, 5, record_shape(2, 3, 0, 11, 0, 1)), "counter reset");
     t.assert_true(record_shape_matches(file, 6, record_shape(2, 4, 0, 69, 10, 2)), "counter html");
 
-    t.assert_eq(1, file.records[0].first_child_index);
-    t.assert_eq(2, file.records[1].first_child_index);
-    t.assert_eq(3, file.records[2].next_sibling_index);
-    t.assert_eq(-1, file.records[6].next_sibling_index);
-    t.assert_eq(2, file.records[6].depth);
-    t.assert_eq(-1, file.records[0].parent_index);
+    t.assert_eq(1, vm::record_at(file, 0).first_child_index);
+    t.assert_eq(2, vm::record_at(file, 1).first_child_index);
+    t.assert_eq(3, vm::record_at(file, 2).next_sibling_index);
+    t.assert_eq(-1, vm::record_at(file, 6).next_sibling_index);
+    t.assert_eq(2, vm::record_at(file, 6).depth);
+    t.assert_eq(-1, vm::record_at(file, 0).parent_index);
 
     t.assert_true(symbol_is(file, 0, 0, "Counter"), "Counter symbol");
     t.assert_true(symbol_is(file, 1, 0, "initialize"), "initialize symbol");
@@ -132,13 +132,13 @@ fn test_todo_parses_nested_render_block(t: goosetest::Test&) {
 
     t.assert_eq(vm::ParseError.Ok, err);
     t.assert_eq(1196, file.binary_size_bytes);
-    t.assert_eq(8, file.records.len);
+    t.assert_eq(8, vm::record_count(file));
     t.assert_true(record_shape_matches(file, 3, record_shape(3, 9, 0, 58, 2, 6)), "todo add_item");
     t.assert_true(record_shape_matches(file, 6, record_shape(3, 6, 1, 88, 10, 4)), "todo html");
     t.assert_true(record_shape_matches(file, 7, record_shape(4, 8, 0, 86, 6, 2)), "todo render block");
 
-    t.assert_eq(7, file.records[6].first_child_index);
-    t.assert_eq(3, file.records[7].depth);
+    t.assert_eq(7, vm::record_at(file, 6).first_child_index);
+    t.assert_eq(3, vm::record_at(file, 7).depth);
     t.assert_true(symbol_is(file, 0, 0, "TodoList"), "TodoList symbol");
     t.assert_true(symbol_is(file, 1, 3, "remove_last"), "remove_last symbol");
     t.assert_true(symbol_is(file, 3, 5, "<<"), "append symbol");
@@ -162,7 +162,7 @@ fn test_users_parses_parse_names_and_block(t: goosetest::Test&) {
 
     t.assert_eq(vm::ParseError.Ok, err);
     t.assert_eq(1221, file.binary_size_bytes);
-    t.assert_eq(8, file.records.len);
+    t.assert_eq(8, vm::record_count(file));
     t.assert_true(record_shape_matches(file, 5, record_shape(10, 15, 0, 155, 2, 6)), "users parse_names");
     t.assert_true(record_shape_matches(file, 7, record_shape(3, 5, 0, 19, 2, 0)), "users render block");
 
@@ -247,9 +247,9 @@ fn test_synthetic_minimal_irep_is_accepted(t: goosetest::Test&) {
         ..
     };
     t.assert_eq(vm::ParseError.Ok, vm::parse_rite(bytes[..], file));
-    t.assert_eq(1, file.records.len);
-    t.assert_eq(20, file.records[0].record_size_bytes);
-    t.assert_eq(0, file.records[0].iseq_length_bytes);
+    t.assert_eq(1, vm::record_count(file));
+    t.assert_eq(20, vm::record_at(file, 0).record_size_bytes);
+    t.assert_eq(0, vm::record_at(file, 0).iseq_length_bytes);
 }
 
 fn test_numeric_pool_entries_decode(t: goosetest::Test&) {
@@ -276,17 +276,17 @@ fn test_numeric_pool_entries_decode(t: goosetest::Test&) {
         ..
     };
     t.assert_eq(vm::ParseError.Ok, vm::parse_rite(bytes[..], file));
-    t.assert_eq(4, file.pools.len);
+    t.assert_eq(4, vm::pool_count(file));
 
-    t.assert_eq(1, file.pools[0].tag);
-    t.assert_eq(-2, file.pools[0].int_value);
-    t.assert_eq(3, file.pools[1].tag);
-    t.assert_eq(-2, file.pools[1].int_value);
-    t.assert_eq(5, file.pools[2].tag);
-    t.assert_true(file.pools[2].float_value == 1.5, "float literal");
-    t.assert_eq(7, file.pools[3].tag);
-    t.assert_eq(4, file.pools[3].text_length_bytes);
-    let blob_start = file.pools[3].text_offset_bytes;
+    t.assert_eq(1, vm::pool_at(file, 0).tag);
+    t.assert_eq(-2, vm::pool_at(file, 0).int_value);
+    t.assert_eq(3, vm::pool_at(file, 1).tag);
+    t.assert_eq(-2, vm::pool_at(file, 1).int_value);
+    t.assert_eq(5, vm::pool_at(file, 2).tag);
+    t.assert_true(vm::pool_at(file, 2).float_value == 1.5, "float literal");
+    t.assert_eq(7, vm::pool_at(file, 3).tag);
+    t.assert_eq(4, vm::pool_at(file, 3).text_length_bytes);
+    let blob_start = vm::pool_at(file, 3).text_offset_bytes;
     t.assert_true(file.data[blob_start..blob_start + 4] == "\x02\x01\x02\x03", "bigint blob");
 }
 
@@ -365,24 +365,25 @@ fn test_append_keeps_absolute_records_and_roots(t: goosetest::Test&) {
         ..
     };
     t.assert_eq(vm::ParseError.Ok, vm::parse_rite(bytes[..first_len], file));
-    t.assert_eq(1, file.roots.len);
-    t.assert_eq(0, file.roots[0]);
-    t.assert_true(file.records[0].record_offset_bytes > 0);
-    let first_record_count = file.records.len;
-    let first_pool_count = file.pools.len;
+    t.assert_eq(1, vm::root_count(file));
+    t.assert_eq(0, vm::root_at(file, 0));
+    t.assert_true(vm::record_at(file, 0).record_offset_bytes > 0);
+    let first_record_count = vm::record_count(file);
+    let first_pool_count = vm::pool_count(file);
 
     t.assert_eq(vm::ParseError.Ok, vm::parse_rite_append(bytes[..], file, first_len));
-    t.assert_eq(2, file.roots.len);
-    t.assert_eq(first_record_count, file.roots[1]);
-    t.assert_true(file.records[file.roots[1]].record_offset_bytes > 0);
-    t.assert_true(file.records[file.roots[1]].record_offset_bytes >= first_len);
+    t.assert_eq(2, vm::root_count(file));
+    t.assert_eq(first_record_count, vm::root_at(file, 1));
+    let second_root = vm::root_at(file, 1);
+    t.assert_true(vm::record_at(file, second_root).record_offset_bytes > 0);
+    t.assert_true(vm::record_at(file, second_root).record_offset_bytes >= first_len);
     t.assert_eq(bytes.len as u32, file.binary_size_bytes);
-    t.assert_true(file.pools.len > first_pool_count);
+    t.assert_true(vm::pool_count(file) > first_pool_count);
 
     t.assert_eq(
         vm::ParseError.BadMagic, vm::parse_rite_append(bytes[..], file, first_len + 1)
     );
-    t.assert_eq(2, file.roots.len);
+    t.assert_eq(2, vm::root_count(file));
 }
 
 fn test_corrupt_records_are_rejected(t: goosetest::Test&) {
@@ -426,4 +427,75 @@ fn test_corrupt_records_are_rejected(t: goosetest::Test&) {
     }
     var deep_bytes = make_rite(nested[..]);
     t.assert_eq(vm::ParseError.TooDeep, vm::parse_rite(deep_bytes[..], file));
+}
+
+fn test_segmented_tables_scale_past_16384_entries(t: goosetest::Test&) {
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    let symbol_start = vm::symbol_count();
+    let saved_blob = vm::symbol_blob_length();
+    let total = 20100;
+    for index in 0..total {
+        t.assert_true(vm::record_push(file, vm::IrepRecord {
+                record_offset_bytes: index,
+                record_size_bytes: index as u32,
+                nlocals: 1,
+                nregs: 1,
+                child_count: 0,
+                catch_count: 0,
+                iseq_length_bytes: 0,
+                iseq_offset_bytes: 0,
+                catch_offset_bytes: 0,
+                pool_first_index: index * 2,
+                pool_count: 0,
+                syms_first_index: index,
+                syms_count: 0,
+                parent_index: -1,
+                first_child_index: -1,
+                next_sibling_index: -1,
+                depth: 0,
+                package_id: index as u32,
+            }));
+        t.assert_true(vm::pool_push(file, vm::PoolEntry {
+                tag: 1,
+                text_offset_bytes: 0,
+                text_length_bytes: 0,
+                int_value: index,
+                float_value: 0.0,
+            }));
+        t.assert_true(vm::symbol_ref_push(file, vm::SymbolId {
+                index: index as u32,
+            }));
+        var name: u8[>..] = [];
+        name.append("segmented_symbol_");
+        vm::mrb_format_fixnum(name, index);
+        let offset = vm::slab_intern_bytes(name[..]);
+        t.assert_true(offset >= 0);
+        t.assert_true(vm::symbol_entry_push(vm::SymbolEntry {
+                text_offset_bytes: offset,
+                text_length_bytes: name.len,
+            }));
+    }
+    t.assert_eq(total, vm::record_count(file));
+    t.assert_eq(total, vm::pool_count(file));
+    t.assert_eq(total, vm::symbol_ref_count(file));
+    t.assert_eq(symbol_start + total, vm::symbol_count());
+    for index in 0..total {
+        let record = vm::record_at(file, index);
+        t.assert_eq(index, record.record_offset_bytes);
+        t.assert_eq(index as u32, record.record_size_bytes);
+        t.assert_eq(index as u32, record.package_id);
+        let entry = vm::pool_at(file, index);
+        t.assert_eq(index, entry.int_value);
+        t.assert_eq(index as u32, vm::symbol_ref_at(file, index).index);
+        var expected: u8[>..] = [];
+        expected.append("segmented_symbol_");
+        vm::mrb_format_fixnum(expected, index);
+        t.assert_true(vm::symbol_name(symbol_start as u32 + index as u32) == expected[..]);
+    }
+    vm::symbol_table_truncate(symbol_start, saved_blob);
+    vm::record_clear(file);
+    vm::pool_clear(file);
+    vm::symbol_ref_clear(file);
 }

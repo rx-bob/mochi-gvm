@@ -196,7 +196,7 @@ fn test_loadi16_getidx0_array2_and_upvars(t: goosetest::Test&) {
         ..
     };
     let record = fake_record(6);
-    machine.file.records.push(record);
+    vm::record_push(machine.file, record);
     for _ in 12 {
         machine.regs.push(vm::mrb_nil());
     }

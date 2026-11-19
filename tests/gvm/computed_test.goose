@@ -347,15 +347,15 @@ fn test_bad_metadata_and_cache_capacity(t: goosetest::Test&) {
     };
     let owner = vm::vm_instantiate(machine, vm::intern_symbol("ComputedProbe"));
     let class_id, _ = vm::vm_owner_class_id(machine, owner);
-    let definitions = machine.computed_definitions.len;
-    let roots = machine.computed_roots.len;
+    let definitions = vm::computed_def_count(machine);
+    let roots = vm::computed_root_count(machine);
     let bad = vm::builtin_array_new(scratch);
     vm::builtin_array_push(pool, scratch, bad, vm::mrb_fixnum(7));
     let args: vm::MrbValue[2] = [vm::mrb_symbol(vm::intern_symbol("bad")), bad];
     vm::computed_register(machine, class_id, args[..]);
     t.assert_eq(vm::VmError.InvalidArgument, machine.error);
-    t.assert_eq(definitions, machine.computed_definitions.len);
-    t.assert_eq(roots, machine.computed_roots.len);
+    t.assert_eq(definitions, vm::computed_def_count(machine));
+    t.assert_eq(roots, vm::computed_root_count(machine));
     // Fill only the bounded entry table; persistent graph capacity remains
     // available, so the diagnostic must identify entries rather than bytes.
     for _ in 0..vm::MAX_BINDINGS {

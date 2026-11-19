@@ -201,10 +201,40 @@ fn fill_classes(limit: i64) {
 
 fn fill_methods(limit: i64) {
     while vm::method_count(vm::g_abi_machine) < limit {
-        vm::method_push(vm::g_abi_machine, vm::MethodEntry {
+        if !vm::method_push(vm::g_abi_machine, vm::MethodEntry {
                 class_id: vm::NULL_CLASS_ID,
                 name_symbol: vm::intern_symbol("FillerMethod"),
                 irep_index: 0,
+            }) {
+            return;
+        }
+    }
+}
+
+fn next_chunk_boundary(count: i64) -> i64 {
+    return (count / 256 + 1) * 256;
+}
+
+fn fill_records(limit: i64) {
+    while vm::record_count(vm::g_abi_file) < limit {
+        vm::record_push(vm::g_abi_file, vm::IrepRecord {
+                record_offset_bytes: 0,
+                record_size_bytes: 0,
+                nlocals: 1,
+                nregs: 1,
+                child_count: 0,
+                catch_count: 0,
+                iseq_length_bytes: 0,
+                iseq_offset_bytes: 0,
+                catch_offset_bytes: 0,
+                pool_first_index: 0,
+                pool_count: 0,
+                syms_first_index: 0,
+                syms_count: 0,
+                parent_index: -1,
+                first_child_index: -1,
+                next_sibling_index: -1,
+                depth: 0,
             });
     }
 }
@@ -229,7 +259,7 @@ fn test_failed_root_boot_reports_class_capacity(t: goosetest::Test&) {
     let instance = counter(t);
     t.assert_eq(0, vm::abi_load_irep(vm_abi_test::todo_rite()));
 
-    fill_classes(vm::MAX_STATE_CLASSES);
+    fill_classes(next_chunk_boundary(vm::state_class_count(vm::g_abi_pool)));
     let classes = vm::state_class_count(vm::g_abi_pool);
     let consts = vm::const_count(vm::g_abi_pool);
     let methods = vm::method_count(vm::g_abi_machine);
@@ -237,6 +267,7 @@ fn test_failed_root_boot_reports_class_capacity(t: goosetest::Test&) {
     let definitions = vm::computed_def_count(vm::g_abi_machine);
     let roots = vm::computed_root_count(vm::g_abi_machine);
     let booted = vm::g_abi_machine.booted_roots;
+    vm::slab_set_limit(vm::slab_used_bytes());
 
     let rejected = vm::abi_const_get(vm::intern_symbol("TodoList"));
     t.assert_true(vm::mrb_is_nil(rejected));
@@ -256,12 +287,44 @@ fn test_failed_root_boot_reports_class_capacity(t: goosetest::Test&) {
     vm::abi_close();
 }
 
+// @DisplayName("test_metadata_budget_exhaustion_rolls_back_chunks")
+fn test_metadata_budget_rolls_back_chunks(t: goosetest::Test&) {
+    let instance = counter(t);
+    fill_records(next_chunk_boundary(vm::record_count(vm::g_abi_file)) - 1);
+    let records = vm::record_count(vm::g_abi_file);
+    let pools = vm::pool_count(vm::g_abi_file);
+    let syms = vm::symbol_ref_count(vm::g_abi_file);
+    let symbols = vm::symbol_count();
+    let packages = vm::slab_package_count();
+    let used = vm::slab_used_bytes();
+    var bad = truncated_package();
+    vm::slab_set_limit(used + bad.len + 30000);
+
+    t.assert_eq(1, vm::abi_load_irep(bad[..]));
+    t.assert_true(starts_with(vm::abi_last_error(), "truncated"));
+    t.assert_eq(records, vm::record_count(vm::g_abi_file),
+        "new record chunk released on rollback");
+    t.assert_eq(pools, vm::pool_count(vm::g_abi_file));
+    t.assert_eq(syms, vm::symbol_ref_count(vm::g_abi_file));
+    t.assert_eq(symbols, vm::symbol_count());
+    t.assert_eq(packages, vm::slab_package_count());
+    t.assert_eq(used, vm::slab_used_bytes(),
+        "metadata budget restored exactly after chunk rollback");
+
+    vm::slab_set_limit(vm::SLAB_DEFAULT_METADATA_MAX_BYTES);
+    vm::abi_call(instance, vm::intern_symbol("increment"), 0);
+    t.assert_false(vm::abi_has_error(), "mounted component still runs");
+    vm::vm_end_entry(vm::g_abi_machine);
+    vm::abi_close();
+}
+
 fn test_failed_root_boot_rolls_back_class_methods(t: goosetest::Test&) {
     let instance = counter(t);
     t.assert_eq(0, vm::abi_load_irep(vm_abi_test::todo_rite()));
 
-    fill_classes(vm::MAX_STATE_CLASSES - 1);
-    fill_methods(vm::MAX_VM_METHODS - 1);
+    let class_target = next_chunk_boundary(vm::state_class_count(vm::g_abi_pool)) - 4;
+    fill_classes(class_target);
+    fill_methods(next_chunk_boundary(vm::method_count(vm::g_abi_machine)));
     let classes = vm::state_class_count(vm::g_abi_pool);
     let consts = vm::const_count(vm::g_abi_pool);
     let methods = vm::method_count(vm::g_abi_machine);
@@ -269,11 +332,12 @@ fn test_failed_root_boot_rolls_back_class_methods(t: goosetest::Test&) {
     let definitions = vm::computed_def_count(vm::g_abi_machine);
     let roots = vm::computed_root_count(vm::g_abi_machine);
     let booted = vm::g_abi_machine.booted_roots;
+    vm::slab_set_limit(vm::slab_used_bytes() + 2048);
 
     let rejected = vm::abi_const_get(vm::intern_symbol("TodoList"));
     t.assert_true(vm::mrb_is_nil(rejected));
     t.assert_true(starts_with(vm::abi_last_error(),
-        "VM methods exhausted (requested 1, used 4096 of 4096)"));
+        "VM methods exhausted"));
     t.assert_eq(booted, vm::g_abi_machine.booted_roots);
     t.assert_eq(classes, vm::state_class_count(vm::g_abi_pool),
         "partial class definition rolled back");

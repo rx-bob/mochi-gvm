@@ -44,10 +44,10 @@ fn build_getter_file(file: vm::RiteFile&, code: u8[>..]&, ivar_symbol: u32) {
     ];
     code.append(getter[..]);
     file.data = code[..];
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: ivar_symbol,
         });
-    file.records.push(make_getter_record(0, 7, 0, 1, 3));
+    vm::record_push(file, make_getter_record(0, 7, 0, 1, 3));
 }
 
 fn test_mask_helpers_cover_all_four_words(t: goosetest::Test&) {

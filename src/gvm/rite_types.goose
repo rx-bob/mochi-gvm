@@ -116,19 +116,17 @@ struct SymbolEntry {
 // across repeated parses and across separately loaded components. The bytes
 // live in the C slab's 16 KB blocks; entries hold absolute block offsets.
 root struct SymbolTable {
-    entries: SymbolEntry[>..] = [],
+    metadata_handle: i64 = -1,
 }
 
 // The result of parsing one or more RITE buffers. `records` is in pre-order: a
 // parent precedes every descendant, and `first_child_index` /
 // `next_sibling_index` link the children without any pointers. `roots` holds
-// the absolute record index of each loaded program's root.
+// the absolute record index of each loaded program's root. The tables live in
+// C slab chunks and are reached only through the accessors below.
 root struct RiteFile {
     data: const u8[:] = "",
-    records: IrepRecord[>..] = [],
-    pools: PoolEntry[>..] = [],
-    syms: SymbolId[>..] = [],
-    roots: i64[>..] = [],
+    metadata_handle: i64 = -1,
     error: ParseError = ParseError.Ok,
     error_resource: ParseResource = ParseResource.None,
     error_requested: i64 = 0,
@@ -144,110 +142,163 @@ var g_symbol_table = SymbolTable {
     ..
 };
 
-// Read and mutation accessors for the flat RITE tables.
+// Read and mutation accessors for the segmented RITE tables.
 //
 // Every parser and interpreter call site goes through these helpers so the
-// backing storage can change without touching its consumers. Goose compiles the
-// whole program into one translation unit at `-O2`, so these wrappers inline.
+// backing storage can change without touching its consumers. Each owner has a
+// C table-set handle; the first accessor call allocates it lazily, so a fresh
+// `RiteFile` cannot alias a previous test or VM's chunks.
+
+extern fn mochi_meta_record_at(handle: i64, index: i64) -> IrepRecord;
+
+extern fn mochi_meta_record_push(handle: i64, record: IrepRecord) -> bool;
+
+extern fn mochi_meta_record_truncate(handle: i64, count: i64);
+
+extern fn mochi_meta_record_set_first_child(
+    handle: i64, index: i64, child_index: i64
+);
+
+extern fn mochi_meta_record_set_next_sibling(
+    handle: i64, index: i64, sibling_index: i64
+);
+
+extern fn mochi_meta_pool_at(handle: i64, index: i64) -> PoolEntry;
+
+extern fn mochi_meta_pool_push(handle: i64, entry: PoolEntry) -> bool;
+
+extern fn mochi_meta_pool_truncate(handle: i64, count: i64);
+
+extern fn mochi_meta_symbol_ref_at(handle: i64, index: i64) -> SymbolId;
+
+extern fn mochi_meta_symbol_ref_push(handle: i64, reference: SymbolId) -> bool;
+
+extern fn mochi_meta_symbol_ref_truncate(handle: i64, count: i64);
+
+extern fn mochi_meta_root_at(handle: i64, index: i64) -> i64;
+
+extern fn mochi_meta_root_push(handle: i64, record_index: i64) -> bool;
+
+extern fn mochi_meta_root_truncate(handle: i64, count: i64);
+
+fn file_metadata(file: RiteFile&) -> i64 {
+    if file.metadata_handle < 0 {
+        file.metadata_handle = mochi_meta_new_file();
+    }
+    return file.metadata_handle;
+}
 
 fn record_count(file: RiteFile&) -> i64 {
-    return file.records.len;
+    return mochi_meta_count(file_metadata(file), 0);
 }
 
 fn record_at(file: RiteFile&, index: i64) -> IrepRecord {
-    return file.records[index];
+    return mochi_meta_record_at(file_metadata(file), index);
 }
 
 fn record_set_first_child(file: RiteFile&, index: i64, child_index: i64) {
-    file.records[index].first_child_index = child_index;
+    mochi_meta_record_set_first_child(file_metadata(file), index, child_index);
 }
 
 fn record_set_next_sibling(file: RiteFile&, index: i64, sibling_index: i64) {
-    file.records[index].next_sibling_index = sibling_index;
+    mochi_meta_record_set_next_sibling(file_metadata(file), index, sibling_index);
 }
 
-fn record_push(file: RiteFile&, record: IrepRecord) {
-    file.records.push(record);
+fn record_push(file: RiteFile&, record: IrepRecord) -> bool {
+    return mochi_meta_record_push(file_metadata(file), record);
 }
 
 fn record_clear(file: RiteFile&) {
-    file.records.clear();
+    mochi_meta_record_truncate(file_metadata(file), 0);
 }
 
 fn record_truncate(file: RiteFile&, count: i64) {
-    file.records.resize(count);
+    mochi_meta_record_truncate(file_metadata(file), count);
 }
 
 fn pool_count(file: RiteFile&) -> i64 {
-    return file.pools.len;
+    return mochi_meta_count(file_metadata(file), 1);
 }
 
 fn pool_at(file: RiteFile&, index: i64) -> PoolEntry {
-    return file.pools[index];
+    return mochi_meta_pool_at(file_metadata(file), index);
 }
 
-fn pool_push(file: RiteFile&, entry: PoolEntry) {
-    file.pools.push(entry);
+fn pool_push(file: RiteFile&, entry: PoolEntry) -> bool {
+    return mochi_meta_pool_push(file_metadata(file), entry);
 }
 
 fn pool_clear(file: RiteFile&) {
-    file.pools.clear();
+    mochi_meta_pool_truncate(file_metadata(file), 0);
 }
 
 fn pool_truncate(file: RiteFile&, count: i64) {
-    file.pools.resize(count);
+    mochi_meta_pool_truncate(file_metadata(file), count);
 }
 
 fn symbol_ref_count(file: RiteFile&) -> i64 {
-    return file.syms.len;
+    return mochi_meta_count(file_metadata(file), 2);
 }
 
 fn symbol_ref_at(file: RiteFile&, index: i64) -> SymbolId {
-    return file.syms[index];
+    return mochi_meta_symbol_ref_at(file_metadata(file), index);
 }
 
-fn symbol_ref_push(file: RiteFile&, reference: SymbolId) {
-    file.syms.push(reference);
+fn symbol_ref_push(file: RiteFile&, reference: SymbolId) -> bool {
+    return mochi_meta_symbol_ref_push(file_metadata(file), reference);
 }
 
 fn symbol_ref_clear(file: RiteFile&) {
-    file.syms.clear();
+    mochi_meta_symbol_ref_truncate(file_metadata(file), 0);
 }
 
 fn symbol_ref_truncate(file: RiteFile&, count: i64) {
-    file.syms.resize(count);
+    mochi_meta_symbol_ref_truncate(file_metadata(file), count);
 }
 
 fn root_count(file: RiteFile&) -> i64 {
-    return file.roots.len;
+    return mochi_meta_count(file_metadata(file), 3);
 }
 
 fn root_at(file: RiteFile&, index: i64) -> i64 {
-    return file.roots[index];
+    return mochi_meta_root_at(file_metadata(file), index);
 }
 
-fn root_push(file: RiteFile&, record_index: i64) {
-    file.roots.push(record_index);
+fn root_push(file: RiteFile&, record_index: i64) -> bool {
+    return mochi_meta_root_push(file_metadata(file), record_index);
 }
 
 fn root_clear(file: RiteFile&) {
-    file.roots.clear();
+    mochi_meta_root_truncate(file_metadata(file), 0);
 }
 
 fn root_truncate(file: RiteFile&, count: i64) {
-    file.roots.resize(count);
+    mochi_meta_root_truncate(file_metadata(file), count);
 }
 
-// Symbol table accessors. IDs index `entries`; each entry views the C slab's
+// Symbol table accessors. IDs index C chunks; each entry views the C slab's
 // 16 KB string blocks without copying, and appending a name keeps existing IDs
 // stable.
 
-fn symbol_entry_at(index: u32) -> SymbolEntry {
-    return g_symbol_table.entries[index];
+extern fn mochi_meta_symbol_at(handle: i64, index: i64) -> SymbolEntry;
+
+extern fn mochi_meta_symbol_push(handle: i64, entry: SymbolEntry) -> bool;
+
+extern fn mochi_meta_symbol_truncate(handle: i64, count: i64);
+
+fn symbol_metadata() -> i64 {
+    if g_symbol_table.metadata_handle < 0 {
+        g_symbol_table.metadata_handle = mochi_meta_new_symbols();
+    }
+    return g_symbol_table.metadata_handle;
 }
 
-fn symbol_entry_push(entry: SymbolEntry) {
-    g_symbol_table.entries.push(entry);
+fn symbol_entry_at(index: u32) -> SymbolEntry {
+    return mochi_meta_symbol_at(symbol_metadata(), index);
+}
+
+fn symbol_entry_push(entry: SymbolEntry) -> bool {
+    return mochi_meta_symbol_push(symbol_metadata(), entry);
 }
 
 fn symbol_blob_length() -> i64 {
@@ -265,7 +316,7 @@ fn symbol_blob_slice(start: i64, stop: i64) -> const u8[:] {
 }
 
 fn symbol_table_truncate(entries: i64, blob_length: i64) {
-    g_symbol_table.entries.resize(entries);
+    mochi_meta_symbol_truncate(symbol_metadata(), entries);
     slab_truncate_symbol_bytes(blob_length);
 }
 
@@ -302,7 +353,7 @@ fn symbol_name(id: u32) -> const u8[:] {
 
 // Returns the number of interned names.
 fn symbol_count() -> i64 {
-    return g_symbol_table.entries.len;
+    return mochi_meta_count(symbol_metadata(), 0);
 }
 
 // Returns the ID of `name`, appending it once when the table has no equal name.
@@ -327,15 +378,20 @@ fn intern_symbol_checked(name: u8[:]) -> u32, bool {
             }
         }
     }
+    let saved_blob = slab_symbol_blob_length();
     let offset = slab_intern_bytes(name);
     if offset < 0 {
         return NULL_SYMBOL, false;
     }
     let id = symbol_count()as u32;
-    symbol_entry_push(SymbolEntry {
+    if !symbol_entry_push(SymbolEntry {
             text_offset_bytes: offset,
             text_length_bytes: name.len,
-        });
+        }) {
+        slab_truncate_symbol_bytes(saved_blob);
+        return NULL_SYMBOL,
+        false;
+    }
     return id, true;
 }
 

@@ -27,6 +27,16 @@ extern fn mochi_slab_intern_bytes(name: const u8[:]) -> i64;
 
 extern fn mochi_slab_truncate_symbol_bytes(saved_offset: i64);
 
+extern fn mochi_meta_new_file() -> i64;
+
+extern fn mochi_meta_new_vm() -> i64;
+
+extern fn mochi_meta_new_pool() -> i64;
+
+extern fn mochi_meta_new_symbols() -> i64;
+
+extern fn mochi_meta_count(handle: i64, slot: i64) -> i64;
+
 // C publishes each region as one global view. A single view has an exact root,
 // so slices of package bytes and symbol names stay borrow-safe.
 var g_slab_package_view: const u8[:] = "";

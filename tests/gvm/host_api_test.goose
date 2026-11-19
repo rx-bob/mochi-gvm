@@ -317,13 +317,13 @@ fn test_host_route_timer_and_get_attr(t: goosetest::Test&) {
             self_value: instance,
             ..
         });
-    machine.methods.push(vm::MethodEntry {
+    vm::method_push(machine, vm::MethodEntry {
             class_id: class_id,
             name_symbol: vm::intern_symbol("tick"),
             irep_index: 0,
             ..
         });
-    machine.file.records.push(vm::IrepRecord {
+    vm::record_push(machine.file, vm::IrepRecord {
             ..
         });
     let timer_args: vm::MrbValue[2] = [

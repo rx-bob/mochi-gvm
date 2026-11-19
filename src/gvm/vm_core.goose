@@ -6,6 +6,7 @@ import.rite_parser;
 import.rite_pool;
 import.rite_types;
 import.scratch_alloc;
+import.slab;
 import.state_pool;
 import.value_arena;
 import.vm_entry;
@@ -161,10 +162,7 @@ root struct Vm {
     file: RiteFile&,
     pool: StatePool&,
     scratch: ScratchArena&,
-    methods: MethodEntry[>..] = [],
-    computed_definitions: ComputedDefinition[>..] = [],
-    computed_roots: u32[>..] = [],
-    native_methods: NativeMethod[>..] = [],
+    metadata_handle: i64 = -1,
     regs: MrbValue[..MAX_VM_REGS] = [],
     frames: CallFrame[..MAX_VM_CALL_DEPTH] = [],
     // Arguments are durable roots while the VM boots class bodies, before they
@@ -186,28 +184,43 @@ root struct Vm {
 // and diagnostics all go through these helpers so the table representation can
 // change without touching its consumers.
 
+extern fn mochi_meta_method_at(handle: i64, index: i64) -> MethodEntry;
+
+extern fn mochi_meta_method_set_at(handle: i64, index: i64, entry: MethodEntry);
+
+extern fn mochi_meta_method_push(handle: i64, entry: MethodEntry) -> bool;
+
+extern fn mochi_meta_method_truncate(handle: i64, count: i64);
+
+fn vm_metadata(machine: Vm&) -> i64 {
+    if machine.metadata_handle < 0 {
+        machine.metadata_handle = mochi_meta_new_vm();
+    }
+    return machine.metadata_handle;
+}
+
 fn method_count(machine: Vm&) -> i64 {
-    return machine.methods.len;
+    return mochi_meta_count(vm_metadata(machine), 0);
 }
 
 fn method_at(machine: Vm&, index: i64) -> MethodEntry {
-    return machine.methods[index];
+    return mochi_meta_method_at(vm_metadata(machine), index);
 }
 
 fn method_set_at(machine: Vm&, index: i64, entry: MethodEntry) {
-    machine.methods[index] = entry;
+    mochi_meta_method_set_at(vm_metadata(machine), index, entry);
 }
 
-fn method_push(machine: Vm&, entry: MethodEntry) {
-    machine.methods.push(entry);
+fn method_push(machine: Vm&, entry: MethodEntry) -> bool {
+    return mochi_meta_method_push(vm_metadata(machine), entry);
 }
 
 fn method_clear(machine: Vm&) {
-    machine.methods.clear();
+    mochi_meta_method_truncate(vm_metadata(machine), 0);
 }
 
 fn method_truncate(machine: Vm&, count: i64) {
-    machine.methods.resize(count);
+    mochi_meta_method_truncate(vm_metadata(machine), count);
 }
 
 fn vm_step_continue(pc: i64) -> Step {
@@ -407,18 +420,16 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
             return;
         }
     }
-    if method_count(machine) >= MAX_VM_METHODS {
-        state_fail_capacity(machine.pool, CapacityResource.Methods, 1, method_count(machine),
-            MAX_VM_METHODS);
-        machine.error = VmError.StateCapacity;
-        return;
-    }
-    method_push(machine, MethodEntry {
+    if !method_push(machine, MethodEntry {
             class_id: class_id,
             name_symbol: name_symbol,
             irep_index: irep_index,
             lexical_owner: lexical_owner,
-        });
+        }) {
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+            slab_used_bytes(), slab_limit_bytes());
+        machine.error = VmError.StateCapacity;
+    }
 }
 
 // Resolves a method through the class and its superclass chain.
@@ -434,9 +445,10 @@ fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool 
     }
     var current = class_id;
     var steps = 0;
+    let class_limit = state_class_count(machine.pool);
     while current != NULL_CLASS_ID
-        && current < state_class_count(machine.pool)as u32
-        && steps < MAX_STATE_CLASSES {
+        && current < class_limit as u32
+        && steps <= class_limit {
         for index in 0..method_count(machine) {
             let entry = method_at(machine, index);
             if entry.class_id == current && entry.name_symbol == name_symbol {

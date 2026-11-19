@@ -52,12 +52,12 @@ fn test_innermost_method_claims_error_context_once(t: goosetest::Test&) {
         scratch: scratch,
         ..
     };
-    machine.methods.push(vm::MethodEntry {
+    vm::method_push(machine, vm::MethodEntry {
             class_id: 3,
             name_symbol: 7,
             irep_index: 9,
         });
-    machine.methods.push(vm::MethodEntry {
+    vm::method_push(machine, vm::MethodEntry {
             class_id: 4,
             name_symbol: 8,
             irep_index: 10,

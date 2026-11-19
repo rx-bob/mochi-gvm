@@ -8,6 +8,7 @@ import.collection_arena;
 import.computed;
 import.host_api;
 import.scratch_alloc;
+import.slab;
 import.state_pool;
 import.value_arena;
 import.vm_core;
@@ -65,8 +66,9 @@ fn vm_value_is_a(machine: Vm&, value: MrbValue, target_class: u32) -> bool {
     }
     var current = object.class_index;
     var steps = 0;
-    while current != NULL_CLASS_ID && current < state_class_count(machine.pool)as u32
-        && steps < MAX_STATE_CLASSES {
+    let class_limit = state_class_count(machine.pool);
+    while current != NULL_CLASS_ID && current < class_limit as u32
+        && steps <= class_limit {
         if current == target_class {
             return true;
         }
@@ -83,28 +85,38 @@ extern fn goose_abi_native_call(native_id: u32, self_value: u64, argc: i64) -> u
 
 // Accessors for the native method table. Binding and lookup stay independent
 // of the backing representation.
+extern fn mochi_meta_native_method_at(handle: i64, index: i64) -> NativeMethod;
+
+extern fn mochi_meta_native_method_set_at(
+    handle: i64, index: i64, entry: NativeMethod
+);
+
+extern fn mochi_meta_native_method_push(handle: i64, entry: NativeMethod) -> bool;
+
+extern fn mochi_meta_native_method_truncate(handle: i64, count: i64);
+
 fn native_method_count(machine: Vm&) -> i64 {
-    return machine.native_methods.len;
+    return mochi_meta_count(vm_metadata(machine), 1);
 }
 
 fn native_method_at(machine: Vm&, index: i64) -> NativeMethod {
-    return machine.native_methods[index];
+    return mochi_meta_native_method_at(vm_metadata(machine), index);
 }
 
 fn native_method_set_at(machine: Vm&, index: i64, entry: NativeMethod) {
-    machine.native_methods[index] = entry;
+    mochi_meta_native_method_set_at(vm_metadata(machine), index, entry);
 }
 
-fn native_method_push(machine: Vm&, entry: NativeMethod) {
-    machine.native_methods.push(entry);
+fn native_method_push(machine: Vm&, entry: NativeMethod) -> bool {
+    return mochi_meta_native_method_push(vm_metadata(machine), entry);
 }
 
 fn native_method_clear(machine: Vm&) {
-    machine.native_methods.clear();
+    mochi_meta_native_method_truncate(vm_metadata(machine), 0);
 }
 
 fn native_method_truncate(machine: Vm&, count: i64) {
-    machine.native_methods.resize(count);
+    mochi_meta_native_method_truncate(vm_metadata(machine), count);
 }
 
 fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native_id: u32) {
@@ -117,17 +129,15 @@ fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native
             return;
         }
     }
-    if native_method_count(machine) >= MAX_VM_METHODS {
-        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
-            native_method_count(machine), MAX_VM_METHODS);
-        machine.error = VmError.StateCapacity;
-        return;
-    }
-    native_method_push(machine, NativeMethod {
+    if !native_method_push(machine, NativeMethod {
             class_id: class_id,
             name_symbol: name_symbol,
             native_id: native_id,
-        });
+        }) {
+        state_fail_capacity(machine.pool, CapacityResource.Methods, 1,
+            slab_used_bytes(), slab_limit_bytes());
+        machine.error = VmError.StateCapacity;
+    }
 }
 
 fn vm_lookup_native_method(machine: Vm&, class_id: u32, name_symbol: u32) -> u32, bool {

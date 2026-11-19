@@ -132,7 +132,7 @@ fn test_boolean_nil_self_and_symbol_loads(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..
     };
-    file.syms.push(vm::SymbolId {
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: 42,
         });
     var pool: vm::StatePool = vm::StatePool {

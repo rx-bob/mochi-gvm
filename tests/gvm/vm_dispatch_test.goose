@@ -180,12 +180,12 @@ fn test_send_packs_keyword_hash(t: goosetest::Test&) {
     root_record.syms_count = 1;
     var child_record = fake_record(3);
     child_record.iseq_length_bytes = child_bytes.len as u32;
-    file.records.push(root_record);
-    file.records.push(child_record);
-    file.syms.push(vm::SymbolId {
+    vm::record_push(file, root_record);
+    vm::record_push(file, child_record);
+    vm::symbol_ref_push(file, vm::SymbolId {
             index: method_symbol,
         });
-    machine.methods.push(vm::MethodEntry {
+    vm::method_push(machine, vm::MethodEntry {
             class_id: class_id,
             name_symbol: method_symbol,
             irep_index: 1,
