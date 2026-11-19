@@ -28,6 +28,8 @@ let JSON_CLOSE_ARRAY: u8 = 93;
 let JSON_OPEN_OBJECT: u8 = 123;
 let JSON_CLOSE_OBJECT: u8 = 125;
 
+extern fn mochi_parse_f64(text: const u8[:]) -> f64;
+
 struct JsonCursor {
     at: i64,
     failed: bool,
@@ -203,8 +205,8 @@ fn json_parse_float_text(scratch: ScratchArena&, text: u8[:]) -> MrbValue, bool 
     if text == "NaN" {
         return scratch_alloc_float(scratch, NAN), true;
     }
-    let value, ok = parse_flt(text);
-    if !ok || value != value || value - value != 0.0 {
+    let value = mochi_parse_f64(text);
+    if value != value || value - value != 0.0 {
         return mrb_nil(), false;
     }
     return scratch_alloc_float(scratch, value), true;

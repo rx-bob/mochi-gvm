@@ -115,6 +115,28 @@ fn test_parse_wide_numbers_and_wrappers(t: goosetest::Test&) {
     t.assert_eq(0.5, wrapper_float);
 }
 
+fn test_parse_decimal_float_boundaries(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var args: vm::MrbValue[>..] = [];
+    t.assert_true(vm::json_parse_args(pool, scratch, "[0.1,1e-400,1.7976931348623157e308]", args));
+    t.assert_eq(3, args.len);
+    let tenth, tenth_ok = vm::num_float_value(scratch, pool, args[0]);
+    t.assert_true(tenth_ok);
+    t.assert_eq(0.1, tenth);
+    let underflow, underflow_ok = vm::num_float_value(scratch, pool, args[1]);
+    t.assert_true(underflow_ok);
+    t.assert_eq(0.0, underflow);
+    let maximum, maximum_ok = vm::num_float_value(scratch, pool, args[2]);
+    t.assert_true(maximum_ok);
+    t.assert_true(maximum > 1.7976931348623155e308);
+    t.assert_false(vm::json_parse_args(pool, scratch, "[1e309]", args));
+}
+
 fn test_binary_wrapper_decodes_all_byte_values(t: goosetest::Test&) {
     var pool: vm::StatePool = vm::StatePool {
         ..

@@ -51,6 +51,26 @@ _Static_assert(offsetof(goose_u8_slice, len) == sizeof(void *),
 _Static_assert(sizeof(goose_u8_slice) == sizeof(void *) + sizeof(int64_t),
                "Goose u8 slice must have no padding");
 
+/* Parses a complete decimal number into a double. Invalid or non-finite text
+ * returns NaN, which the VM's JSON decoder rejects. The C library parser keeps
+ * the runtime's exact decimal path out of the WASM data section. */
+double mochi_parse_f64(goose_u8_slice text) {
+  if (!text.data || text.len < 0) {
+    return __builtin_nan("");
+  }
+  char *copy = (char *)malloc((size_t)text.len + 1);
+  if (!copy) {
+    return __builtin_nan("");
+  }
+  memcpy(copy, text.data, (size_t)text.len);
+  copy[text.len] = '\0';
+  char *end = copy;
+  double value = strtod(copy, &end);
+  int complete = end == copy + text.len;
+  free(copy);
+  return complete ? value : __builtin_nan("");
+}
+
 /* C slab for immutable package bytecode and 16 KB symbol string blocks.
  *
  * Each category owns one growable region. Goose cannot return a C-owned slice

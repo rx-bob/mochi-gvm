@@ -13,6 +13,59 @@ fn joined(parts: const u8[:][:]) -> u8[>..] {
     return result;
 }
 
+// Reject any line that is not a plain temporary allocation, field copy, or
+// stack watermark update.
+fn safe_scratch_init_line(line: const u8[:]) -> bool {
+    if !ends_with(line, ";")
+        || find(line, "GS_GL->") >= 0
+        || find(line, "return") >= 0
+        || find(line, "{") >= 0
+        || find(line, "}") >= 0 {
+        return false;
+    }
+    return starts_with(line, "(*t")
+        || starts_with(line, "t")
+        || starts_with(line, "l")
+        || starts_with(line, "GS_MEMZERO")
+        || starts_with(line, "GS(");
+}
+
+// Skip the generated ScratchArena temporary block. Every line before the
+// destination copy must be a plain allocation or assignment, and the block
+// must end with only stack-watermark restores.
+fn lower_scratch_arena(lines: const u8[:][:], start: i64, assignment: const u8[:]) -> i64 {
+    if trim(lines[start + 1]) != "GS(0 + 0)->top += sizeof(vm_ScratchArena_g2);"
+        || trim(lines[start + 2]) != "GS_MEMZERO(&(*t33), sizeof((*t33)));" {
+        return -1;
+    }
+    var index = start + 3;
+    var assignment_at = -1;
+    while index < lines.len {
+        let line = trim(lines[index]);
+        if line == assignment {
+            assignment_at = index;
+            break;
+        }
+        if !safe_scratch_init_line(line) {
+            return -1;
+        }
+        index += 1;
+    }
+    if assignment_at < 0 {
+        return -1;
+    }
+    index = assignment_at + 1;
+    while index < lines.len {
+        let line = trim(lines[index]);
+        if starts_with(line, "GS(") && find(line, ")->top = (uint8_t *)") >= 0 {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    return index;
+}
+
 // Deliberately recognize only the complete zero/copy sequence. An upstream
 // code-generation change must be reviewed, never partially rewritten.
 fn lower(source: const u8[:], output: u8[>..]&) -> i64 {
@@ -36,6 +89,21 @@ fn lower(source: const u8[:], output: u8[>..]&) -> i64 {
         }
         if inside && line == "}" {
             inside = false;
+        }
+        if inside && index + 3 < lines.len && line == "    vm_ScratchArena_g2 *t33 = (vm_ScratchArena_g2 *)GS(0 + 0)->top;" {
+            // The scratch arena is the one bounded struct that is too large for
+            // a data-stack temporary. Zero its static destination directly and
+            // drop the generated temporary and field copies.
+            let assignment = "GS_GL->vm_g_abi_scratch_g2 = (*t33);";
+            let end = lower_scratch_arena(lines, index, assignment);
+            if end < 0 {
+                return -1;
+            }
+            output.append("    uint8_t *t33 = GS(0 + 0)->top;\n");
+            output.append("    GS_MEMZERO(&GS_GL->vm_g_abi_scratch_g2, sizeof(GS_GL->vm_g_abi_scratch_g2));\n");
+            changed += 1;
+            index = end;
+            continue;
         }
         if inside && index + 4 < lines.len {
             let destination, value, assigned = split_once(trim(lines[index + 4]), " = ");

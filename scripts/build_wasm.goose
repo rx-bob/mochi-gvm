@@ -55,14 +55,14 @@ fn generate_goose_c() {
     command.append(GOOSE_C);
     command.append(" --standalone --header ");
     command.append(GOOSE_H);
-    command.append(" --stack-reserve 64K -O2 ");
+    command.append(" --stack-reserve 64K -O1 ");
     command.append(ENTRY);
     run(command[..]);
     var generated: u8[>..] = [];
     var lowered: u8[>..] = [];
     var wasm_lowered: u8[>..] = [];
     if !read_file(GOOSE_C, generated)
-        || static_storage::lower(generated, lowered) != 10
+        || static_storage::lower(generated, lowered) != 11
         || !static_storage::lower_wasm_runtime(lowered, wasm_lowered)
         || !write_file(GOOSE_C, wasm_lowered) {
         print("build_wasm failed: persistent storage initialization layout changed");
@@ -74,7 +74,7 @@ fn compile_bridge() {
     var command: u8[>..] = [];
     command.append("emcc -Oz -flto -sFILESYSTEM=0 -sMALLOC=emmalloc --closure 1 ");
     command.append("-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE ");
-    command.append("-sEXPORTED_FUNCTIONS='[\"_main\",\"_mochi_capacity_fingerprint\",\"_mochi_capacity_profile\",");
+    command.append("-sEXPORTED_FUNCTIONS='[\"_mochi_capacity_fingerprint\",\"_mochi_capacity_profile\",");
     command.append("\"_mochi_init_runtime\",\"_mochi_load_irep\",");
     command.append("\"_mochi_mount_component\",\"_mochi_mount_component_props\",");
     command.append("\"_mochi_set_props_json\",\"_mochi_intern\",");
