@@ -26,7 +26,7 @@ fn test_changed_initialization_rejected(t: goosetest::Test&) {
     t.assert_eq(-1, static_storage::lower(changed, output));
 }
 
-let SCRATCH_INIT = "static void gs_init_globals(void) {\n    vm_ScratchArena_g2 *t33 = (vm_ScratchArena_g2 *)GS(0 + 0)->top;\n    GS(0 + 0)->top += sizeof(vm_ScratchArena_g2);\n    GS_MEMZERO(&(*t33), sizeof((*t33)));\n    l8_u8 *t34 = (l8_u8 *)GS(0 + 1)->top;\n    GS(0 + 1)->top += sizeof(l8_u8);\n    GS_MEMZERO(&(*t34), sizeof((*t34)));\n    (*t34).len = 0;\n    (*t33).blob_g = (*t34);\n    (*t33).mark_epoch_g = 0;\n    t47.tag = 0;\n    t46.resource_g = t47;\n    (*t33).failure_g = t46;\n    (*t33).overflow_g = 0;\n    GS_GL->vm_g_abi_scratch_g2 = (*t33);\n    GS(0 + 1)->top = (uint8_t *)t34;\n    GS(0 + 0)->top = (uint8_t *)t33;\n    GS_GL->after = 1;\n}\n";
+let SCRATCH_INIT = "static void gs_init_globals(void) {\n    vm_ScratchArena_g2 *t33 = (vm_ScratchArena_g2 *)GS(0 + 0)->top;\n    GS(0 + 0)->top += sizeof(vm_ScratchArena_g2);\n    GS_MEMZERO(&(*t33), sizeof((*t33)));\n    l8_u8 *t34 = (l8_u8 *)GS(0 + 1)->top;\n    GS(0 + 1)->top += sizeof(l8_u8);\n    GS_MEMZERO(&(*t34), sizeof((*t34)));\n    (*t34).len = 0;\n    (*t33).blob_g = (*t34);\n    (*t33).mark_epoch_g = 0;\n    t47.tag = 0;\n    t46.resource_g = t47;\n    (*t33).failure_g = t46;\n    (*t33).overflow_g = 0;\n    t42 = (l512_u32){0};\n    (*t33).marks_g = t42;\n    GS_GL->vm_g_abi_scratch_g2 = (*t33);\n    GS(0 + 1)->top = (uint8_t *)t34;\n    GS(0 + 0)->top = (uint8_t *)t33;\n    GS_GL->after = 1;\n}\n";
 
 fn test_scratch_arena_initialization_is_static(t: goosetest::Test&) {
     var output: u8[>..] = [];

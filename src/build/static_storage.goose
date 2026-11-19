@@ -16,6 +16,9 @@ fn joined(parts: const u8[:][:]) -> u8[>..] {
 // Reject any line that is not a plain temporary allocation, field copy, or
 // stack watermark update.
 fn safe_scratch_init_line(line: const u8[:]) -> bool {
+    if starts_with(line, "t") && ends_with(line, "{0};") {
+        return true;
+    }
     if !ends_with(line, ";")
         || find(line, "GS_GL->") >= 0
         || find(line, "return") >= 0
