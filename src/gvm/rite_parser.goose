@@ -37,10 +37,10 @@ struct RecordHeader {
 // return value names the first structural problem encountered.
 fn parse_rite(data: u8[:], file: RiteFile&) -> ParseError {
     file.data = data;
-    file.records.clear();
-    file.pools.clear();
-    file.syms.clear();
-    file.roots.clear();
+    record_clear(file);
+    pool_clear(file);
+    symbol_ref_clear(file);
+    root_clear(file);
     file.error = ParseError.Ok;
     file.binary_size_bytes = 0;
     file.irep_section_offset_bytes = 0;
@@ -82,7 +82,7 @@ fn parse_rite_window(
         return parse_rite_fail(file, ParseError.BadBinarySize);
     }
 
-    let root_index = file.records.len;
+    let root_index = record_count(file);
     let err = parse_rite_sections(data, data_base, data_base + binary_size, file);
     if err != ParseError.Ok {
         return parse_rite_fail(file, err);
@@ -92,7 +92,7 @@ fn parse_rite_window(
     } else {
         file.binary_size_bytes += binary_size_raw;
     }
-    file.roots.push(root_index);
+    root_push(file, root_index);
     return ParseError.Ok;
 }
 
@@ -225,14 +225,14 @@ recursive fn parse_record(
     var child_at = record_end;
     var previous_child: i64 = -1;
     for _ in header.child_count {
-        if file.records.len >= MAX_IREP_RECORDS {
+        if record_count(file) >= MAX_IREP_RECORDS {
             return 0, ParseError.TooManyEntries;
         }
-        let child_index = file.records.len;
+        let child_index = record_count(file);
         if previous_child < 0 {
-            file.records[record_index].first_child_index = child_index;
+            record_set_first_child(file, record_index, child_index);
         } else {
-            file.records[previous_child].next_sibling_index = child_index;
+            record_set_next_sibling(file, previous_child, child_index);
         }
         let next_at, child_err = parse_record(data, child_at, limit, depth + 1, record_index, file);
         if child_err != ParseError.Ok {
@@ -300,14 +300,14 @@ fn parse_record_body(
     file: RiteFile&
 ) -> i64, ParseError {
     var cursor = header.catch_offset_bytes + header.catch_count as i64 * IREP_CATCH_HANDLER_BYTES;
-    let pool_first = file.pools.len;
-    let pool_at, pool_count, pool_err = parse_record_pool_block(data, cursor, record_end, file);
+    let pool_first = pool_count(file);
+    let pool_cursor, pools_added, pool_err = parse_record_pool_block(data, cursor, record_end, file);
     if pool_err != ParseError.Ok {
         return 0, pool_err;
     }
-    cursor = pool_at;
+    cursor = pool_cursor;
 
-    let syms_first = file.syms.len;
+    let syms_first = symbol_ref_count(file);
     let syms_at, syms_count, syms_err = parse_record_symbol_block(data, cursor, record_end, file);
     if syms_err != ParseError.Ok {
         return 0, syms_err;
@@ -319,12 +319,12 @@ fn parse_record_body(
     if cursor != record_end {
         return 0, ParseError.RecordSizeMismatch;
     }
-    if file.records.len >= MAX_IREP_RECORDS {
+    if record_count(file) >= MAX_IREP_RECORDS {
         return 0, ParseError.TooManyEntries;
     }
 
-    let record_index = file.records.len;
-    file.records.push(IrepRecord {
+    let record_index = record_count(file);
+    record_push(file, IrepRecord {
             record_offset_bytes: header.record_offset_bytes,
             record_size_bytes: header.record_size_bytes,
             nlocals: header.nlocals,
@@ -335,7 +335,7 @@ fn parse_record_body(
             iseq_offset_bytes: header.iseq_offset_bytes,
             catch_offset_bytes: header.catch_offset_bytes,
             pool_first_index: pool_first,
-            pool_count: pool_count,
+            pool_count: pools_added,
             syms_first_index: syms_first,
             syms_count: syms_count,
             parent_index: parent_index,
@@ -359,14 +359,14 @@ fn parse_record_pool_block(
     }
     var cursor = at + 2;
     for _ in count {
-        if file.pools.len >= MAX_IREP_POOL_ENTRIES {
+        if pool_count(file) >= MAX_IREP_POOL_ENTRIES {
             return cursor, count, ParseError.TooManyEntries;
         }
         let entry, next, err = parse_pool_entry(data, cursor, limit);
         if err != ParseError.Ok {
             return cursor, count, err;
         }
-        file.pools.push(entry);
+        pool_push(file, entry);
         cursor = next;
     }
     return cursor, count, ParseError.Ok;
@@ -385,8 +385,8 @@ fn parse_record_symbol_block(
     }
     var cursor = at + 2;
     for _ in count {
-        if file.syms.len >= MAX_IREP_SYMBOL_ENTRIES ||
-        g_symbol_table.entries.len >= MAX_SYMBOL_ENTRIES {
+        if symbol_ref_count(file) >= MAX_IREP_SYMBOL_ENTRIES ||
+        symbol_count() >= MAX_SYMBOL_ENTRIES {
             return cursor, count, ParseError.TooManyEntries;
         }
         if cursor + 2 > limit {
@@ -398,7 +398,7 @@ fn parse_record_symbol_block(
         }
         cursor += 2;
         if length == MRB_NULL_SYM_LENGTH {
-            file.syms.push(SymbolId {
+            symbol_ref_push(file, SymbolId {
                     index: NULL_SYMBOL
                 });
             continue;
@@ -412,7 +412,7 @@ fn parse_record_symbol_block(
             return cursor, count, ParseError.MissingTerminator;
         }
         let id = intern_symbol(data[cursor..name_end]);
-        file.syms.push(SymbolId {
+        symbol_ref_push(file, SymbolId {
                 index: id
             });
         cursor = name_end + 1;

@@ -182,6 +182,30 @@ root struct Vm {
     },
 }
 
+// Accessors for the VM's append-only method table. Method lookup, definition
+// and diagnostics all go through these helpers so the table representation can
+// change without touching its consumers.
+
+fn method_count(machine: Vm&) -> i64 {
+    return machine.methods.len;
+}
+
+fn method_at(machine: Vm&, index: i64) -> MethodEntry {
+    return machine.methods[index];
+}
+
+fn method_set_at(machine: Vm&, index: i64, entry: MethodEntry) {
+    machine.methods[index] = entry;
+}
+
+fn method_push(machine: Vm&, entry: MethodEntry) {
+    machine.methods.push(entry);
+}
+
+fn method_clear(machine: Vm&) {
+    machine.methods.clear();
+}
+
 fn vm_step_continue(pc: i64) -> Step {
     return Step {
         pc: pc,
@@ -352,8 +376,8 @@ fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
     if name == "NilClass" {
         return BUILTIN_NIL_CLASS_ID, true;
     }
-    for index in 0..pool.classes.len {
-        if pool.classes[index].name_symbol == name_symbol {
+    for index in 0..state_class_count(pool) {
+        if class_at(pool, index as u32).name_symbol == name_symbol {
             return index as u32, true;
         }
     }
@@ -363,19 +387,21 @@ fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
 // Binds `name_symbol` to `irep_index` on `class_id`, replacing a redefinition.
 fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i64,
     lexical_owner: u32 = NULL_CLASS_ID) {
-    for index in 0..machine.methods.len {
-        if machine.methods[index].class_id == class_id
-            && machine.methods[index].name_symbol == name_symbol {
-            machine.methods[index].irep_index = irep_index;
-            machine.methods[index].lexical_owner = lexical_owner;
+    for index in 0..method_count(machine) {
+        let entry = method_at(machine, index);
+        if entry.class_id == class_id && entry.name_symbol == name_symbol {
+            var updated = entry;
+            updated.irep_index = irep_index;
+            updated.lexical_owner = lexical_owner;
+            method_set_at(machine, index, updated);
             return;
         }
     }
-    if machine.methods.len >= MAX_VM_METHODS {
+    if method_count(machine) >= MAX_VM_METHODS {
         machine.error = VmError.NoMethod;
         return;
     }
-    machine.methods.push(MethodEntry {
+    method_push(machine, MethodEntry {
             class_id: class_id,
             name_symbol: name_symbol,
             irep_index: irep_index,
@@ -386,8 +412,8 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
 // Resolves a method through the class and its superclass chain.
 fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool {
     if class_id == BUILTIN_ARRAY_CLASS_ID {
-        for index in 0..machine.methods.len {
-            let entry = machine.methods[index];
+        for index in 0..method_count(machine) {
+            let entry = method_at(machine, index);
             if entry.class_id == class_id && entry.name_symbol == name_symbol {
                 return entry.irep_index, true;
             }
@@ -399,8 +425,8 @@ fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool 
     while current != NULL_CLASS_ID
         && current < state_class_count(machine.pool)as u32
         && steps < MAX_STATE_CLASSES {
-        for index in 0..machine.methods.len {
-            let entry = machine.methods[index];
+        for index in 0..method_count(machine) {
+            let entry = method_at(machine, index);
             if entry.class_id == current && entry.name_symbol == name_symbol {
                 return entry.irep_index, true;
             }
@@ -438,16 +464,16 @@ fn vm_owner_class_id(machine: Vm&, receiver: MrbValue) -> u32, bool {
 
 // Returns the child IREP at `ordinal` in the operand-local child list.
 fn vm_child_record(file: RiteFile&, parent_index: i64, ordinal: i64) -> i64 {
-    if parent_index < 0 || parent_index >= file.records.len || ordinal < 0 {
+    if parent_index < 0 || parent_index >= record_count(file) || ordinal < 0 {
         return -1;
     }
-    var index = file.records[parent_index].first_child_index;
+    var index = record_at(file, parent_index).first_child_index;
     var at = 0;
-    while index >= 0 && index < file.records.len {
+    while index >= 0 && index < record_count(file) {
         if at == ordinal {
             return index;
         }
-        index = file.records[index].next_sibling_index;
+        index = record_at(file, index).next_sibling_index;
         at += 1;
     }
     return -1;
@@ -458,10 +484,10 @@ fn vm_record_symbol(file: RiteFile&, record: IrepRecord, local_index: i64) -> u3
         return NULL_SYMBOL, false;
     }
     let index = record.syms_first_index + local_index;
-    if index < 0 || index >= file.syms.len {
+    if index < 0 || index >= symbol_ref_count(file) {
         return NULL_SYMBOL, false;
     }
-    return file.syms[index].index, true;
+    return symbol_ref_at(file, index).index, true;
 }
 
 fn vm_record_pool_entry(file: RiteFile&, record: IrepRecord, local_index: i64) -> PoolEntry, bool {
@@ -469,10 +495,10 @@ fn vm_record_pool_entry(file: RiteFile&, record: IrepRecord, local_index: i64) -
         return empty_pool_entry(), false;
     }
     let index = record.pool_first_index + local_index;
-    if index < 0 || index >= file.pools.len {
+    if index < 0 || index >= pool_count(file) {
         return empty_pool_entry(), false;
     }
-    return file.pools[index], true;
+    return pool_at(file, index), true;
 }
 
 fn vm_record_pool_text(file: RiteFile&, record: IrepRecord, local_index: i64) -> const u8[:], bool {

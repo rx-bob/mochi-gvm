@@ -30,6 +30,41 @@ struct ComputedEntry {
     evaluating: bool = false,
 }
 
+// Accessors for computed definitions and their symbol roots. Registration,
+// lookup and rollback all go through these helpers.
+
+fn computed_def_count(machine: Vm&) -> i64 {
+    return machine.computed_definitions.len;
+}
+
+fn computed_def_at(machine: Vm&, index: i64) -> ComputedDefinition {
+    return machine.computed_definitions[index];
+}
+
+fn computed_def_push(machine: Vm&, definition: ComputedDefinition) {
+    machine.computed_definitions.push(definition);
+}
+
+fn computed_def_clear(machine: Vm&) {
+    machine.computed_definitions.clear();
+}
+
+fn computed_root_count(machine: Vm&) -> i64 {
+    return machine.computed_roots.len;
+}
+
+fn computed_root_at(machine: Vm&, index: i64) -> u32 {
+    return machine.computed_roots[index];
+}
+
+fn computed_root_push(machine: Vm&, root: u32) {
+    machine.computed_roots.push(root);
+}
+
+fn computed_root_clear(machine: Vm&) {
+    machine.computed_roots.clear();
+}
+
 fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue {
     if machine.pool.computed_depth > 0 {
         machine.error = VmError.ComputedEffect;
@@ -44,14 +79,15 @@ fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue
         return mrb_nil();
     }
     let method_symbol = mrb_symbol_id(args[0]);
-    for definition in machine.computed_definitions {
+    for index in 0..computed_def_count(machine) {
+        let definition = computed_def_at(machine, index);
         if definition.class_id == class_id && definition.method_symbol == method_symbol {
             machine.error = VmError.InvalidArgument;
             return mrb_nil();
         }
     }
     let count = builtin_array_length(machine.pool, machine.scratch, args[1]);
-    if count > MAX_TRACKED_IVARS || machine.computed_definitions.len >= MAX_VM_METHODS {
+    if count > MAX_TRACKED_IVARS || computed_def_count(machine) >= MAX_VM_METHODS {
         machine.error = VmError.InvalidArgument;
         return mrb_nil();
     }
@@ -64,38 +100,39 @@ fn computed_register(machine: Vm&, class_id: u32, args: MrbValue[:]) -> MrbValue
             return mrb_nil();
         }
     }
-    machine.computed_definitions.push(ComputedDefinition {
+    computed_def_push(machine, ComputedDefinition {
             class_id: class_id,
             method_symbol: method_symbol,
-            root_start: machine.computed_roots.len,
+            root_start: computed_root_count(machine),
             root_count: count,
         });
     for index in 0..count {
         let root = builtin_array_get(machine.pool, machine.scratch, args[1], index);
-        machine.computed_roots.push(mrb_symbol_id(root));
+        computed_root_push(machine, mrb_symbol_id(root));
     }
     return mrb_nil();
 }
 
 fn computed_definition(machine: Vm&, class_id: u32, method_symbol: u32) -> i64 {
-    if machine.computed_definitions.len == 0 {
+    if computed_def_count(machine) == 0 {
         return -1;
     }
     var owner = class_id;
-    for _ in 0..machine.pool.classes.len + 1 {
-        for index in 0..machine.computed_definitions.len {
-            let definition = machine.computed_definitions[index];
+    for _ in 0..state_class_count(machine.pool) + 1 {
+        for index in 0..computed_def_count(machine) {
+            let definition = computed_def_at(machine, index);
             if definition.class_id == owner && definition.method_symbol == method_symbol {
                 return index;
             }
         }
         // An ordinary override replaces the ancestor's declaration too.
-        for method in machine.methods {
+        for index in 0..method_count(machine) {
+            let method = method_at(machine, index);
             if method.class_id == owner && method.name_symbol == method_symbol {
                 return -1;
             }
         }
-        if owner >= machine.pool.classes.len {
+        if owner >= state_class_count(machine.pool) {
             return -1;
         }
         owner = state_class_superclass_id(machine.pool, owner);
@@ -104,7 +141,7 @@ fn computed_definition(machine: Vm&, class_id: u32, method_symbol: u32) -> i64 {
 }
 
 fn computed_entry(machine: Vm&, instance: MrbValue, definition_index: i64) -> i64 {
-    let definition .= machine.computed_definitions[definition_index];
+    let definition = computed_def_at(machine, definition_index);
     for index in 0..machine.pool.computed.len {
         let entry = machine.pool.computed[index];
         if mrb_value_identical(entry.instance, instance) && entry.method_symbol == definition.method_symbol {
@@ -118,7 +155,7 @@ fn computed_entry(machine: Vm&, instance: MrbValue, definition_index: i64) -> i6
     }
     var dependencies = mask_clear();
     for root_index in definition.root_start..definition.root_start + definition.root_count {
-        let key = machine.computed_roots[root_index];
+        let key = computed_root_at(machine, root_index);
         var bit_index = state_ivar_bit_index(machine.pool, instance, key);
         if bit_index < 0 {
             let slot = state_append_ivar_slot(machine.pool, mrb_arena_index(instance), key, mrb_nil());

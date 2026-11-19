@@ -150,10 +150,10 @@ fn vm_op_upvar(
         return vm_fail(machine, VmError.BadOperand, pc + 3);
     }
     let env = machine.frames[target_frame];
-    if env.record_index < 0 || env.record_index >= machine.file.records.len {
+    if env.record_index < 0 || env.record_index >= record_count(machine.file) {
         return vm_fail(machine, VmError.BadOperand, pc + 3);
     }
-    let env_record = machine.file.records[env.record_index];
+    let env_record = record_at(machine.file, env.record_index);
     if op == OP_GETUPVAR {
         let value, ok = vm_read_register(machine, env_record, env.base, ops.b);
         if !ok || !vm_write_register(machine, record, frame.base, ops.a, value) {

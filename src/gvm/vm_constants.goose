@@ -9,7 +9,8 @@ fn vm_lexical_owner(machine: Vm&, record_index: i64, self_value: MrbValue, env_f
     if env_frame >= 0 && env_frame < machine.frames.len {
         return machine.frames[env_frame].lexical_owner;
     }
-    for method in machine.methods {
+    for index in 0..method_count(machine) {
+        let method = method_at(machine, index);
         if method.irep_index == record_index {
             return method.lexical_owner;
         }
@@ -21,11 +22,11 @@ fn vm_lexical_owner(machine: Vm&, record_index: i64, self_value: MrbValue, env_f
 }
 
 fn vm_qualified_symbol(pool: StatePool&, owner: u32, symbol: u32) -> u32 {
-    if owner >= pool.classes.len {
+    if owner >= state_class_count(pool)as u32 {
         return symbol;
     }
     var name: u8[>..] = [];
-    name.append(symbol_name(pool.classes[owner].name_symbol));
+    name.append(symbol_name(class_at(pool, owner).name_symbol));
     name.append("::");
     name.append(symbol_name(symbol));
     return intern_symbol(name[..]);

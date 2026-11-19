@@ -10,6 +10,7 @@
 // in-flight expression can be invalidated.
 namespace vm;
 
+import.rite_types;
 import.scratch_alloc;
 import.state_pool;
 import.value_arena;
@@ -103,10 +104,10 @@ fn scratch_mark_drain(machine: Vm&) {
 fn scratch_mark_roots(machine: Vm&) {
     for frame in machine.frames {
         scratch_mark_push(machine, frame.self_value);
-        if frame.record_index < 0 || frame.record_index >= machine.file.records.len {
+        if frame.record_index < 0 || frame.record_index >= record_count(machine.file) {
             continue;
         }
-        let record = machine.file.records[frame.record_index];
+        let record = record_at(machine.file, frame.record_index);
         var offset = 0;
         while offset < record.nregs && frame.base + offset < machine.regs.len {
             scratch_mark_push(machine, machine.regs[frame.base + offset]);

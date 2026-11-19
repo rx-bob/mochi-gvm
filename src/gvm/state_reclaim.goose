@@ -97,8 +97,8 @@ fn gc_mark_roots(machine: Vm&) {
     for component in pool.components {
         gc_mark_push(pool, component);
     }
-    for entry in pool.consts {
-        gc_mark_push(pool, entry.value);
+    for index in 0..const_count(pool) {
+        gc_mark_push(pool, const_at(pool, index).value);
     }
     for entry in pool.bindings {
         gc_mark_push(pool, entry.instance);

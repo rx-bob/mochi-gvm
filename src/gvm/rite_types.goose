@@ -14,10 +14,13 @@ let IREP_RECORD_HEADER_BYTES = 16;
 let IREP_CATCH_HANDLER_BYTES = 13;
 let MIN_RITE_BYTES = 20;
 let MAX_IREP_DEPTH = 32;
-let MAX_IREP_RECORDS = 4096;
-let MAX_IREP_POOL_ENTRIES = 4096;
-let MAX_IREP_SYMBOL_ENTRIES = 4096;
-let MAX_SYMBOL_ENTRIES = 4096;
+// These tables accumulate across every IREP appended to the runtime, not per
+// file. A lazily loaded single-page application can span hundreds of packages,
+// so the bounds leave room for the whole application rather than one bundle.
+let MAX_IREP_RECORDS = 16384;
+let MAX_IREP_POOL_ENTRIES = 16384;
+let MAX_IREP_SYMBOL_ENTRIES = 16384;
+let MAX_SYMBOL_ENTRIES = 16384;
 let NULL_SYMBOL: u32 = 0xFFFFFFFF;
 let MRB_NULL_SYM_LENGTH = 0xFFFF;
 
@@ -120,6 +123,107 @@ var g_symbol_table = SymbolTable {
     ..
 };
 
+// Read and mutation accessors for the flat RITE tables.
+//
+// Every parser and interpreter call site goes through these helpers so the
+// backing storage can change without touching its consumers. Goose compiles the
+// whole program into one translation unit at `-O2`, so these wrappers inline.
+
+fn record_count(file: RiteFile&) -> i64 {
+    return file.records.len;
+}
+
+fn record_at(file: RiteFile&, index: i64) -> IrepRecord {
+    return file.records[index];
+}
+
+fn record_set_first_child(file: RiteFile&, index: i64, child_index: i64) {
+    file.records[index].first_child_index = child_index;
+}
+
+fn record_set_next_sibling(file: RiteFile&, index: i64, sibling_index: i64) {
+    file.records[index].next_sibling_index = sibling_index;
+}
+
+fn record_push(file: RiteFile&, record: IrepRecord) {
+    file.records.push(record);
+}
+
+fn record_clear(file: RiteFile&) {
+    file.records.clear();
+}
+
+fn pool_count(file: RiteFile&) -> i64 {
+    return file.pools.len;
+}
+
+fn pool_at(file: RiteFile&, index: i64) -> PoolEntry {
+    return file.pools[index];
+}
+
+fn pool_push(file: RiteFile&, entry: PoolEntry) {
+    file.pools.push(entry);
+}
+
+fn pool_clear(file: RiteFile&) {
+    file.pools.clear();
+}
+
+fn symbol_ref_count(file: RiteFile&) -> i64 {
+    return file.syms.len;
+}
+
+fn symbol_ref_at(file: RiteFile&, index: i64) -> SymbolId {
+    return file.syms[index];
+}
+
+fn symbol_ref_push(file: RiteFile&, reference: SymbolId) {
+    file.syms.push(reference);
+}
+
+fn symbol_ref_clear(file: RiteFile&) {
+    file.syms.clear();
+}
+
+fn root_count(file: RiteFile&) -> i64 {
+    return file.roots.len;
+}
+
+fn root_at(file: RiteFile&, index: i64) -> i64 {
+    return file.roots[index];
+}
+
+fn root_push(file: RiteFile&, record_index: i64) {
+    file.roots.push(record_index);
+}
+
+fn root_clear(file: RiteFile&) {
+    file.roots.clear();
+}
+
+// Symbol table accessors. IDs index `entries`; each entry views `blob` without
+// copying, and appending a name keeps existing IDs stable.
+
+fn symbol_entry_at(index: u32) -> SymbolEntry {
+    return g_symbol_table.entries[index];
+}
+
+fn symbol_entry_push(entry: SymbolEntry) {
+    g_symbol_table.entries.push(entry);
+}
+
+fn symbol_blob_length() -> i64 {
+    return g_symbol_table.blob.len;
+}
+
+fn symbol_blob_append(name: u8[:]) {
+    g_symbol_table.blob.append(name);
+}
+
+fn symbol_blob_slice(start: i64, stop: i64) -> const u8[:] {
+    return g_symbol_table.blob[start..stop];
+}
+
 // Returns a human-readable name for a parse result.
 fn parse_error_name(err: ParseError) -> u8[:] {
     return match err {
@@ -142,13 +246,13 @@ fn parse_error_name(err: ParseError) -> u8[:] {
 
 // Returns the interned name of a symbol, or an empty view for a null symbol.
 fn symbol_name(id: u32) -> const u8[:] {
-    if id == NULL_SYMBOL || id >= g_symbol_table.entries.len as u32 {
+    if id == NULL_SYMBOL || id >= symbol_count()as u32 {
         return "";
     }
-    let entry = g_symbol_table.entries[id];
+    let entry = symbol_entry_at(id);
     let start = entry.text_offset_bytes;
     let stop = start + entry.text_length_bytes;
-    return g_symbol_table.blob[start..stop];
+    return symbol_blob_slice(start, stop);
 }
 
 // Returns the number of interned names.
@@ -158,20 +262,20 @@ fn symbol_count() -> i64 {
 
 // Returns the ID of `name`, appending it once when the table has no equal name.
 fn intern_symbol(name: u8[:]) -> u32 {
-    for index in 0..g_symbol_table.entries.len {
-        let entry = g_symbol_table.entries[index];
+    for index in 0..symbol_count() {
+        let entry = symbol_entry_at(index as u32);
         if entry.text_length_bytes == name.len {
             let start = entry.text_offset_bytes;
             let stop = start + entry.text_length_bytes;
-            if compare(g_symbol_table.blob[start..stop], name) == 0 {
+            if compare(symbol_blob_slice(start, stop), name) == 0 {
                 return index as u32;
             }
         }
     }
-    let offset = g_symbol_table.blob.len;
-    let id = g_symbol_table.entries.len as u32;
-    g_symbol_table.blob.append(name);
-    g_symbol_table.entries.push(SymbolEntry {
+    let offset = symbol_blob_length();
+    let id = symbol_count()as u32;
+    symbol_blob_append(name);
+    symbol_entry_push(SymbolEntry {
             text_offset_bytes: offset,
             text_length_bytes: name.len,
         });

@@ -170,7 +170,8 @@ fn vm_absorb_method_context(machine: Vm&, record_index: i64) {
     if machine.error_context.class_id != NULL_CLASS_ID {
         return;
     }
-    for method in machine.methods {
+    for index in 0..method_count(machine) {
+        let method = method_at(machine, index);
         if method.irep_index == record_index {
             vm_set_error_context(machine, method.class_id, method.name_symbol,
                 machine.error_context.binding_id);

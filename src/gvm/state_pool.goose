@@ -126,6 +126,41 @@ fn state_class_count(pool: StatePool&) -> i64 {
     return pool.classes.len;
 }
 
+// Accessors for the class and constant tables. Class IDs are table positions;
+// callers use `class_at` instead of indexing the table directly.
+
+fn class_at(pool: StatePool&, class_id: u32) -> ClassDef {
+    return pool.classes[class_id];
+}
+
+fn class_push(pool: StatePool&, definition: ClassDef) {
+    pool.classes.push(definition);
+}
+
+fn state_class_clear(pool: StatePool&) {
+    pool.classes.clear();
+}
+
+fn const_count(pool: StatePool&) -> i64 {
+    return pool.consts.len;
+}
+
+fn const_at(pool: StatePool&, index: i64) -> ConstEntry {
+    return pool.consts[index];
+}
+
+fn const_set_at(pool: StatePool&, index: i64, entry: ConstEntry) {
+    pool.consts[index] = entry;
+}
+
+fn const_push(pool: StatePool&, entry: ConstEntry) {
+    pool.consts.push(entry);
+}
+
+fn const_clear(pool: StatePool&) {
+    pool.consts.clear();
+}
+
 fn state_component_count(pool: StatePool&) -> i64 {
     return pool.components.len;
 }
@@ -173,9 +208,9 @@ fn state_has_byte_capacity(pool: StatePool&, length: i64) -> bool {
 
 // Appends a class definition and returns its immediate class ID.
 fn state_define_class(pool: StatePool&, name_symbol: u32, superclass_id: u32) -> u32 {
-    assert(pool.classes.len < MAX_STATE_CLASSES);
-    let class_id = pool.classes.len as u32;
-    pool.classes.push(ClassDef {
+    assert(state_class_count(pool) < MAX_STATE_CLASSES);
+    let class_id = state_class_count(pool)as u32;
+    class_push(pool, ClassDef {
             name_symbol: name_symbol,
             superclass_id: superclass_id,
         });
@@ -183,25 +218,28 @@ fn state_define_class(pool: StatePool&, name_symbol: u32, superclass_id: u32) ->
 }
 
 fn state_class_name_symbol(pool: StatePool&, class_id: u32) -> u32 {
-    assert(class_id < pool.classes.len);
-    return pool.classes[class_id].name_symbol;
+    assert(class_id < state_class_count(pool)as u32);
+    return class_at(pool, class_id).name_symbol;
 }
 
 fn state_class_superclass_id(pool: StatePool&, class_id: u32) -> u32 {
-    assert(class_id < pool.classes.len);
-    return pool.classes[class_id].superclass_id;
+    assert(class_id < state_class_count(pool)as u32);
+    return class_at(pool, class_id).superclass_id;
 }
 
 fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, value: MrbValue,
     owner: u32 = NULL_CLASS_ID) {
     let promoted = promote_to_state(pool, scratch, value);
-    for index in 0..pool.consts.len {
-        if pool.consts[index].name_symbol == name_symbol && pool.consts[index].owner == owner {
-            pool.consts[index].value = promoted;
+    for index in 0..const_count(pool) {
+        let entry = const_at(pool, index);
+        if entry.name_symbol == name_symbol && entry.owner == owner {
+            var updated = entry;
+            updated.value = promoted;
+            const_set_at(pool, index, updated);
             return;
         }
     }
-    pool.consts.push(ConstEntry {
+    const_push(pool, ConstEntry {
             name_symbol: name_symbol,
             value: promoted,
             owner: owner,
@@ -209,7 +247,8 @@ fn state_set_const(pool: StatePool&, scratch: ScratchArena&, name_symbol: u32, v
 }
 
 fn state_get_const(pool: StatePool&, name_symbol: u32, owner: u32 = NULL_CLASS_ID) -> MrbValue, bool {
-    for entry in pool.consts {
+    for index in 0..const_count(pool) {
+        let entry = const_at(pool, index);
         if entry.name_symbol == name_symbol && entry.owner == owner {
             return entry.value, true;
         }
@@ -353,7 +392,7 @@ fn state_alloc_string(pool: StatePool&, text: u8[:]) -> MrbValue {
 // clears registration state; reclamation only frees the header once no root or
 // reachable collection refers to it.
 fn state_alloc_instance(pool: StatePool&, class_id: u32) -> MrbValue {
-    assert(class_id < pool.classes.len);
+    assert(class_id < state_class_count(pool)as u32);
     pool.error = VmError.Ok;
     let index = state_take_object(pool, ArenaObjectKind.Instance);
     if index < 0 {

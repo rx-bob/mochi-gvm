@@ -305,11 +305,11 @@ fn vm_call_mochi_timer(
             intern_symbol(cb)
         };
         let callback_irep, callback_found = vm_lookup_method(machine, class_id, callback_symbol);
-        if !callback_found || callback_irep < 0 || callback_irep >= machine.file.records.len {
+        if !callback_found || callback_irep < 0 || callback_irep >= record_count(machine.file) {
             machine.error = VmError.TimerCallback;
             return mrb_nil(), true;
         }
-        let callback_iseq = record_iseq(machine.file, machine.file.records[callback_irep]);
+        let callback_iseq = record_iseq(machine.file, record_at(machine.file, callback_irep));
         let required_args, has_enter = vm_required_args(callback_iseq);
         if has_enter && required_args > 0 {
             machine.error = VmError.WrongArity;

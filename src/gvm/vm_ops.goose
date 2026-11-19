@@ -24,13 +24,13 @@ import.vm_ops_control;
 // before executing so a runtime failure in one class body does not leave later
 // components unbooted.
 fn vm_ensure_booted(machine: Vm&) {
-    if machine.file.records.len == 0 {
+    if record_count(machine.file) == 0 {
         machine.error = VmError.BadOpcode;
         return;
     }
     var first_error = VmError.Ok;
-    while machine.booted_roots < machine.file.roots.len {
-        let root = machine.file.roots[machine.booted_roots];
+    while machine.booted_roots < root_count(machine.file) {
+        let root = root_at(machine.file, machine.booted_roots);
         machine.booted_roots += 1;
         vm_exec(machine, root, mrb_nil(), -1);
         if machine.error != VmError.Ok {
@@ -84,8 +84,8 @@ recursive fn vm_exec_frame(
         return mrb_nil();
     }
     assert(record_index >= 0);
-    assert(record_index < machine.file.records.len);
-    let record = machine.file.records[record_index];
+    assert(record_index < record_count(machine.file));
+    let record = record_at(machine.file, record_index);
     let iseq = record_iseq(machine.file, record);
     if env_frame < 0 && !vm_entry_arity_ok(machine, iseq, args) {
         vm_absorb_method_context(machine, record_index);

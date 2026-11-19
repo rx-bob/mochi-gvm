@@ -134,17 +134,17 @@ fn abi_record_call_context(receiver: u64, method_symbol: u32) {
 
 fn abi_reset() {
     g_abi_file.data = "";
-    g_abi_file.records.clear();
-    g_abi_file.pools.clear();
-    g_abi_file.syms.clear();
-    g_abi_file.roots.clear();
+    record_clear(g_abi_file);
+    pool_clear(g_abi_file);
+    symbol_ref_clear(g_abi_file);
+    root_clear(g_abi_file);
     g_abi_file.error = ParseError.Ok;
     g_abi_file.binary_size_bytes = 0;
     g_abi_file.irep_section_offset_bytes = 0;
     g_abi_file.irep_section_size_bytes = 0;
 
-    g_abi_pool.classes.clear();
-    g_abi_pool.consts.clear();
+    state_class_clear(g_abi_pool);
+    const_clear(g_abi_pool);
     g_abi_pool.objects.clear();
     g_abi_pool.ivars.clear();
     g_abi_pool.slots.clear();
@@ -171,10 +171,10 @@ fn abi_reset() {
     g_abi_scratch.allocated_bytes_total = 0;
     g_abi_scratch.reset_count = 0;
 
-    g_abi_machine.methods.clear();
-    g_abi_machine.computed_definitions.clear();
-    g_abi_machine.computed_roots.clear();
-    g_abi_machine.native_methods.clear();
+    method_clear(g_abi_machine);
+    computed_def_clear(g_abi_machine);
+    computed_root_clear(g_abi_machine);
+    native_method_clear(g_abi_machine);
     g_abi_machine.regs.clear();
     g_abi_machine.frames.clear();
     g_abi_machine.entry_args.clear();
@@ -393,10 +393,10 @@ fn abi_method_req_argc(receiver: u64, method_symbol: u32) -> i64 {
         return -1;
     }
     let irep, found = vm_lookup_method(g_abi_machine, class_id, method_symbol);
-    if !found || irep < 0 || irep >= g_abi_file.records.len {
+    if !found || irep < 0 || irep >= record_count(g_abi_file) {
         return -1;
     }
-    let iseq = record_iseq(g_abi_file, g_abi_file.records[irep]);
+    let iseq = record_iseq(g_abi_file, record_at(g_abi_file, irep));
     let required, has_enter = vm_required_args(iseq);
     if !has_enter {
         return 0;

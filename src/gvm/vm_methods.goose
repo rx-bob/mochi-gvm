@@ -81,19 +81,43 @@ extern fn goose_abi_native_set_arg(index: i64, value: u64);
 
 extern fn goose_abi_native_call(native_id: u32, self_value: u64, argc: i64) -> u64;
 
+// Accessors for the native method table. Binding and lookup stay independent
+// of the backing representation.
+fn native_method_count(machine: Vm&) -> i64 {
+    return machine.native_methods.len;
+}
+
+fn native_method_at(machine: Vm&, index: i64) -> NativeMethod {
+    return machine.native_methods[index];
+}
+
+fn native_method_set_at(machine: Vm&, index: i64, entry: NativeMethod) {
+    machine.native_methods[index] = entry;
+}
+
+fn native_method_push(machine: Vm&, entry: NativeMethod) {
+    machine.native_methods.push(entry);
+}
+
+fn native_method_clear(machine: Vm&) {
+    machine.native_methods.clear();
+}
+
 fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native_id: u32) {
-    for index in 0..machine.native_methods.len {
-        if machine.native_methods[index].class_id == class_id
-            && machine.native_methods[index].name_symbol == name_symbol {
-            machine.native_methods[index].native_id = native_id;
+    for index in 0..native_method_count(machine) {
+        let entry = native_method_at(machine, index);
+        if entry.class_id == class_id && entry.name_symbol == name_symbol {
+            var updated = entry;
+            updated.native_id = native_id;
+            native_method_set_at(machine, index, updated);
             return;
         }
     }
-    if machine.native_methods.len >= MAX_VM_METHODS {
+    if native_method_count(machine) >= MAX_VM_METHODS {
         machine.error = VmError.NoMethod;
         return;
     }
-    machine.native_methods.push(NativeMethod {
+    native_method_push(machine, NativeMethod {
             class_id: class_id,
             name_symbol: name_symbol,
             native_id: native_id,
@@ -101,7 +125,8 @@ fn vm_define_native_method(machine: Vm&, class_id: u32, name_symbol: u32, native
 }
 
 fn vm_lookup_native_method(machine: Vm&, class_id: u32, name_symbol: u32) -> u32, bool {
-    for entry in machine.native_methods {
+    for index in 0..native_method_count(machine) {
+        let entry = native_method_at(machine, index);
         if entry.class_id == class_id && entry.name_symbol == name_symbol {
             return entry.native_id, true;
         }
@@ -161,7 +186,7 @@ fn vm_call_user_method(
         machine.error = VmError.NativeError;
         return true, false;
     }
-    let record = machine.file.records[frame.record_index];
+    let record = record_at(machine.file, frame.record_index);
     if !vm_write_register(machine, record, frame.base, dst, result) {
         machine.error = VmError.Registers;
         return true, false;
