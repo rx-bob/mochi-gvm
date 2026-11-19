@@ -403,3 +403,96 @@ fn test_segmented_tables_scale_past_16384_entries(t: goosetest::Test&) {
     vm::method_clear(machine);
     vm::state_class_clear(pool);
 }
+
+fn hash_rollback(t: goosetest::Test&, machine: vm::Vm&, pool: vm::StatePool&,
+    class_id: u32, saved_symbols: i64, saved_blob: i64) {
+    let method = vm::intern_symbol("hash_method_5");
+    let before_methods = vm::method_count(machine);
+    for i in 0..50 {
+        vm::vm_define_method(machine, class_id,
+            vm::intern_symbol(str("hash_rolled_method_", i)), i);
+    }
+    t.assert_eq(before_methods + 50, vm::method_count(machine));
+    vm::method_truncate(machine, before_methods);
+    for i in 0..50 {
+        let rolled = vm::intern_symbol(str("hash_rolled_method_", i));
+        let _, found = vm::vm_lookup_method(machine, class_id, rolled);
+        t.assert_false(found, "rolled-back method remains reachable");
+    }
+    let retained, retained_found = vm::vm_lookup_method(machine, class_id, method);
+    t.assert_true(retained_found);
+    t.assert_eq(9999, retained);
+    let before_classes = vm::state_class_count(pool);
+    for i in 0..40 {
+        vm::state_define_class(pool, vm::intern_symbol(str("hash_rolled_class_", i)),
+            vm::NULL_CLASS_ID);
+    }
+    vm::state_class_truncate(pool, before_classes);
+    for i in 0..40 {
+        let rolled = vm::intern_symbol(str("hash_rolled_class_", i));
+        t.assert_eq(-1, vm::state_find_class(pool, rolled));
+    }
+    t.assert_eq(class_id as i64, vm::state_find_class(pool,
+        vm::intern_symbol("hash_class_499")));
+    vm::method_clear(machine);
+    vm::state_class_clear(pool);
+    vm::symbol_table_truncate(saved_symbols, saved_blob);
+}
+
+// @DisplayName("test_method_and_class_hash_lookup_across_inheritance_and_redefinition")
+fn test_method_class_hash(t: goosetest::Test&) {
+    let saved_symbols = vm::symbol_count();
+    let saved_blob = vm::symbol_blob_length();
+    var file: vm::RiteFile = vm::RiteFile {
+        ..
+    };
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    var scratch: vm::ScratchArena = vm::ScratchArena {
+        ..
+    };
+    var machine: vm::Vm = vm::Vm {
+        file: file,
+        pool: pool,
+        scratch: scratch,
+        ..
+    };
+    let root = vm::state_define_class(pool, vm::intern_symbol("hash_root_class"),
+        vm::NULL_CLASS_ID);
+    var class_ids: u32[>..] = [root];
+    var parent = root;
+    for i in 0..500 {
+        let class_id = vm::state_define_class(pool,
+            vm::intern_symbol(str("hash_class_", i)), parent);
+        class_ids.push(class_id);
+        parent = class_id;
+    }
+    let method = vm::intern_symbol("hash_method_5");
+    for i in 0..5000 {
+        vm::vm_define_method(machine, class_ids[500],
+            vm::intern_symbol(str("hash_method_", i)), i);
+    }
+    t.assert_eq(5000, vm::method_count(machine));
+    let inherited = vm::intern_symbol("hash_inherited_method");
+    vm::vm_define_method(machine, root, inherited, 777);
+    let irep, found = vm::vm_lookup_method(machine, class_ids[500], inherited);
+    t.assert_true(found);
+    t.assert_eq(777, irep);
+    let override = vm::intern_symbol("hash_override_method");
+    vm::vm_define_method(machine, root, override, 100);
+    vm::vm_define_method(machine, class_ids[250], override, 250);
+    let override_irep, override_found = vm::vm_lookup_method(machine, class_ids[500], override);
+    t.assert_true(override_found);
+    t.assert_eq(250, override_irep);
+    let parent_irep, parent_found = vm::vm_lookup_method(machine, class_ids[249], override);
+    t.assert_true(parent_found);
+    t.assert_eq(100, parent_irep);
+    let before_redefine = vm::method_count(machine);
+    vm::vm_define_method(machine, class_ids[500], method, 9999);
+    t.assert_eq(before_redefine, vm::method_count(machine));
+    let updated_irep, updated_found = vm::vm_lookup_method(machine, class_ids[500], method);
+    t.assert_true(updated_found);
+    t.assert_eq(9999, updated_irep);
+    hash_rollback(t, machine, pool, class_ids[500], saved_symbols, saved_blob);
+}

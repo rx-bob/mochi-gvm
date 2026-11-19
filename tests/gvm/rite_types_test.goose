@@ -139,6 +139,49 @@ fn make_record(depth: u16) -> vm::IrepRecord {
     };
 }
 
+// @DisplayName("test_symbol_intern_hash_scales_to_10000_symbols_and_rolls_back")
+fn test_symbol_hash_rollback(t: goosetest::Test&) {
+    let saved_count = vm::symbol_count();
+    let saved_blob = vm::symbol_blob_length();
+    var ids: u32[>..] = [];
+    var mid_count = saved_count;
+    var mid_blob = saved_blob;
+    for i in 0..10000 {
+        let name = str("hash_symbol_probe_", i);
+        let id = vm::intern_symbol(name);
+        if id == vm::NULL_SYMBOL {
+            t.assert_true(false, "hash symbol interning failed");
+            return;
+        }
+        t.assert_eq(id, vm::intern_symbol(name));
+        if i == 4999 {
+            mid_count = vm::symbol_count();
+            mid_blob = vm::symbol_blob_length();
+        }
+        ids.push(id);
+    }
+    t.assert_eq(saved_count + 10000, vm::symbol_count());
+    for i in 0..ids.len {
+        if vm::symbol_name(ids[i]) != str("hash_symbol_probe_", i) {
+            t.assert_true(false, "hash symbol lookup returned the wrong name");
+            return;
+        }
+    }
+    vm::symbol_table_truncate(mid_count, mid_blob);
+    t.assert_eq(mid_count, vm::symbol_count());
+    let reused = vm::intern_symbol(str("hash_symbol_probe_", 7000));
+    t.assert_true(reused >= mid_count as u32);
+    t.assert_eq(reused, vm::intern_symbol(str("hash_symbol_probe_", 7000)));
+    t.assert_true(vm::symbol_name(reused) == str("hash_symbol_probe_", 7000));
+    for i in 0..5000 {
+        if vm::symbol_name(ids[i]) != str("hash_symbol_probe_", i) {
+            t.assert_true(false, "rollback corrupted a retained symbol");
+            return;
+        }
+    }
+    vm::symbol_table_truncate(saved_count, saved_blob);
+}
+
 fn test_table_accessors_track_links(t: goosetest::Test&) {
     var file: vm::RiteFile = vm::RiteFile {
         ..

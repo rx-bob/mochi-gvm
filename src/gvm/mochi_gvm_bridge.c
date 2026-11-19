@@ -354,11 +354,14 @@ typedef struct {
 } mochi_symbol_id;
 
 typedef struct {
+  int32_t next_in_bucket;
+  uint32_t hash;
   int64_t text_offset_bytes;
   int64_t text_length_bytes;
 } mochi_symbol_entry;
 
 typedef struct {
+  int32_t next_in_bucket;
   uint32_t class_id;
   uint32_t name_symbol;
   int64_t irep_index;
@@ -379,6 +382,7 @@ typedef struct {
 } mochi_computed_definition;
 
 typedef struct {
+  int32_t next_in_bucket;
   uint32_t name_symbol;
   uint32_t superclass_id;
 } mochi_class_def;
@@ -396,6 +400,9 @@ typedef struct {
   int64_t chunk_capacity;
   int64_t len;
   int64_t entry_size;
+  int32_t *buckets;
+  int64_t bucket_count;
+  int64_t hash_kind;
 } mochi_meta_table;
 
 typedef struct {
@@ -408,7 +415,7 @@ static int64_t g_meta_set_count = 0;
 static int64_t g_meta_set_capacity = 0;
 
 static int64_t mochi_meta_new_set(int64_t slot_count, int64_t e0, int64_t e1,
-                                  int64_t e2, int64_t e3) {
+                                  int64_t e2, int64_t e3, int64_t hash_kind) {
   mochi_meta_set **grown;
   mochi_meta_set *set;
   int64_t next;
@@ -427,6 +434,7 @@ static int64_t mochi_meta_new_set(int64_t slot_count, int64_t e0, int64_t e1,
   set->tables[1].entry_size = e1;
   set->tables[2].entry_size = e2;
   set->tables[3].entry_size = e3;
+  set->tables[0].hash_kind = hash_kind;
   g_meta_sets[g_meta_set_count] = set;
   g_meta_set_count += 1;
   return g_meta_set_count - 1;
@@ -436,23 +444,23 @@ int64_t mochi_meta_new_file(void) {
   return mochi_meta_new_set(4, (int64_t)sizeof(mochi_irep_record),
                             (int64_t)sizeof(mochi_pool_entry),
                             (int64_t)sizeof(mochi_symbol_id),
-                            (int64_t)sizeof(int64_t));
+                            (int64_t)sizeof(int64_t), 0);
 }
 
 int64_t mochi_meta_new_vm(void) {
   return mochi_meta_new_set(4, (int64_t)sizeof(mochi_method_entry),
                             (int64_t)sizeof(mochi_native_method),
                             (int64_t)sizeof(mochi_computed_definition),
-                            (int64_t)sizeof(uint32_t));
+                            (int64_t)sizeof(uint32_t), 2);
 }
 
 int64_t mochi_meta_new_pool(void) {
   return mochi_meta_new_set(2, (int64_t)sizeof(mochi_class_def),
-                            (int64_t)sizeof(mochi_const_entry), 0, 0);
+                            (int64_t)sizeof(mochi_const_entry), 0, 0, 3);
 }
 
 int64_t mochi_meta_new_symbols(void) {
-  return mochi_meta_new_set(1, (int64_t)sizeof(mochi_symbol_entry), 0, 0, 0);
+  return mochi_meta_new_set(1, (int64_t)sizeof(mochi_symbol_entry), 0, 0, 0, 1);
 }
 
 static mochi_meta_table *mochi_meta_table_for(int64_t handle, int64_t slot) {
@@ -466,8 +474,7 @@ int64_t mochi_meta_count(int64_t handle, int64_t slot) {
   return table ? table->len : 0;
 }
 
-static uint8_t *mochi_meta_slot(int64_t handle, int64_t slot, int64_t index) {
-  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+static uint8_t *mochi_meta_slot_in(mochi_meta_table *table, int64_t index) {
   int64_t chunk;
   int64_t offset;
   if (!table || index < 0 || index >= table->len) return NULL;
@@ -477,8 +484,74 @@ static uint8_t *mochi_meta_slot(int64_t handle, int64_t slot, int64_t index) {
   return table->chunks[chunk] + offset * table->entry_size;
 }
 
-static int mochi_meta_push_bytes(int64_t handle, int64_t slot, const void *entry) {
-  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+static uint8_t *mochi_meta_slot(int64_t handle, int64_t slot, int64_t index) {
+  return mochi_meta_slot_in(mochi_meta_table_for(handle, slot), index);
+}
+
+static uint32_t mochi_hash_bytes(const uint8_t *data, int64_t len) {
+  uint32_t hash = 2166136261u;
+  int64_t index;
+  for (index = 0; index < len; index += 1) {
+    hash ^= data[index];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+static uint32_t mochi_hash_pair(uint32_t first, uint32_t second) {
+  return (first * 0x9E3779B1u) ^ second;
+}
+
+static uint32_t mochi_meta_hash_of(mochi_meta_table *table, uint8_t *slot) {
+  if (table->hash_kind == 2) {
+    mochi_method_entry *entry = (mochi_method_entry *)slot;
+    return mochi_hash_pair(entry->class_id, entry->name_symbol);
+  }
+  return *(uint32_t *)(slot + 4);
+}
+
+static int mochi_meta_hash_ensure(mochi_meta_table *table, int64_t need) {
+  int32_t *buckets;
+  int64_t next;
+  int64_t index;
+  uint8_t *slot;
+  uint32_t bucket;
+  if (!table->hash_kind) return 1;
+  if (table->bucket_count > 0 && need <= table->bucket_count) return 1;
+  next = table->bucket_count > 0 ? table->bucket_count * 2 : 256;
+  while (next < need) next *= 2;
+  buckets = (int32_t *)mochi_slab_take(next * (int64_t)sizeof(int32_t));
+  if (!buckets) return 0;
+  memset(buckets, 0xFF, (size_t)next * sizeof(int32_t));
+  for (index = 0; index < table->len; index += 1) {
+    slot = mochi_meta_slot_in(table, index);
+    bucket = mochi_meta_hash_of(table, slot) & (uint32_t)(next - 1);
+    *(int32_t *)slot = buckets[bucket];
+    buckets[bucket] = (int32_t)index;
+  }
+  if (table->buckets) {
+    mochi_slab_release(table->buckets,
+                       table->bucket_count * (int64_t)sizeof(int32_t));
+  }
+  table->buckets = buckets;
+  table->bucket_count = next;
+  return 1;
+}
+
+static void mochi_meta_unlink_hashes(mochi_meta_table *table, int64_t saved_len) {
+  int64_t index;
+  uint8_t *slot;
+  uint32_t bucket;
+  if (!table->hash_kind || !table->buckets) return;
+  for (index = table->len - 1; index >= saved_len; index -= 1) {
+    slot = mochi_meta_slot_in(table, index);
+    if (!slot) continue;
+    bucket = mochi_meta_hash_of(table, slot) & (uint32_t)(table->bucket_count - 1);
+    table->buckets[bucket] = *(int32_t *)slot;
+  }
+}
+
+static int mochi_meta_push_table(mochi_meta_table *table, const void *entry) {
   uint8_t **grown;
   uint8_t *chunk;
   int64_t chunk_index;
@@ -510,6 +583,22 @@ static int mochi_meta_push_bytes(int64_t handle, int64_t slot, const void *entry
   return 1;
 }
 
+static int mochi_meta_push_bytes(int64_t handle, int64_t slot, const void *entry) {
+  return mochi_meta_push_table(mochi_meta_table_for(handle, slot), entry);
+}
+
+static int mochi_meta_push_hashed(int64_t handle, int64_t slot, void *entry,
+                                  uint32_t hash) {
+  mochi_meta_table *table = mochi_meta_table_for(handle, slot);
+  uint32_t bucket;
+  if (!table || !mochi_meta_hash_ensure(table, table->len + 1)) return 0;
+  bucket = hash & (uint32_t)(table->bucket_count - 1);
+  *(int32_t *)entry = table->buckets[bucket];
+  if (!mochi_meta_push_table(table, entry)) return 0;
+  table->buckets[bucket] = (int32_t)(table->len - 1);
+  return 1;
+}
+
 static void mochi_meta_truncate_slot(int64_t handle, int64_t slot, int64_t count) {
   mochi_meta_table *table = mochi_meta_table_for(handle, slot);
   int64_t keep_chunks;
@@ -518,6 +607,7 @@ static void mochi_meta_truncate_slot(int64_t handle, int64_t slot, int64_t count
   if (!table) return;
   if (count < 0) count = 0;
   if (count > table->len) count = table->len;
+  mochi_meta_unlink_hashes(table, count);
   keep_chunks = count == 0 ? 0
                            : (count + MOCHI_META_CHUNK_ENTRIES - 1) /
                                  MOCHI_META_CHUNK_ENTRIES;
@@ -534,6 +624,12 @@ static void mochi_meta_truncate_slot(int64_t handle, int64_t slot, int64_t count
     free(table->chunks);
     table->chunks = NULL;
     table->chunk_capacity = 0;
+  }
+  if (count == 0 && table->buckets) {
+    mochi_slab_release(table->buckets,
+                       table->bucket_count * (int64_t)sizeof(int32_t));
+    table->buckets = NULL;
+    table->bucket_count = 0;
   }
 }
 
@@ -663,7 +759,43 @@ mochi_symbol_entry mochi_meta_symbol_at(int64_t h, int64_t index) {
 }
 
 uint8_t mochi_meta_symbol_push(int64_t h, mochi_symbol_entry entry) {
-  return (uint8_t)mochi_meta_push_bytes(h, 0, &entry);
+  uint32_t hash;
+  if (entry.text_offset_bytes < 0 || entry.text_length_bytes < 0 ||
+      entry.text_offset_bytes + entry.text_length_bytes >
+          mochi_slab_symbol_blob_bytes()) {
+    return 0;
+  }
+  hash = mochi_hash_bytes(
+      entry.text_length_bytes > 0
+          ? g_slab_symbol_region.data + entry.text_offset_bytes
+          : NULL,
+      entry.text_length_bytes);
+  entry.hash = hash;
+  return (uint8_t)mochi_meta_push_hashed(h, 0, &entry, hash);
+}
+
+int64_t mochi_meta_symbol_find(int64_t h, goose_u8_slice name) {
+  mochi_meta_table *table = mochi_meta_table_for(h, 0);
+  mochi_symbol_entry *entry;
+  uint8_t *slot;
+  uint32_t hash;
+  int32_t index;
+  if (!table || !table->buckets) return -1;
+  hash = mochi_hash_bytes(name.data, name.len);
+  index = table->buckets[hash & (uint32_t)(table->bucket_count - 1)];
+  while (index >= 0) {
+    slot = mochi_meta_slot_in(table, index);
+    if (!slot) return -1;
+    entry = (mochi_symbol_entry *)slot;
+    if (entry->hash == hash && entry->text_length_bytes == name.len &&
+        (name.len == 0 ||
+         memcmp(g_slab_symbol_region.data + entry->text_offset_bytes, name.data,
+                (size_t)name.len) == 0)) {
+      return index;
+    }
+    index = entry->next_in_bucket;
+  }
+  return -1;
 }
 
 void mochi_meta_symbol_truncate(int64_t h, int64_t count) {
@@ -681,7 +813,30 @@ void mochi_meta_method_set_at(int64_t h, int64_t index, mochi_method_entry entry
 }
 
 uint8_t mochi_meta_method_push(int64_t h, mochi_method_entry entry) {
-  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_VM_METHODS, &entry);
+  return (uint8_t)mochi_meta_push_hashed(
+      h, MOCHI_META_VM_METHODS, &entry,
+      mochi_hash_pair(entry.class_id, entry.name_symbol));
+}
+
+int64_t mochi_meta_method_find(int64_t h, uint32_t class_id, uint32_t name_symbol) {
+  mochi_meta_table *table = mochi_meta_table_for(h, MOCHI_META_VM_METHODS);
+  mochi_method_entry *entry;
+  uint8_t *slot;
+  uint32_t hash;
+  int32_t index;
+  if (!table || !table->buckets) return -1;
+  hash = mochi_hash_pair(class_id, name_symbol);
+  index = table->buckets[hash & (uint32_t)(table->bucket_count - 1)];
+  while (index >= 0) {
+    slot = mochi_meta_slot_in(table, index);
+    if (!slot) return -1;
+    entry = (mochi_method_entry *)slot;
+    if (entry->class_id == class_id && entry->name_symbol == name_symbol) {
+      return index;
+    }
+    index = entry->next_in_bucket;
+  }
+  return -1;
 }
 
 void mochi_meta_method_truncate(int64_t h, int64_t count) {
@@ -739,7 +894,25 @@ mochi_class_def mochi_meta_class_at(int64_t h, int64_t index) {
 }
 
 uint8_t mochi_meta_class_push(int64_t h, mochi_class_def entry) {
-  return (uint8_t)mochi_meta_push_bytes(h, MOCHI_META_POOL_CLASSES, &entry);
+  return (uint8_t)mochi_meta_push_hashed(h, MOCHI_META_POOL_CLASSES, &entry,
+                                         entry.name_symbol);
+}
+
+int64_t mochi_meta_class_find(int64_t h, uint32_t name_symbol) {
+  mochi_meta_table *table = mochi_meta_table_for(h, MOCHI_META_POOL_CLASSES);
+  mochi_class_def *entry;
+  uint8_t *slot;
+  int32_t index;
+  if (!table || !table->buckets) return -1;
+  index = table->buckets[name_symbol & (uint32_t)(table->bucket_count - 1)];
+  while (index >= 0) {
+    slot = mochi_meta_slot_in(table, index);
+    if (!slot) return -1;
+    entry = (mochi_class_def *)slot;
+    if (entry->name_symbol == name_symbol) return index;
+    index = entry->next_in_bucket;
+  }
+  return -1;
 }
 
 void mochi_meta_class_truncate(int64_t h, int64_t count) {

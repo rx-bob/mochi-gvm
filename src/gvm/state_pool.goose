@@ -21,6 +21,7 @@ let NULL_CLASS_ID: u32 = 0xFFFFFFFF;
 
 // A class definition. The class value itself is an immediate class ID.
 struct ClassDef {
+    next_in_bucket: i32 = -1,
     name_symbol: u32,
     superclass_id: u32,
 }
@@ -127,6 +128,8 @@ fn state_slot_count(pool: StatePool&) -> i64 {
 
 extern fn mochi_meta_class_at(handle: i64, index: i64) -> ClassDef;
 
+extern fn mochi_meta_class_find(handle: i64, name_symbol: u32) -> i64;
+
 extern fn mochi_meta_class_push(handle: i64, entry: ClassDef) -> bool;
 
 extern fn mochi_meta_class_truncate(handle: i64, count: i64);
@@ -152,6 +155,10 @@ fn state_class_count(pool: StatePool&) -> i64 {
 
 fn class_at(pool: StatePool&, class_id: u32) -> ClassDef {
     return mochi_meta_class_at(pool_metadata(pool), class_id);
+}
+
+fn state_find_class(pool: StatePool&, name_symbol: u32) -> i64 {
+    return mochi_meta_class_find(pool_metadata(pool), name_symbol);
 }
 
 fn class_push(pool: StatePool&, definition: ClassDef) -> bool {

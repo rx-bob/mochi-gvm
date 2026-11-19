@@ -108,6 +108,8 @@ struct SymbolId {
 
 // One interned symbol name that views the shared symbol byte buffer.
 struct SymbolEntry {
+    next_in_bucket: i32 = -1,
+    hash: u32 = 0,
     text_offset_bytes: i64,
     text_length_bytes: i64,
 }
@@ -282,6 +284,8 @@ fn root_truncate(file: RiteFile&, count: i64) {
 
 extern fn mochi_meta_symbol_at(handle: i64, index: i64) -> SymbolEntry;
 
+extern fn mochi_meta_symbol_find(handle: i64, name: const u8[:]) -> i64;
+
 extern fn mochi_meta_symbol_push(handle: i64, entry: SymbolEntry) -> bool;
 
 extern fn mochi_meta_symbol_truncate(handle: i64, count: i64);
@@ -368,15 +372,9 @@ fn intern_symbol(name: u8[:]) -> u32 {
 // Interning variant for callers that must distinguish a slab rejection from
 // `NULL_SYMBOL`. A failed call leaves the table unchanged.
 fn intern_symbol_checked(name: u8[:]) -> u32, bool {
-    for index in 0..symbol_count() {
-        let entry = symbol_entry_at(index as u32);
-        if entry.text_length_bytes == name.len {
-            let start = entry.text_offset_bytes;
-            let stop = start + entry.text_length_bytes;
-            if compare(symbol_blob_slice(start, stop), name) == 0 {
-                return index as u32, true;
-            }
-        }
+    let found = mochi_meta_symbol_find(symbol_metadata(), name);
+    if found >= 0 {
+        return found as u32, true;
     }
     let saved_blob = slab_symbol_blob_length();
     let offset = slab_intern_bytes(name);

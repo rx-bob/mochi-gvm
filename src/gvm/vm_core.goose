@@ -119,6 +119,7 @@ enum StepKind {
 }
 
 struct MethodEntry {
+    next_in_bucket: i32 = -1,
     class_id: u32,
     name_symbol: u32,
     irep_index: i64,
@@ -186,6 +187,8 @@ root struct Vm {
 
 extern fn mochi_meta_method_at(handle: i64, index: i64) -> MethodEntry;
 
+extern fn mochi_meta_method_find(handle: i64, class_id: u32, name_symbol: u32) -> i64;
+
 extern fn mochi_meta_method_set_at(handle: i64, index: i64, entry: MethodEntry);
 
 extern fn mochi_meta_method_push(handle: i64, entry: MethodEntry) -> bool;
@@ -205,6 +208,10 @@ fn method_count(machine: Vm&) -> i64 {
 
 fn method_at(machine: Vm&, index: i64) -> MethodEntry {
     return mochi_meta_method_at(vm_metadata(machine), index);
+}
+
+fn method_index(machine: Vm&, class_id: u32, name_symbol: u32) -> i64 {
+    return mochi_meta_method_find(vm_metadata(machine), class_id, name_symbol);
 }
 
 fn method_set_at(machine: Vm&, index: i64, entry: MethodEntry) {
@@ -399,10 +406,9 @@ fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
     if name == "NilClass" {
         return BUILTIN_NIL_CLASS_ID, true;
     }
-    for index in 0..state_class_count(pool) {
-        if class_at(pool, index as u32).name_symbol == name_symbol {
-            return index as u32, true;
-        }
+    let found = state_find_class(pool, name_symbol);
+    if found >= 0 {
+        return found as u32, true;
     }
     return NULL_CLASS_ID, false;
 }
@@ -410,15 +416,13 @@ fn vm_find_class(pool: StatePool&, name_symbol: u32) -> u32, bool {
 // Binds `name_symbol` to `irep_index` on `class_id`, replacing a redefinition.
 fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i64,
     lexical_owner: u32 = NULL_CLASS_ID) {
-    for index in 0..method_count(machine) {
-        let entry = method_at(machine, index);
-        if entry.class_id == class_id && entry.name_symbol == name_symbol {
-            var updated = entry;
-            updated.irep_index = irep_index;
-            updated.lexical_owner = lexical_owner;
-            method_set_at(machine, index, updated);
-            return;
-        }
+    let existing = method_index(machine, class_id, name_symbol);
+    if existing >= 0 {
+        var updated = method_at(machine, existing);
+        updated.irep_index = irep_index;
+        updated.lexical_owner = lexical_owner;
+        method_set_at(machine, existing, updated);
+        return;
     }
     if !method_push(machine, MethodEntry {
             class_id: class_id,
@@ -435,11 +439,9 @@ fn vm_define_method(machine: Vm&, class_id: u32, name_symbol: u32, irep_index: i
 // Resolves a method through the class and its superclass chain.
 fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool {
     if class_id == BUILTIN_ARRAY_CLASS_ID {
-        for index in 0..method_count(machine) {
-            let entry = method_at(machine, index);
-            if entry.class_id == class_id && entry.name_symbol == name_symbol {
-                return entry.irep_index, true;
-            }
+        let index = method_index(machine, class_id, name_symbol);
+        if index >= 0 {
+            return method_at(machine, index).irep_index, true;
         }
         return -1, false;
     }
@@ -449,11 +451,9 @@ fn vm_lookup_method(machine: Vm&, class_id: u32, name_symbol: u32) -> i64, bool 
     while current != NULL_CLASS_ID
         && current < class_limit as u32
         && steps <= class_limit {
-        for index in 0..method_count(machine) {
-            let entry = method_at(machine, index);
-            if entry.class_id == current && entry.name_symbol == name_symbol {
-                return entry.irep_index, true;
-            }
+        let index = method_index(machine, current, name_symbol);
+        if index >= 0 {
+            return method_at(machine, index).irep_index, true;
         }
         current = state_class_superclass_id(machine.pool, current);
         steps += 1;
