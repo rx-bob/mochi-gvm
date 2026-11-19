@@ -447,8 +447,9 @@ static int64_t mochi_meta_new_set(int64_t slot_count, int64_t e0, int64_t e1,
     g_meta_sets = grown;
     g_meta_set_capacity = next;
   }
-  set = (mochi_meta_set *)calloc(1, sizeof(mochi_meta_set));
+  set = (mochi_meta_set *)mochi_slab_take((int64_t)sizeof(mochi_meta_set));
   if (!set) return -1;
+  memset(set, 0, sizeof(mochi_meta_set));
   set->slot_count = slot_count;
   set->tables[0].entry_size = e0;
   set->tables[1].entry_size = e1;
@@ -530,32 +531,60 @@ static uint32_t mochi_meta_hash_of(mochi_meta_table *table, uint8_t *slot) {
   return *(uint32_t *)(slot + 4);
 }
 
-static int mochi_meta_hash_ensure(mochi_meta_table *table, int64_t need) {
+static int64_t mochi_meta_bucket_target(int64_t entries) {
+  int64_t target = 256;
+  if (entries <= 0) return 0;
+  while (target < entries) target += target;
+  return target;
+}
+
+/* Resize a hash directory while keeping the slab byte count exact. Grow by
+ * allocating a new directory first, shrink with realloc so a rollback does not
+ * need transient headroom. Entries are relinked for the new bucket count. */
+static int mochi_meta_hash_resize(mochi_meta_table *table, int64_t target) {
   int32_t *buckets;
-  int64_t next;
   int64_t index;
   uint8_t *slot;
   uint32_t bucket;
   if (!table->hash_kind) return 1;
-  if (table->bucket_count > 0 && need <= table->bucket_count) return 1;
-  next = table->bucket_count > 0 ? table->bucket_count * 2 : 256;
-  while (next < need) next *= 2;
-  buckets = (int32_t *)mochi_slab_take(next * (int64_t)sizeof(int32_t));
-  if (!buckets) return 0;
-  memset(buckets, 0xFF, (size_t)next * sizeof(int32_t));
+  if (target == table->bucket_count) return 1;
+  if (target == 0) {
+    if (table->buckets) {
+      mochi_slab_release(table->buckets,
+                         table->bucket_count * (int64_t)sizeof(int32_t));
+    }
+    table->buckets = NULL;
+    table->bucket_count = 0;
+    return 1;
+  }
+  if (table->bucket_count > target) {
+    buckets = (int32_t *)realloc(table->buckets,
+                                (size_t)target * sizeof(int32_t));
+    if (!buckets) return 0;
+    g_slab_bytes_used -=
+        (table->bucket_count - target) * (int64_t)sizeof(int32_t);
+  } else {
+    buckets = (int32_t *)mochi_slab_take(target * (int64_t)sizeof(int32_t));
+    if (!buckets) return 0;
+    if (table->buckets) {
+      mochi_slab_release(table->buckets,
+                         table->bucket_count * (int64_t)sizeof(int32_t));
+    }
+  }
+  table->buckets = buckets;
+  table->bucket_count = target;
+  memset(buckets, 0xFF, (size_t)target * sizeof(int32_t));
   for (index = 0; index < table->len; index += 1) {
     slot = mochi_meta_slot_in(table, index);
-    bucket = mochi_meta_hash_of(table, slot) & (uint32_t)(next - 1);
+    bucket = mochi_meta_hash_of(table, slot) & (uint32_t)(target - 1);
     *(int32_t *)slot = buckets[bucket];
     buckets[bucket] = (int32_t)index;
   }
-  if (table->buckets) {
-    mochi_slab_release(table->buckets,
-                       table->bucket_count * (int64_t)sizeof(int32_t));
-  }
-  table->buckets = buckets;
-  table->bucket_count = next;
   return 1;
+}
+
+static int mochi_meta_hash_ensure(mochi_meta_table *table, int64_t need) {
+  return mochi_meta_hash_resize(table, mochi_meta_bucket_target(need));
 }
 
 static void mochi_meta_unlink_hashes(mochi_meta_table *table, int64_t saved_len) {
@@ -614,7 +643,12 @@ static int mochi_meta_push_hashed(int64_t handle, int64_t slot, void *entry,
   if (!table || !mochi_meta_hash_ensure(table, table->len + 1)) return 0;
   bucket = hash & (uint32_t)(table->bucket_count - 1);
   *(int32_t *)entry = table->buckets[bucket];
-  if (!mochi_meta_push_table(table, entry)) return 0;
+  if (!mochi_meta_push_table(table, entry)) {
+    /* A failed chunk allocation must not leave a larger hash directory
+     * charged to the slab budget. */
+    mochi_meta_hash_resize(table, mochi_meta_bucket_target(table->len));
+    return 0;
+  }
   table->buckets[bucket] = (int32_t)(table->len - 1);
   return 1;
 }
@@ -645,12 +679,7 @@ static void mochi_meta_truncate_slot(int64_t handle, int64_t slot, int64_t count
     table->chunks = NULL;
     table->chunk_capacity = 0;
   }
-  if (count == 0 && table->buckets) {
-    mochi_slab_release(table->buckets,
-                       table->bucket_count * (int64_t)sizeof(int32_t));
-    table->buckets = NULL;
-    table->bucket_count = 0;
-  }
+  mochi_meta_hash_resize(table, mochi_meta_bucket_target(count));
 }
 
 static mochi_symbol_entry mochi_empty_symbol(void) {

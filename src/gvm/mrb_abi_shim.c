@@ -17,7 +17,9 @@
 #include <string.h>
 
 #define SHIM_CLASS_CHUNK_ENTRIES 256
-#define SHIM_MAX_NATIVES 128
+#define SHIM_DIRECT_CLASS_MAX 1048576u
+#define SHIM_HIGH_CLASSES 16
+#define SHIM_MAX_NATIVES 1024
 #define SHIM_MAX_ARGS 8
 #define SHIM_ZARG_SIZE 512
 #define SHIM_CSTR_SIZE 4096
@@ -47,8 +49,9 @@ typedef struct {
 typedef struct {
   struct RClass **class_chunks;
   int class_chunk_count;
-  int class_chunk_capacity;
   int class_count;
+  struct RClass high_storage[SHIM_HIGH_CLASSES];
+  int high_class_count;
   struct RObject exc_object;
   char error_text[SHIM_ERROR_SIZE];
   char cstr[SHIM_CSTR_SIZE];
@@ -175,26 +178,31 @@ static struct RClass *shim_class_at(mrb_shim *shim, int index) {
 static int shim_class_reserve(mrb_shim *shim, int count) {
   struct RClass **grown;
   struct RClass *chunk;
-  int next_capacity;
   int chunk_index;
   int needed;
   if (!shim || count < 0) return 0;
   needed = (count + SHIM_CLASS_CHUNK_ENTRIES - 1) / SHIM_CLASS_CHUNK_ENTRIES;
-  if (needed > shim->class_chunk_capacity) {
-    next_capacity = shim->class_chunk_capacity > 0 ? shim->class_chunk_capacity : 4;
-    while (next_capacity < needed) next_capacity *= 2;
+  if (needed > shim->class_chunk_count) {
     grown = (struct RClass **)realloc(
-        shim->class_chunks, (size_t)next_capacity * sizeof(struct RClass *));
+        shim->class_chunks, (size_t)needed * sizeof(struct RClass *));
     if (!grown) return 0;
     shim->class_chunks = grown;
-    shim->class_chunk_capacity = next_capacity;
   }
   for (chunk_index = shim->class_chunk_count; chunk_index < needed;
        chunk_index += 1) {
     chunk = (struct RClass *)mochi_slab_take(
         (int64_t)(SHIM_CLASS_CHUNK_ENTRIES * sizeof(struct RClass)));
-    if (!chunk) return 0;
-    memset(chunk, 0, SHIM_CLASS_CHUNK_ENTRIES * sizeof(struct RClass));
+    if (!chunk) {
+      int64_t chunk_bytes =
+          (int64_t)(SHIM_CLASS_CHUNK_ENTRIES * sizeof(struct RClass));
+      while (chunk_index > shim->class_chunk_count) {
+        chunk_index -= 1;
+        mochi_slab_release(shim->class_chunks[chunk_index], chunk_bytes);
+        shim->class_chunks[chunk_index] = NULL;
+      }
+      return 0;
+    }
+    memset(chunk, 0xFF, SHIM_CLASS_CHUNK_ENTRIES * sizeof(struct RClass));
     shim->class_chunks[chunk_index] = chunk;
   }
   if (needed > shim->class_chunk_count) shim->class_chunk_count = needed;
@@ -208,12 +216,20 @@ int64_t mochi_shim_class_count(void) {
 
 void mochi_shim_class_truncate(int64_t count) {
   mrb_shim *shim = shim_of(g_mrb);
+  struct RClass *entry;
+  int index;
   int keep;
   int chunk_index;
+  int old_count;
   int64_t chunk_bytes = (int64_t)(SHIM_CLASS_CHUNK_ENTRIES * sizeof(struct RClass));
   if (!shim) return;
   if (count < 0) count = 0;
   if (count > shim->class_count) count = shim->class_count;
+  old_count = shim->class_count;
+  for (index = (int)count; index < old_count; index += 1) {
+    entry = shim_class_at(shim, index);
+    if (entry) entry->class_id = SHIM_NULL_CLASS_ID;
+  }
   keep = count == 0 ? 0
                     : (int)((count + SHIM_CLASS_CHUNK_ENTRIES - 1) /
                             SHIM_CLASS_CHUNK_ENTRIES);
@@ -229,27 +245,40 @@ void mochi_shim_class_truncate(int64_t count) {
   if (keep == 0) {
     free(shim->class_chunks);
     shim->class_chunks = NULL;
-    shim->class_chunk_capacity = 0;
   }
 }
 
 static struct RClass *class_for_id(mrb_state *mrb, uint32_t class_id) {
   mrb_shim *shim = shim_of(mrb);
   struct RClass *entry;
-  int index = 0;
+  int index;
 
   if (!shim) return NULL;
-  for (index = 0; index < shim->class_count; index++) {
-    entry = shim_class_at(shim, index);
-    if (entry && entry->class_id == class_id) return entry;
+  if (class_id >= SHIM_DIRECT_CLASS_MAX) {
+    for (index = 0; index < shim->high_class_count; index += 1) {
+      if (shim->high_storage[index].class_id == class_id) {
+        return &shim->high_storage[index];
+      }
+    }
+    if (shim->high_class_count >= SHIM_HIGH_CLASSES) {
+      set_exc(mrb, "class index capacity exhausted");
+      return NULL;
+    }
+    entry = &shim->high_storage[shim->high_class_count];
+    shim->high_class_count += 1;
+    entry->class_id = class_id;
+    return entry;
   }
-  if (!shim_class_reserve(shim, shim->class_count + 1)) {
+  if (!shim_class_reserve(shim, (int)class_id + 1)) {
     set_exc(mrb, "class table capacity exhausted");
-    return shim->class_count > 0 ? shim_class_at(shim, 0) : NULL;
+    return NULL;
   }
-  entry = shim_class_at(shim, shim->class_count);
+  entry = shim_class_at(shim, (int)class_id);
+  if (!entry) return NULL;
   entry->class_id = class_id;
-  shim->class_count += 1;
+  if (shim->class_count < (int)class_id + 1) {
+    shim->class_count = (int)class_id + 1;
+  }
   return entry;
 }
 
@@ -354,6 +383,11 @@ mrb_value mrb_obj_value(void *pointer) {
         return class_value(entry->class_id);
       }
     }
+    for (index = 0; index < shim->high_class_count; index++) {
+      if (pointer == (void *)&shim->high_storage[index]) {
+        return class_value(shim->high_storage[index].class_id);
+      }
+    }
   }
   return mrb_nil_value();
 }
@@ -399,7 +433,7 @@ static void define_native(mrb_state *mrb, struct RClass *c, const char *name,
     return;
   }
   if (shim->native_count >= SHIM_MAX_NATIVES) {
-    set_exc(mrb, "native method table full");
+    set_exc(mrb, "native method table capacity exhausted");
     return;
   }
   native_id = shim->native_count;

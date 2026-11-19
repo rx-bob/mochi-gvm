@@ -163,6 +163,37 @@ fn truncated_package() -> u8[>..] {
     return out;
 }
 
+// A second truncated package whose root interns two new symbols. Loading it
+// after the symbol table is one entry below a bucket boundary forces a hash
+// directory resize before the child record rejects the package.
+fn truncated_symbol_package() -> u8[>..] {
+    var syms: u8[>..] = [];
+    push_u16_be(syms, 19);
+    syms.append("HashBucketRollbackA");
+    syms.push(0);
+    push_u16_be(syms, 19);
+    syms.append("HashBucketRollbackB");
+    syms.push(0);
+
+    var pool: u8[>..] = [];
+    var irep = make_record(pool[..], 0, syms[..], 2, 1);
+    push_u32_be(irep, 20);
+    push_u16_be(irep, 1);
+    push_u16_be(irep, 3);
+
+    var out: u8[>..] = [];
+    out.append("RITE0400");
+    push_u32_be(out, 0);
+    out.append("MATZ");
+    out.append("0000");
+    out.append("IREP");
+    push_u32_be(out, (vm::IREP_SECTION_HEADER_BYTES + irep.len)as u32);
+    out.append("0400");
+    out.append(irep[..]);
+    put_u32_be(out, 8, out.len as u32);
+    return out;
+}
+
 fn test_failed_irep_parse_rolls_back_partial(t: goosetest::Test&) {
     let instance = counter(t);
     let records = vm::record_count(vm::g_abi_file);
@@ -189,6 +220,43 @@ fn test_failed_irep_parse_rolls_back_partial(t: goosetest::Test&) {
 
     vm::abi_call(instance, vm::intern_symbol("increment"), 0);
     t.assert_false(vm::abi_has_error(), "existing component survives a rejected package");
+    vm::vm_end_entry(vm::g_abi_machine);
+    vm::abi_close();
+}
+
+fn test_symbol_hash_bucket_rollback_restores_budget(t: goosetest::Test&) {
+    let instance = counter(t);
+    let start = vm::symbol_count();
+    var boundary: i64 = 256;
+    while boundary <= start {
+        boundary *= 2;
+    }
+    var filler = start;
+    while vm::symbol_count() < boundary - 1 {
+        vm::intern_symbol(str("hash_bucket_filler_", filler));
+        filler += 1;
+    }
+    let symbols = vm::symbol_count();
+    let symbol_bytes = vm::symbol_blob_length();
+    let used = vm::slab_used_bytes();
+    var bad = truncated_symbol_package();
+
+    t.assert_eq(1, vm::abi_load_irep(bad[..]));
+    t.assert_true(starts_with(vm::abi_last_error(), "truncated"));
+    t.assert_eq(symbols, vm::symbol_count());
+    t.assert_eq(symbol_bytes, vm::symbol_blob_length());
+    t.assert_eq(used, vm::slab_used_bytes(),
+        "a failed load must shrink hash buckets to their pre-load size");
+
+    let first = vm::intern_symbol("HashBucketRollbackA");
+    let second = vm::intern_symbol("HashBucketRollbackB");
+    t.assert_eq(symbols as u32, first);
+    t.assert_eq((symbols + 1)as u32, second);
+    t.assert_true(vm::symbol_name(first) == "HashBucketRollbackA");
+    t.assert_true(vm::symbol_name(second) == "HashBucketRollbackB");
+
+    vm::abi_call(instance, vm::intern_symbol("increment"), 0);
+    t.assert_false(vm::abi_has_error(), "mounted component still runs");
     vm::vm_end_entry(vm::g_abi_machine);
     vm::abi_close();
 }
@@ -332,9 +400,11 @@ fn test_failed_root_boot_rolls_back_class_methods(t: goosetest::Test&) {
     let definitions = vm::computed_def_count(vm::g_abi_machine);
     let roots = vm::computed_root_count(vm::g_abi_machine);
     let booted = vm::g_abi_machine.booted_roots;
-    vm::slab_set_limit(vm::slab_used_bytes() + 2048);
+    let todo_symbol = vm::intern_symbol("TodoList");
+    let used = vm::slab_used_bytes();
+    vm::slab_set_limit(used + 2048);
 
-    let rejected = vm::abi_const_get(vm::intern_symbol("TodoList"));
+    let rejected = vm::abi_const_get(todo_symbol);
     t.assert_true(vm::mrb_is_nil(rejected));
     t.assert_true(starts_with(vm::abi_last_error(),
         "VM methods exhausted"));
@@ -347,6 +417,8 @@ fn test_failed_root_boot_rolls_back_class_methods(t: goosetest::Test&) {
     t.assert_eq(native_methods, vm::native_method_count(vm::g_abi_machine));
     t.assert_eq(definitions, vm::computed_def_count(vm::g_abi_machine));
     t.assert_eq(roots, vm::computed_root_count(vm::g_abi_machine));
+    t.assert_eq(used, vm::slab_used_bytes(),
+        "failed root boot restores hash buckets and table chunks");
     let _, todo_found = vm::vm_find_class(vm::g_abi_pool, vm::intern_symbol("TodoList"));
     t.assert_false(todo_found, "partial class definition rolled back");
 

@@ -194,6 +194,8 @@ fn abi_capacity_for_parse_resource(resource: ParseResource) -> CapacityResource 
 fn abi_reset() {
     g_abi_file.data = "";
     slab_truncate_packages(0);
+    symbol_table_truncate(0, 0);
+    vm_shim_class_truncate(1);
     record_clear(g_abi_file);
     pool_clear(g_abi_file);
     symbol_ref_clear(g_abi_file);

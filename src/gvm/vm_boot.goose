@@ -14,6 +14,10 @@ extern fn mochi_shim_class_count() -> i64;
 
 extern fn mochi_shim_class_truncate(count: i64);
 
+fn vm_shim_class_truncate(count: i64) {
+    mochi_shim_class_truncate(count);
+}
+
 // Runs one root IREP per loaded program. A failed root rolls its classes,
 // constants, methods and computed definitions back to the pre-root watermark
 // and leaves `booted_roots` unadvanced, so the same failure is reported again
