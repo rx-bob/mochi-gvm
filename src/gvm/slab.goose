@@ -3,10 +3,6 @@ namespace vm;
 
 let SLAB_SYMBOL_BLOCK_BYTES = 16384;
 
-// Kept here rather than in the generated capacity file so custom capacity
-// profiles keep compiling until the artifact builder emits METADATA_MAX_BYTES.
-let SLAB_DEFAULT_METADATA_MAX_BYTES = 67108864;
-
 extern fn mochi_slab_set_limit(limit: i64);
 
 extern fn mochi_slab_used_bytes() -> i64;
@@ -54,7 +50,7 @@ export fn goose_slab_attach_symbols(bytes: const u8[:]) -> bool {
 }
 
 fn slab_use_default_limit() {
-    mochi_slab_set_limit(SLAB_DEFAULT_METADATA_MAX_BYTES);
+    mochi_slab_set_limit(METADATA_MAX_BYTES);
 }
 
 fn slab_set_limit(limit: i64) {

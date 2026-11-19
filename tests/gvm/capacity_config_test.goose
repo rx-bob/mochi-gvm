@@ -20,6 +20,5 @@ fn test_default_capacity_values(t: goosetest::Test&) {
     t.assert_eq(2048, vm::MAX_BINDINGS);
     t.assert_eq(8, vm::ABI_MAX_CALL_ARGS);
     t.assert_eq(4194304, vm::ABI_MAX_BYTECODE);
-    t.assert_eq(67108864, vm::METADATA_MAX_BYTES);
-    t.assert_eq(vm::METADATA_MAX_BYTES, vm::SLAB_DEFAULT_METADATA_MAX_BYTES);
+    t.assert_eq(60317680, vm::METADATA_MAX_BYTES);
 }

@@ -311,7 +311,7 @@ fn test_metadata_budget_rolls_back_chunks(t: goosetest::Test&) {
     t.assert_eq(used, vm::slab_used_bytes(),
         "metadata budget restored exactly after chunk rollback");
 
-    vm::slab_set_limit(vm::SLAB_DEFAULT_METADATA_MAX_BYTES);
+    vm::slab_use_default_limit();
     vm::abi_call(instance, vm::intern_symbol("increment"), 0);
     t.assert_false(vm::abi_has_error(), "mounted component still runs");
     vm::vm_end_entry(vm::g_abi_machine);

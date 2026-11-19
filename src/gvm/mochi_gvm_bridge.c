@@ -58,7 +58,7 @@ _Static_assert(sizeof(goose_u8_slice) == sizeof(void *) + sizeof(int64_t),
  * an exported attach callback. A single view has an exact root, so generated
  * Goose code can slice package bytes and symbol names without copying. */
 #define MOCHI_SLAB_SYMBOL_BLOCK_BYTES 16384
-#define MOCHI_SLAB_DEFAULT_LIMIT 67108864
+#define MOCHI_SLAB_DEFAULT_LIMIT MOCHI_METADATA_MAX_BYTES
 
 typedef struct {
   uint8_t *data;
