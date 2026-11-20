@@ -1,156 +1,119 @@
-/*
- * 32-bit host acceptance test for the opaque mruby ABI.
- *
- * `mochi_bridge.c` stores pointers in `int`, so this test must run in a
- * 32-bit process. Generate the Goose C and header with:
- *
- *   goose --standalone --header abi.h -o abi.c <entry importing src/gvm>
- *
- * Then compile this file with `mrb_abi_shim.c` (and
- * `-DMOCHI_ABI_OWNS_GOOSE_LIFECYCLE`), `mrbgem_loader.c` and
- * `tests/fixtures/sample_mrbgem.c` (both with `-DMOCHI_ABI_SAMPLE_GEM`), the
- * generated `abi.c`, and `poc_yiseq/mochi_bridge.c` (with
- * `-Dmain=mochi_bridge_sidecar_main`).
- */
-#include "abi.h"
+/* Build with the standalone Goose C, mrb_abi_shim.c, mrbgem_loader.c and
+ * mochi_gvm_bridge.c. Pass tests/fixtures/native_probe.rb compiled by mrbc
+ * (including its RITE header) as argv[1]. This test runs at native width. */
+#include "mochi_native.h"
 
-#include <mruby.h>
-#include <mruby/class.h>
-#include <mruby/string.h>
-#include <mruby/variable.h>
-
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-extern int mochi_init_runtime(void);
-extern int mochi_load_iseq(int ptr, int len);
-extern int mochi_hydrate_component(int id_ptr, int class_ptr, int state_ptr);
-extern int mochi_render(int id_ptr);
-extern int mochi_render_buffer_offset(void);
-extern int mochi_write_event(int line_ptr);
-extern int mochi_process_events(void);
-extern int mochi_fetch_outbox_offset(void);
-extern int mochi_fetch_outbox_len(void);
+extern int32_t mochi_component_count(void);
+extern int32_t mochi_binding_count(void);
 
-static const char EXPECTED_HTML[] =
-    "<div class='counter'><h2>Click me</h2><span class='count'>1</span>"
-    "<div class='buttons'><button data-action='decrement'>-</button>"
-    "<button data-action='increment'>+</button>"
-    "<button data-action='reset'>Reset</button></div></div>";
-static const char EXPECTED_GEM_HTML[] = "<span>42</span>";
-static const char FETCH_LINE[] =
-    "{\"id\":1,\"instance\":\"counter\",\"url\":\"https://example.test/data\","
-    "\"callback\":\"handler\",\"options\":{}}\n";
+#define BYTES(s) ((MochiNativeBytes){(const uint8_t *)(s), sizeof(s) - 1})
 
-static void fail(const char *what, int got) {
-  fprintf(stderr, "FAIL %s: %d\n", what, got);
+static void check(int ok, const char *what) {
+  if (ok) return;
+  MochiNativeBytes error = mochi_native_error();
+  fprintf(stderr, "FAIL %s: %.*s\n", what, (int)error.length, (const char *)error.data);
   exit(1);
 }
 
-static mrb_value host_ping(mrb_state *mrb, mrb_value self) {
-  (void)mrb;
-  (void)self;
-  return mrb_fixnum_value(7);
-}
-
-static unsigned char *read_file(const char *path, long *size) {
+static void load_fixture(const char *path) {
   FILE *file = fopen(path, "rb");
-  unsigned char *bytes;
-  if (!file) fail("open counter.chi", -1);
-  if (fseek(file, 0, SEEK_END) != 0) fail("seek", -1);
-  *size = ftell(file);
-  if (*size <= 0) fail("size", (int)*size);
-  if (fseek(file, 0, SEEK_SET) != 0) fail("rewind", -1);
-  bytes = (unsigned char *)malloc((size_t)*size);
-  if (!bytes) fail("malloc chi", -1);
-  if (fread(bytes, 1, (size_t)*size, file) != (size_t)*size) fail("read chi", -1);
+  check(file != NULL, "open native probe");
+  check(fseek(file, 0, SEEK_END) == 0, "seek native probe");
+  long length = ftell(file);
+  check(length > 0 && fseek(file, 0, SEEK_SET) == 0, "size native probe");
+  uint8_t *data = malloc((size_t)length);
+  check(data != NULL, "allocate native probe");
+  check(fread(data, 1, (size_t)length, file) == (size_t)length, "read native probe");
   fclose(file);
-  return bytes;
+  check(mochi_native_load((MochiNativeBytes){data, (size_t)length}) == 0, "load native probe");
+  free(data);
 }
 
-int main(void) {
-  long size = 0;
-  long gem_size = 0;
-  unsigned char *chi = read_file("counter.chi", &size);
-  unsigned char *gem_chi = read_file("gem_user.chi", &gem_size);
-  int slot;
-  int rendered;
-  int events;
-  mrb_state *mrb;
-  struct RClass *host_class;
-  mrb_value mochi;
-  mrb_value component;
-  mrb_value url;
-  mrb_value callback;
-  mrb_value host_object;
-  mrb_value ping;
-  const char *outbox;
-  const char *html;
+static MochiNativeInstance mount_probe(void) {
+  MochiNativeInstance instance = 0;
+  check(mochi_native_mount(BYTES("NativeProbe"), &instance) == 0 && instance != 0, "mount probe");
+  check(mochi_native_bind(instance, 0x0201, BYTES("label")) == 0, "bind label");
+  return instance;
+}
 
-  if (mochi_init_runtime() != 0) fail("mochi_init_runtime", -1);
+static void expect_patch(MochiNativeInstance instance, MochiNativeBytes expected) {
+  MochiNativePatches patches;
+  check(mochi_native_flush(instance, &patches) == 0 && patches.count == 1, "flush one patch");
+  uint16_t id = 0;
+  MochiNativeBytes value;
+  check(mochi_native_patch_next(&patches.bytes, &id, &value) == 1 && id == 0x0201,
+        "decode little-endian binding");
+  check(value.length == expected.length && memcmp(value.data, expected.data, expected.length) == 0,
+        "patch bytes");
+  check(mochi_native_patch_next(&patches.bytes, &id, &value) == 0, "end of patch batch");
+}
 
-  mrb = mrb_open();
-  if (!mrb) fail("mrb_open", -1);
-  mochi = mrb_const_get(mrb, mrb_obj_value(mrb->object_class),
-                        mrb_intern_cstr(mrb, "Mochi"));
-  component = mrb_str_new(mrb, "counter", 7);
-  url = mrb_str_new(mrb, "https://example.test/data", 25);
-  callback = mrb_str_new(mrb, "handler", 7);
-  mrb_funcall(mrb, mochi, "fetch", 3, component, url, callback);
-  if (mrb->exc) fail("mochi fetch raised", -1);
-  outbox = (const char *)(intptr_t)mochi_fetch_outbox_offset();
-  if (mochi_fetch_outbox_len() != (int)strlen(FETCH_LINE)) {
-    fail("fetch length", mochi_fetch_outbox_len());
+static void malformed_patches(void) {
+  static const uint8_t bad[] = {1, 2, 0xff, 0xff, 0xff, 0xff, 'x'};
+  uint16_t id = 0;
+  MochiNativeBytes value = {0};
+  for (size_t size = 1; size <= sizeof(bad); ++size) {
+    MochiNativeBytes remaining = {bad, size};
+    check(mochi_native_patch_next(&remaining, &id, &value) == -1, "reject truncated patch");
+    check(remaining.data == bad && remaining.length == size && id == 0 && value.data == NULL,
+          "failed decode leaves the cursor and record alone");
   }
-  if (memcmp(outbox, FETCH_LINE, strlen(FETCH_LINE)) != 0) fail("fetch payload", -1);
+  MochiNativeBytes missing = {NULL, 6};
+  check(mochi_native_patch_next(&missing, &id, &value) == -1, "reject missing patch pointer");
+}
 
-  if (mochi_load_iseq((int)(intptr_t)chi, (int)size) != 0) fail("mochi_load_iseq", -1);
-  slot = mochi_hydrate_component((int)(intptr_t)"counter",
-                                 (int)(intptr_t)"Counter", 0);
-  if (slot != 0) {
-    int64_t error_len = 0;
-    const uint8_t *error = goose_vm_last_error(&error_len);
-    fprintf(stderr, "counter hydrate error: %.*s\n", (int)error_len,
-            (const char *)error);
-    fail("mochi_hydrate_component", slot);
-  }
-  events = mochi_write_event((int)(intptr_t)"counter|click|increment");
-  if (events != (int)strlen("counter|click|increment")) fail("write event", events);
-  if (mochi_process_events() != 1) fail("process events", -1);
-  rendered = mochi_render((int)(intptr_t)"counter");
-  if (rendered != (int)strlen(EXPECTED_HTML)) fail("render length", rendered);
-  html = (const char *)(intptr_t)mochi_render_buffer_offset();
-  if (memcmp(html, EXPECTED_HTML, strlen(EXPECTED_HTML)) != 0) fail("render html", -1);
+int main(int argc, char **argv) {
+  check(argc == 2, "expected path to compiled native_probe.rb");
+  check(sizeof(void *) > 4, "test requires a native-width pointer");
+  check(mochi_native_abi_version() == MOCHI_NATIVE_ABI_VERSION, "ABI version");
+  check(strlen(mochi_native_capacity_fingerprint()) == 64, "capacity fingerprint");
+  check(mochi_native_open() == 0 && mochi_native_open() == 0, "open native VM");
+  MochiNativeBytes nil_data = {NULL, 16};
+  MochiNativeBytes oversized = {(const uint8_t *)"", SIZE_MAX};
+  check(mochi_native_load(nil_data) == -1 && mochi_native_load(oversized) == -1,
+        "validate bytecode pointer and native length");
+  check(mochi_native_error().length > 0, "failed load has a borrowed error");
+  check(mochi_native_load(BYTES("not bytecode")) == -1, "reject invalid bytecode");
+  load_fixture(argv[1]);
 
-  if (mochi_load_iseq((int)(intptr_t)gem_chi, (int)gem_size) != 0) {
-    fail("load gem user", -1);
-  }
-  slot = mochi_hydrate_component((int)(intptr_t)"gem_user",
-                                 (int)(intptr_t)"GemUser", 0);
-  if (slot < 0) fail("hydrate gem user", slot);
-  rendered = mochi_render((int)(intptr_t)"gem_user");
-  if (rendered != (int)strlen(EXPECTED_GEM_HTML)) fail("gem render length", rendered);
-  html = (const char *)(intptr_t)mochi_render_buffer_offset();
-  if (memcmp(html, EXPECTED_GEM_HTML, strlen(EXPECTED_GEM_HTML)) != 0) {
-    fail("gem render html", -1);
-  }
+  MochiNativeInstance failed = 1;
+  check(mochi_native_mount(BYTES("BrokenNativeProbe"), &failed) == -1 && !failed &&
+        mochi_component_count() == 0, "rollback failed initialize");
+  check(mochi_native_mount(BYTES("HostEffectNativeProbe"), &failed) == -1 && !failed &&
+        mochi_component_count() == 0, "rollback unsupported mount effect");
+  MochiNativeInstance a = mount_probe();
+  MochiNativeInstance b = mount_probe();
+  check(a != b && mochi_component_count() == 2 && mochi_binding_count() == 2, "two distinct instances");
 
-  host_class = mrb_define_class(mrb, "HostBase", mrb->object_class);
-  if (!host_class) fail("mrb_define_class", -1);
-  mrb_define_method(mrb, host_class, "ping", host_ping, MRB_ARGS_NONE());
-  host_object = mrb_obj_new(mrb, host_class, 0, NULL);
-  if (mrb->exc) fail("mrb_obj_new", -1);
-  ping = mrb_funcall(mrb, host_object, "ping", 0);
-  if (mrb->exc) fail("host method raised", -1);
-  if (mrb_fixnum(ping) != 7) fail("host method result", (int)mrb_fixnum(ping));
+  expect_patch(a, BYTES("ready"));
+  expect_patch(b, BYTES("ready"));
+  int64_t arity;
+  check(mochi_native_method_arity(a, BYTES("change"), &arity) == 0 && arity == 1, "required arity");
+  check(mochi_native_method_arity(a, BYTES("mounted"), &arity) == 0 && arity == -1, "absent lifecycle");
+  check(mochi_native_dispatch(a, BYTES("change"), oversized) == -1 &&
+        mochi_native_dispatch(a, BYTES("change"), BYTES("{}")) == -1, "reject invalid event arguments");
+  check(mochi_native_dispatch(a, BYTES("unsupported"), BYTES("[]")) == -1, "reject unsupported host effect");
+  check(mochi_native_dispatch(a, BYTES("change"), BYTES("[\"Café\"]")) == 0, "dispatch after errors");
+  expect_patch(a, BYTES("Café"));
+  MochiNativePatches unchanged;
+  check(mochi_native_flush(b, &unchanged) == 0 && unchanged.count == 0 && unchanged.bytes.length == 0,
+        "second instance remains unchanged");
 
-  mrb_close(mrb);
-  goose_exit();
-  free(chi);
-  free(gem_chi);
-  printf("abi bridge ok: fetch, load, render, gem mrblib, host class/method (%d bytes)\n",
-         rendered);
+  check(mochi_native_unmount(a) == 0 && mochi_component_count() == 1 && mochi_binding_count() == 1,
+        "unmount releases one instance");
+  MochiNativeInstance replacement = mount_probe();
+  check(mochi_native_dispatch(a, BYTES("change"), BYTES("[\"stale\"]")) == -1,
+        "closed handle cannot target a remounted instance");
+  expect_patch(replacement, BYTES("ready"));
+  check(mochi_native_dispatch(b, BYTES("change"), BYTES("[\"still active\"]")) == 0, "dispatch to surviving instance");
+  expect_patch(b, BYTES("still active"));
+  check(mochi_native_unmount(b) == 0 && mochi_native_unmount(replacement) == 0 &&
+        mochi_component_count() == 0 && mochi_binding_count() == 0, "release remaining instances");
+  malformed_patches();
+  puts("PASS native GVM ABI");
   return 0;
 }

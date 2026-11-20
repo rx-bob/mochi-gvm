@@ -2339,3 +2339,157 @@ int32_t mochi_deliver_host_result(uint64_t instance, const uint8_t *callback,
 #ifdef MOCHI_ABI_OWNS_GOOSE_LIFECYCLE
 int main(void) { return 0; }
 #endif
+
+#ifndef __EMSCRIPTEN__
+#include "mochi_native.h"
+
+#ifdef MOCHI_NATIVE_STANDALONE
+extern void goose_init(int argc, char **argv);
+#endif
+
+uint32_t mochi_native_abi_version(void) { return MOCHI_NATIVE_ABI_VERSION; }
+
+const char *mochi_native_capacity_fingerprint(void) {
+  return mochi_capacity_fingerprint();
+}
+
+MochiNativeBytes mochi_native_error(void) {
+  return (MochiNativeBytes){(const uint8_t *)g_error_text, (size_t)g_error_len};
+}
+
+/* The inspector host has no adapters. Discard pending effects on every
+ * failure so the next component never sees the previous entry's outbox. */
+static int native_finish(int status) {
+  if (status == 0) {
+    int32_t emitted = mochi_emit_outbox_len();
+    if (emitted == 0 && g_fetch_outbox_len == 0) return 0;
+    if (emitted >= 0) set_error_text("unsupported native host operation");
+  }
+  mochi_fetch_outbox_clear();
+  mochi_emit_outbox_clear();
+  if (g_error_len == 0) set_error_text("native VM operation failed");
+  return -1;
+}
+
+static int native_fail(const char *message) {
+  set_error_text(message);
+  return -1;
+}
+
+static int native_bytes_valid(MochiNativeBytes bytes) {
+  return bytes.data && bytes.length > 0 && bytes.length <= INT32_MAX;
+}
+
+static uint32_t native_symbol(MochiNativeBytes text) {
+  if (!g_mrb || !native_bytes_valid(text)) {
+    set_error_text(g_mrb ? "invalid method name bytes" : "runtime is not open");
+    return 0;
+  }
+  uint32_t symbol = mochi_intern(text.data, (int32_t)text.length);
+  if (!symbol || goose_vm_has_error()) {
+    capture_vm_error();
+    if (g_error_len == 0) set_error_text("could not intern method name");
+    return 0;
+  }
+  return symbol;
+}
+
+int mochi_native_open(void) {
+#ifdef MOCHI_NATIVE_STANDALONE
+  static int initialized;
+  if (!initialized) {
+    goose_init(0, NULL);
+    initialized = 1;
+  }
+#endif
+  clear_error();
+  return native_finish(mochi_init_runtime());
+}
+
+int mochi_native_load(MochiNativeBytes irep) {
+  if (!g_mrb) return native_fail("runtime is not open");
+  if (!native_bytes_valid(irep)) return native_fail("invalid bytecode bytes");
+  return native_finish(mochi_load_irep(irep.data, (int32_t)irep.length));
+}
+
+int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instance) {
+  if (!instance) return native_fail("missing instance output");
+  *instance = 0;
+  if (!native_bytes_valid(class_name)) return native_fail("invalid class name bytes");
+  uint64_t mounted = mochi_mount_component(class_name.data, (int32_t)class_name.length);
+  if (native_finish(mounted ? 0 : -1) != 0) {
+    if (mounted) {
+      char detail[MOCHI_ERROR_CAPACITY];
+      memcpy(detail, g_error_text, (size_t)g_error_len + 1);
+      mochi_native_unmount(mounted);
+      set_error_text(detail);
+    }
+    return -1;
+  }
+  *instance = mounted;
+  return 0;
+}
+
+int mochi_native_bind(MochiNativeInstance instance, uint16_t id, MochiNativeBytes getter) {
+  if (!instance) return native_fail("missing component instance");
+  uint32_t symbol = native_symbol(getter);
+  if (!symbol) return -1;
+  return native_finish(mochi_register_binding(instance, id, symbol));
+}
+
+int mochi_native_method_arity(MochiNativeInstance instance, MochiNativeBytes method, int64_t *arity) {
+  if (!arity) return native_fail("missing method arity output");
+  *arity = -1;
+  if (!instance) return native_fail("missing component instance");
+  uint32_t symbol = native_symbol(method);
+  if (!symbol) return -1;
+  clear_error();
+  *arity = goose_vm_method_req_argc(instance, symbol);
+  return 0;
+}
+
+int mochi_native_dispatch(MochiNativeInstance instance, MochiNativeBytes method,
+                          MochiNativeBytes json_args) {
+  if (!instance) return native_fail("missing component instance");
+  if (!native_bytes_valid(json_args)) return native_fail("invalid event argument bytes");
+  uint32_t symbol = native_symbol(method);
+  if (!symbol) return -1;
+  return native_finish(mochi_dispatch_event_args(instance, symbol, json_args.data,
+                                                 (int32_t)json_args.length) == 1 ? 0 : -1);
+}
+
+int mochi_native_flush(MochiNativeInstance instance, MochiNativePatches *patches) {
+  if (!patches) return native_fail("missing patch output");
+  *patches = (MochiNativePatches){0};
+  if (!g_mrb) return native_fail("runtime is not open");
+  if (!instance) return native_fail("missing component instance");
+  int32_t count = mochi_flush_patches(instance);
+  if (native_finish(count < 0 ? -1 : 0) != 0) return -1;
+  patches->bytes = (MochiNativeBytes){g_patch_buffer, (size_t)g_patch_len};
+  patches->count = (size_t)count;
+  return 0;
+}
+
+int mochi_native_unmount(MochiNativeInstance instance) {
+  if (!g_mrb) return native_fail("runtime is not open");
+  if (!instance) return native_fail("missing component instance");
+  return native_finish(mochi_unmount_component(instance));
+}
+
+int mochi_native_patch_next(MochiNativeBytes *remaining, uint16_t *id,
+                            MochiNativeBytes *value) {
+  if (!remaining || !id || !value) return -1;
+  if (!remaining->length) return 0;
+  if (!remaining->data || remaining->length < 6) return -1;
+  const uint8_t *record = remaining->data;
+  uint32_t length = (uint32_t)record[2] | (uint32_t)record[3] << 8 |
+                    (uint32_t)record[4] << 16 | (uint32_t)record[5] << 24;
+  if (length > remaining->length - 6) return -1;
+  *id = (uint16_t)(record[0] | (uint16_t)record[1] << 8);
+  *value = (MochiNativeBytes){record + 6, length};
+  size_t consumed = 6 + (size_t)length;
+  remaining->data += consumed;
+  remaining->length -= consumed;
+  return 1;
+}
+#endif
