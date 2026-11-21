@@ -59,3 +59,13 @@ class TypedNativeProbe
     Mochi.after(0, :label)
   end
 end
+
+class StorageNativeProbe
+  def label
+    Mochi.storage_get("abi-storage-key", "default")
+  end
+
+  def write
+    Mochi.storage_set("abi-storage-key", "next")
+  end
+end

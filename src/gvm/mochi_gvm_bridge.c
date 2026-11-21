@@ -1058,9 +1058,6 @@ static uint8_t g_fetch_inbox[MOCHI_FETCH_CAPACITY];
 static int32_t g_fetch_next_id = 1;
 static uint8_t g_emit_outbox[MOCHI_EMIT_CAPACITY];
 static int32_t g_emit_outbox_len = 0;
-#ifndef __EMSCRIPTEN__
-static int32_t g_native_child_bytes = 0;
-#endif
 static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
 static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
@@ -1736,9 +1733,6 @@ static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
 
   memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
   g_emit_outbox_len += (int32_t)at;
-#ifndef __EMSCRIPTEN__
-  g_native_child_bytes += (int32_t)at;
-#endif
   g_emit_outbox[g_emit_outbox_len] = '\0';
   return mrb_fixnum_value(0);
 }
@@ -2147,9 +2141,6 @@ MOCHI_EXPORT
 int32_t mochi_emit_outbox_clear(void) {
   goose_vm_clear_host_outbox();
   g_emit_outbox_len = 0;
-#ifndef __EMSCRIPTEN__
-  g_native_child_bytes = 0;
-#endif
   g_emit_outbox[0] = '\0';
   return 0;
 }
@@ -2366,12 +2357,41 @@ MochiNativeBytes mochi_native_error(void) {
   return (MochiNativeBytes){(const uint8_t *)g_error_text, (size_t)g_error_len};
 }
 
-/* The inspector host has no adapters. Discard pending effects on every
- * failure so the next component never sees the previous entry's outbox. */
+extern void goose_vm_clear_storage(void);
+static int g_native_storage_enabled;
+
+static int native_effects_supported(int32_t length) {
+  static const char *const storage[] = {
+    "{\"__host\":\"storage_set\",", "{\"__host\":\"storage_remove\",",
+    "{\"__host\":\"storage_subscribe\","
+  };
+  const uint8_t *cursor = g_emit_outbox;
+  const uint8_t *end = cursor + length;
+  while (cursor < end) {
+    const uint8_t *newline = memchr(cursor, '\n', (size_t)(end - cursor));
+    if (!newline) return 0;
+    size_t size = (size_t)(newline - cursor);
+    const char child[] = "{\"__child_event\":";
+    int allowed = size >= sizeof(child) - 1 && !memcmp(cursor, child, sizeof(child) - 1);
+    if (g_native_storage_enabled && !allowed) {
+      for (size_t i = 0; i < sizeof(storage) / sizeof(storage[0]); ++i) {
+        size_t prefix = strlen(storage[i]);
+        if (size >= prefix && !memcmp(cursor, storage[i], prefix)) {
+          allowed = 1;
+          break;
+        }
+      }
+    }
+    if (!allowed) return 0;
+    cursor = newline + 1;
+  }
+  return 1;
+}
+
 static int native_finish(int status) {
   if (status == 0) {
     int32_t emitted = mochi_emit_outbox_len();
-    if (emitted == g_native_child_bytes && g_fetch_outbox_len == 0) return 0;
+    if (emitted >= 0 && g_fetch_outbox_len == 0 && native_effects_supported(emitted)) return 0;
     if (emitted >= 0) set_error_text("unsupported native host operation");
   }
   mochi_fetch_outbox_clear();
@@ -2460,11 +2480,24 @@ int mochi_native_set_props(MochiNativeInstance instance, MochiNativeBytes json_p
   return native_finish(mochi_set_props_json(instance, json_props.data, (int32_t)json_props.length));
 }
 
-MochiNativeBytes mochi_native_take_child_events(void) {
-  MochiNativeBytes pending = {g_emit_outbox, (size_t)g_native_child_bytes};
-  g_native_child_bytes = 0;
+MochiNativeBytes mochi_native_take_effects(void) {
+  MochiNativeBytes pending = {g_emit_outbox, (size_t)g_emit_outbox_len};
   g_emit_outbox_len = 0;
   return pending;
+}
+
+int mochi_native_reset_storage(void) {
+  if (!g_mrb) return native_fail("runtime is not open");
+  goose_vm_clear_storage();
+  g_native_storage_enabled = 1;
+  return 0;
+}
+
+int mochi_native_seed_storage(MochiNativeBytes key, MochiNativeBytes value) {
+  if (!g_native_storage_enabled || !native_bytes_valid(key) || value.length > INT32_MAX ||
+      (value.length && !value.data)) return native_fail("invalid native storage snapshot");
+  mochi_seed_storage(key.data, (int32_t)key.length, value.data, (int32_t)value.length);
+  return 0;
 }
 
 int mochi_native_bind(MochiNativeInstance instance, uint16_t id, MochiNativeBytes getter) {

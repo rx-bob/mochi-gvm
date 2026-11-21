@@ -25,3 +25,8 @@ export fn goose_vm_host_outbox() -> const u8[:] {
 export fn goose_vm_clear_host_outbox() {
     host_clear_outbox();
 }
+
+// The native host restores its confirmed snapshot after a failed Ruby entry.
+export fn goose_vm_clear_storage() {
+    host_clear_storage_snapshot();
+}

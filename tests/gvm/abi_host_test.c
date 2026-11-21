@@ -69,20 +69,48 @@ static void typed_composition(void) {
   expect_patch(child, BYTES("1:9007199254740993:updated"));
 
   check(mochi_native_dispatch(child, BYTES("publish"), BYTES("[]")) == 0, "dispatch typed child event");
-  MochiNativeBytes events = mochi_native_take_child_events();
+  MochiNativeBytes events = mochi_native_take_effects();
   char expected[256];
   int length = snprintf(expected, sizeof(expected),
       "{\"__child_event\":\"confirm\",\"instance\":\"%llu\",\"payload\":{\"id\":"
       "{\"__mochi_number\":\"i64\",\"value\":\"9007199254740993\"}}}\n", (unsigned long long)child);
   check(length > 0 && events.length == (size_t)length && memcmp(events.data, expected, events.length) == 0,
         "event transport preserves sender and exact payload");
-  check(mochi_native_take_child_events().length == 0, "take event batch once");
+  check(mochi_native_take_effects().length == 0, "take event batch once");
   check(mochi_native_dispatch(child, BYTES("publish_then_fail"), BYTES("[]")) == -1 &&
-        mochi_native_take_child_events().length == 0, "failed Ruby entry discards events");
+        mochi_native_take_effects().length == 0, "failed Ruby entry discards events");
   check(mochi_native_dispatch(child, BYTES("publish_with_host_effect"), BYTES("[]")) == -1 &&
-        mochi_native_take_child_events().length == 0, "mixed unsupported effects discard events");
+        mochi_native_take_effects().length == 0, "mixed unsupported effects discard events");
   check(mochi_native_unmount(child) == 0 && mochi_component_count() == 0 && mochi_binding_count() == 0,
         "dispose typed child");
+}
+
+static void storage_effects(void) {
+  MochiNativeInstance owner = 0;
+  check(mochi_native_mount(BYTES("StorageNativeProbe"), &owner) == 0 && owner, "mount storage probe");
+  check(mochi_native_bind(owner, 0x0201, BYTES("label")) == 0, "bind storage label");
+  expect_patch(owner, BYTES("default"));
+  check(mochi_native_dispatch(owner, BYTES("write"), BYTES("[]")) == -1,
+        "storage effects require an enabled host");
+  check(mochi_native_take_effects().length == 0, "disabled storage effects are discarded");
+
+  check(mochi_native_reset_storage() == 0, "reset and enable the storage mirror");
+  check(mochi_native_seed_storage(BYTES("abi-storage-key"), (MochiNativeBytes){NULL, 0}) == 0,
+        "seed a present empty string");
+  check(mochi_native_bind(owner, 0x0201, BYTES("label")) == 0, "read a present empty value");
+  expect_patch(owner, BYTES(""));
+  check(mochi_native_dispatch(owner, BYTES("write"), BYTES("[]")) == 0, "queue a supported storage write");
+  MochiNativeBytes effects = mochi_native_take_effects();
+  MochiNativeBytes expected = BYTES("{\"__host\":\"storage_set\",\"key\":\"abi-storage-key\",\"value\":\"next\"}\n");
+  check(effects.length == expected.length && !memcmp(effects.data, expected.data, expected.length),
+        "native storage effect retains the shared wire format");
+  check(mochi_native_take_effects().length == 0, "storage effect can only be taken once");
+  check(mochi_native_reset_storage() == 0 &&
+        mochi_native_seed_storage(BYTES("abi-storage-key"), BYTES("confirmed")) == 0,
+        "restore the confirmed storage mirror after draining");
+  check(mochi_native_bind(owner, 0x0201, BYTES("label")) == 0, "observe the confirmed cache");
+  expect_patch(owner, BYTES("confirmed"));
+  check(mochi_native_unmount(owner) == 0, "unmount storage probe");
 }
 
 static void malformed_patches(void) {
@@ -147,6 +175,7 @@ int main(int argc, char **argv) {
   check(mochi_native_unmount(b) == 0 && mochi_native_unmount(replacement) == 0 &&
         mochi_component_count() == 0 && mochi_binding_count() == 0, "release remaining instances");
   typed_composition();
+  storage_effects();
   malformed_patches();
   puts("PASS native GVM ABI");
   return 0;

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MOCHI_NATIVE_ABI_VERSION 2
+#define MOCHI_NATIVE_ABI_VERSION 3
 
 typedef uint64_t MochiNativeInstance;
 
@@ -44,9 +44,14 @@ int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instanc
 int mochi_native_mount_props(MochiNativeBytes class_name, MochiNativeBytes json_props,
                             MochiNativeInstance *instance);
 int mochi_native_set_props(MochiNativeInstance instance, MochiNativeBytes json_props);
-/* Drain newline-delimited typed child events. The returned bytes are borrowed
- * through the next mutating call. Failed calls discard pending effects. */
-MochiNativeBytes mochi_native_take_child_events(void);
+/* Drain newline-delimited child events and enabled storage commands. Bytes
+ * are borrowed through the next mutating call. Failed entries discard effects. */
+MochiNativeBytes mochi_native_take_effects(void);
+/* Enable storage and clear the optimistic VM mirror before reseeding the
+ * durable snapshot. Empty value slices are valid. Reset/seed only between
+ * Ruby entries. The host restores the mirror after a failed entry. */
+int mochi_native_reset_storage(void);
+int mochi_native_seed_storage(MochiNativeBytes key, MochiNativeBytes value);
 int mochi_native_bind(MochiNativeInstance instance, uint16_t id, MochiNativeBytes getter);
 /* On success, arity contains the required positional count, or -1 if absent. */
 int mochi_native_method_arity(MochiNativeInstance instance, MochiNativeBytes method, int64_t *arity);

@@ -61,6 +61,11 @@ fn host_append_json_escaped(out: u8[>..]&, text: const u8[:]) {
     out.push(34);
 }
 
+fn host_clear_storage_snapshot() {
+    g_host_storage.clear();
+    g_host_blob.clear();
+}
+
 fn host_storage_put_raw(key: const u8[:], value: const u8[:]) {
     if key.len == 0 {
         return;
