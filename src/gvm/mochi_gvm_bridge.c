@@ -1058,6 +1058,9 @@ static uint8_t g_fetch_inbox[MOCHI_FETCH_CAPACITY];
 static int32_t g_fetch_next_id = 1;
 static uint8_t g_emit_outbox[MOCHI_EMIT_CAPACITY];
 static int32_t g_emit_outbox_len = 0;
+#ifndef __EMSCRIPTEN__
+static int32_t g_native_child_bytes = 0;
+#endif
 static uint8_t g_eval_buffer[MOCHI_EVENT_ARGS_CAPACITY];
 static int32_t g_eval_len = 0;
 static char g_error_text[MOCHI_ERROR_CAPACITY];
@@ -1733,6 +1736,9 @@ static mrb_value mochi_emit_child_native(mrb_state *mrb, mrb_value self) {
 
   memcpy(g_emit_outbox + g_emit_outbox_len, line, at);
   g_emit_outbox_len += (int32_t)at;
+#ifndef __EMSCRIPTEN__
+  g_native_child_bytes += (int32_t)at;
+#endif
   g_emit_outbox[g_emit_outbox_len] = '\0';
   return mrb_fixnum_value(0);
 }
@@ -2141,6 +2147,9 @@ MOCHI_EXPORT
 int32_t mochi_emit_outbox_clear(void) {
   goose_vm_clear_host_outbox();
   g_emit_outbox_len = 0;
+#ifndef __EMSCRIPTEN__
+  g_native_child_bytes = 0;
+#endif
   g_emit_outbox[0] = '\0';
   return 0;
 }
@@ -2362,7 +2371,7 @@ MochiNativeBytes mochi_native_error(void) {
 static int native_finish(int status) {
   if (status == 0) {
     int32_t emitted = mochi_emit_outbox_len();
-    if (emitted == 0 && g_fetch_outbox_len == 0) return 0;
+    if (emitted == g_native_child_bytes && g_fetch_outbox_len == 0) return 0;
     if (emitted >= 0) set_error_text("unsupported native host operation");
   }
   mochi_fetch_outbox_clear();
@@ -2373,7 +2382,7 @@ static int native_finish(int status) {
 
 static int native_fail(const char *message) {
   set_error_text(message);
-  return -1;
+  return native_finish(-1);
 }
 
 static int native_bytes_valid(MochiNativeBytes bytes) {
@@ -2382,13 +2391,14 @@ static int native_bytes_valid(MochiNativeBytes bytes) {
 
 static uint32_t native_symbol(MochiNativeBytes text) {
   if (!g_mrb || !native_bytes_valid(text)) {
-    set_error_text(g_mrb ? "invalid method name bytes" : "runtime is not open");
+    native_fail(g_mrb ? "invalid method name bytes" : "runtime is not open");
     return 0;
   }
   uint32_t symbol = mochi_intern(text.data, (int32_t)text.length);
   if (!symbol || goose_vm_has_error()) {
     capture_vm_error();
     if (g_error_len == 0) set_error_text("could not intern method name");
+    native_finish(-1);
     return 0;
   }
   return symbol;
@@ -2412,11 +2422,16 @@ int mochi_native_load(MochiNativeBytes irep) {
   return native_finish(mochi_load_irep(irep.data, (int32_t)irep.length));
 }
 
-int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instance) {
+static int native_mount(MochiNativeBytes class_name, const MochiNativeBytes *props,
+                        MochiNativeInstance *instance) {
   if (!instance) return native_fail("missing instance output");
   *instance = 0;
   if (!native_bytes_valid(class_name)) return native_fail("invalid class name bytes");
-  uint64_t mounted = mochi_mount_component(class_name.data, (int32_t)class_name.length);
+  if (props && !native_bytes_valid(*props)) return native_fail("invalid props bytes");
+  uint64_t mounted = props
+      ? mochi_mount_component_props(class_name.data, (int32_t)class_name.length,
+                                    props->data, (int32_t)props->length)
+      : mochi_mount_component(class_name.data, (int32_t)class_name.length);
   if (native_finish(mounted ? 0 : -1) != 0) {
     if (mounted) {
       char detail[MOCHI_ERROR_CAPACITY];
@@ -2428,6 +2443,28 @@ int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instanc
   }
   *instance = mounted;
   return 0;
+}
+
+int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instance) {
+  return native_mount(class_name, NULL, instance);
+}
+
+int mochi_native_mount_props(MochiNativeBytes class_name, MochiNativeBytes json_props,
+                            MochiNativeInstance *instance) {
+  return native_mount(class_name, &json_props, instance);
+}
+
+int mochi_native_set_props(MochiNativeInstance instance, MochiNativeBytes json_props) {
+  if (!instance) return native_fail("missing component instance");
+  if (!native_bytes_valid(json_props)) return native_fail("invalid props bytes");
+  return native_finish(mochi_set_props_json(instance, json_props.data, (int32_t)json_props.length));
+}
+
+MochiNativeBytes mochi_native_take_child_events(void) {
+  MochiNativeBytes pending = {g_emit_outbox, (size_t)g_native_child_bytes};
+  g_native_child_bytes = 0;
+  g_emit_outbox_len = 0;
+  return pending;
 }
 
 int mochi_native_bind(MochiNativeInstance instance, uint16_t id, MochiNativeBytes getter) {

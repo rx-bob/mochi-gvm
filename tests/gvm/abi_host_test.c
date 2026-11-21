@@ -52,6 +52,39 @@ static void expect_patch(MochiNativeInstance instance, MochiNativeBytes expected
   check(mochi_native_patch_next(&patches.bytes, &id, &value) == 0, "end of patch batch");
 }
 
+static void typed_composition(void) {
+  MochiNativeInstance child;
+  check(mochi_native_mount_props(BYTES("TypedNativeProbe"), BYTES("[]"), &child) == -1 && !child,
+        "invalid typed props leave no instance");
+  check(mochi_native_mount_props(BYTES("TypedNativeProbe"),
+        BYTES("{\"station\":1,\"meta\":{\"row\":[\"parent\"]}}"), &child) == 0 && child,
+        "mount with typed properties");
+  check(mochi_native_bind(child, 0x0201, BYTES("label")) == 0, "bind typed label");
+  expect_patch(child, BYTES("1:1:parent"));
+  check(mochi_native_set_props(child, BYTES("{\"station\":2,\"meta\":{\"row\":[\"updated\"]}}")) == 0,
+        "batch typed prop update");
+  expect_patch(child, BYTES("1:2:updated"));
+  check(mochi_native_set_props(child, BYTES("{\"station\":{\"__mochi_number\":\"i64\",\"value\":\"9007199254740993\"}}")) == 0,
+        "transport exact wide integer");
+  expect_patch(child, BYTES("1:9007199254740993:updated"));
+
+  check(mochi_native_dispatch(child, BYTES("publish"), BYTES("[]")) == 0, "dispatch typed child event");
+  MochiNativeBytes events = mochi_native_take_child_events();
+  char expected[256];
+  int length = snprintf(expected, sizeof(expected),
+      "{\"__child_event\":\"confirm\",\"instance\":\"%llu\",\"payload\":{\"id\":"
+      "{\"__mochi_number\":\"i64\",\"value\":\"9007199254740993\"}}}\n", (unsigned long long)child);
+  check(length > 0 && events.length == (size_t)length && memcmp(events.data, expected, events.length) == 0,
+        "event transport preserves sender and exact payload");
+  check(mochi_native_take_child_events().length == 0, "take event batch once");
+  check(mochi_native_dispatch(child, BYTES("publish_then_fail"), BYTES("[]")) == -1 &&
+        mochi_native_take_child_events().length == 0, "failed Ruby entry discards events");
+  check(mochi_native_dispatch(child, BYTES("publish_with_host_effect"), BYTES("[]")) == -1 &&
+        mochi_native_take_child_events().length == 0, "mixed unsupported effects discard events");
+  check(mochi_native_unmount(child) == 0 && mochi_component_count() == 0 && mochi_binding_count() == 0,
+        "dispose typed child");
+}
+
 static void malformed_patches(void) {
   static const uint8_t bad[] = {1, 2, 0xff, 0xff, 0xff, 0xff, 'x'};
   uint16_t id = 0;
@@ -113,6 +146,7 @@ int main(int argc, char **argv) {
   expect_patch(b, BYTES("still active"));
   check(mochi_native_unmount(b) == 0 && mochi_native_unmount(replacement) == 0 &&
         mochi_component_count() == 0 && mochi_binding_count() == 0, "release remaining instances");
+  typed_composition();
   malformed_patches();
   puts("PASS native GVM ABI");
   return 0;

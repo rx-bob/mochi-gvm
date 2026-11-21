@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MOCHI_NATIVE_ABI_VERSION 1
+#define MOCHI_NATIVE_ABI_VERSION 2
 
 typedef uint64_t MochiNativeInstance;
 
@@ -40,6 +40,13 @@ const char *mochi_native_capacity_fingerprint(void);
 int mochi_native_open(void);
 int mochi_native_load(MochiNativeBytes irep);
 int mochi_native_mount(MochiNativeBytes class_name, MochiNativeInstance *instance);
+/* Props are an object in Mochi's typed JSON transport. */
+int mochi_native_mount_props(MochiNativeBytes class_name, MochiNativeBytes json_props,
+                            MochiNativeInstance *instance);
+int mochi_native_set_props(MochiNativeInstance instance, MochiNativeBytes json_props);
+/* Drain newline-delimited typed child events. The returned bytes are borrowed
+ * through the next mutating call. Failed calls discard pending effects. */
+MochiNativeBytes mochi_native_take_child_events(void);
 int mochi_native_bind(MochiNativeInstance instance, uint16_t id, MochiNativeBytes getter);
 /* On success, arity contains the required positional count, or -1 if absent. */
 int mochi_native_method_arity(MochiNativeInstance instance, MochiNativeBytes method, int64_t *arity);
