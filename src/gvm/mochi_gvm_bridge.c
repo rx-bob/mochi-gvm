@@ -2372,7 +2372,9 @@ static int native_effects_supported(int32_t length) {
     if (!newline) return 0;
     size_t size = (size_t)(newline - cursor);
     const char child[] = "{\"__child_event\":";
-    int allowed = size >= sizeof(child) - 1 && !memcmp(cursor, child, sizeof(child) - 1);
+    const char focus[] = "{\"__host\":\"focus\",";
+    int allowed = (size >= sizeof(child) - 1 && !memcmp(cursor, child, sizeof(child) - 1)) ||
+                  (size >= sizeof(focus) - 1 && !memcmp(cursor, focus, sizeof(focus) - 1));
     if (g_native_storage_enabled && !allowed) {
       for (size_t i = 0; i < sizeof(storage) / sizeof(storage[0]); ++i) {
         size_t prefix = strlen(storage[i]);
