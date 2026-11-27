@@ -455,6 +455,21 @@ fn test_binding_text_serializes_collections_as_json(t: goosetest::Test&) {
     t.assert_eq("", vm::binding_text(machine, vm::state_alloc_string(pool, "")));
 }
 
+fn test_binding_table_reaches_capacity(t: goosetest::Test&) {
+    var pool: vm::StatePool = vm::StatePool {
+        ..
+    };
+    let class_id = vm::state_define_class(pool, 1, vm::NULL_CLASS_ID);
+    let instance = vm::state_alloc_instance(pool, class_id);
+    let getter = vm::intern_symbol("label_text");
+    for index in 0..vm::MAX_BINDINGS {
+        t.assert_eq(0, vm::binding_register(pool, instance, index as u32, getter));
+    }
+    t.assert_eq(-1, vm::binding_register(pool, instance, vm::MAX_BINDINGS, getter));
+    t.assert_eq(vm::MAX_BINDINGS, vm::binding_unregister_all(pool, instance));
+    t.assert_eq(0, vm::binding_register(pool, instance, 0, getter));
+}
+
 fn test_binding_unregister_disposed_instance(t: goosetest::Test&) {
     let count_symbol = vm::intern_symbol("@count");
     let label_symbol = vm::intern_symbol("@label");

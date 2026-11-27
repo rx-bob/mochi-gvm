@@ -5,6 +5,7 @@ import.rite_types;
 import.state_pool;
 import.value_arena;
 import.vm_core;
+import.vm_ops;
 
 struct DefinitionInstruction {
     frame_index: i64,
@@ -83,7 +84,8 @@ fn vm_extended_definition(machine: Vm&, instruction: DefinitionInstruction, fram
         return vm_fail(machine, VmError.BadOperand, instruction.pc);
     }
     let op = instruction.iseq[instruction.pc];
-    if op != OP_TCLASS && op != OP_METHOD && op != OP_DEF {
+    let fused = op == OP_TDEF || op == OP_SDEF;
+    if op != OP_TCLASS && op != OP_METHOD && op != OP_DEF && !fused {
         return vm_fail(machine, VmError.BadOpcode, instruction.pc + 1);
     }
     let extension = instruction.op;
@@ -107,7 +109,13 @@ fn vm_extended_definition(machine: Vm&, instruction: DefinitionInstruction, fram
         0
     };
     let args_at = instruction.pc + 1;
-    if args_at + a_bytes + b_bytes > instruction.iseq.len {
+    let after_pair = args_at + a_bytes + b_bytes;
+    let next_pc = after_pair + (if fused {
+            1
+        } else {
+            0
+        });
+    if next_pc > instruction.iseq.len {
         return vm_fail(machine, VmError.BadOperand, args_at);
     }
     let a = vm_read_extended_byte(instruction.iseq, args_at, width_a);
@@ -117,10 +125,20 @@ fn vm_extended_definition(machine: Vm&, instruction: DefinitionInstruction, fram
     } else {
         0
     };
+    if fused {
+        let ops = Operands {
+            a: a,
+            b: b,
+            c: instruction.iseq[after_pair],
+            valid: true,
+            ..
+        };
+        return vm_register_fused_definition(machine, frame, instruction.record, ops, next_pc, op);
+    }
     let operands = DefinitionOperands {
         a: a,
         b: b,
-        next_pc: args_at + a_bytes + b_bytes
+        next_pc: next_pc
     };
     let decoded = DefinitionInstruction {
         frame_index: instruction.frame_index,

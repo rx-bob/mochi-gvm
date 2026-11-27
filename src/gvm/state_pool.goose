@@ -51,7 +51,7 @@ root struct StatePool {
     ivars: IvarSlot[..MAX_STATE_IVARS] = [],
     slots: ArenaSlot[..MAX_STATE_SLOTS] = [],
     components: MrbValue[>..] = [],
-    bindings: BindingEntry[>..] = [],
+    bindings: BindingEntry[..MAX_BINDINGS] = [],
     computed: ComputedEntry[>..] = [],
     computed_depth: i64 = 0,
     blob: u8[..MAX_STATE_BYTES] = [],

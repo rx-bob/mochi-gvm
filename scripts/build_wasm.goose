@@ -62,7 +62,7 @@ fn generate_goose_c() {
     var lowered: u8[>..] = [];
     var wasm_lowered: u8[>..] = [];
     if !read_file(GOOSE_C, generated)
-        || static_storage::lower(generated, lowered) != 11
+        || static_storage::lower(generated, lowered) != 12
         || !static_storage::lower_wasm_runtime(lowered, wasm_lowered)
         || !write_file(GOOSE_C, wasm_lowered) {
         print("build_wasm failed: persistent storage initialization layout changed");
@@ -142,6 +142,11 @@ fn main() {
     if !make_dir(OUT_DIR) {
         print("build_wasm failed: cannot create ", OUT_DIR);
         exit(1);
+    }
+    var native_only: u8[>..] = [];
+    if env("MOCHI_GVM_NATIVE_ONLY", native_only) && native_only == "1" {
+        generate_goose_c();
+        return;
     }
     if mochi_prepare_toolchain() != 0 {
         print("build_wasm failed: toolchain is incomplete");

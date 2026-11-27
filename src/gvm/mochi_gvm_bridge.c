@@ -18,6 +18,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef __EMSCRIPTEN__
+#include <time.h>
+#endif
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -1246,11 +1249,21 @@ EM_JS(int, mochi_host_dispatch_js,
 static int mochi_host_dispatch_js(const char *capability, const char *operation,
                                   const char *args, char *out, int cap,
                                   char *err, int err_cap) {
-  (void)capability;
-  (void)operation;
-  (void)args;
-  (void)out;
-  (void)cap;
+  if (strcmp(capability, "time") == 0 && strcmp(operation, "now") == 0 &&
+      strcmp(args, "[]") == 0) {
+    const char prefix[] = "{\"ok\":true,\"value\":";
+    struct timespec now;
+    if (cap > (int)sizeof(prefix) && timespec_get(&now, TIME_UTC) == TIME_UTC) {
+      const size_t offset = sizeof(prefix) - 1;
+      int64_t milliseconds = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+      int length = format_i64_decimal(out + offset, (size_t)cap - offset - 1, milliseconds);
+      if (length > 0) {
+        memcpy(out, prefix, offset);
+        memcpy(out + offset + (size_t)length, "}", 2);
+        return 0;
+      }
+    }
+  }
   if (err && err_cap > 0) {
     copy_cstr_bounded(err, (size_t)err_cap, "host capability is unavailable");
   }
@@ -1371,19 +1384,21 @@ EM_JS(int, mochi_download_js,
     return -1;
   }
 });
-#else
-static int mochi_download_js(const char *owner, const char *filename, int filename_len,
-                            const char *mime, int mime_len, const uint32_t *parts, int count,
-                            char *err, int err_cap) {
-  copy_cstr_bounded(err, (size_t)err_cap, "download requires a browser host");
-  return -1;
-}
+#elif defined(MOCHI_NATIVE_STANDALONE)
+extern int mochi_desktop_download(const char *filename, size_t filename_len,
+                                  const uint8_t *const *parts, const size_t *lengths,
+                                  size_t count, char *err, size_t err_cap);
 #endif
 
 static mrb_value mochi_download_native(mrb_state *mrb, mrb_value self) {
   mrb_value filename, mime, content;
+#ifdef __EMSCRIPTEN__
   uint32_t parts[1024 * 2];
   char owner[32];
+#elif defined(MOCHI_NATIVE_STANDALONE)
+  const uint8_t *parts[1024];
+  size_t lengths[1024];
+#endif
   int64_t count;
   (void)self;
   if (mrb_get_args(mrb, "ooo", &filename, &mime, &content) != 3 ||
@@ -1401,15 +1416,30 @@ static mrb_value mochi_download_native(mrb_state *mrb, mrb_value self) {
   for (int64_t index = 0; index < count; index++) {
     mrb_value part = goose_vm_download_part(content, index);
     if (!mrb_string_p(part)) return mochi_host_failure(mrb, "download: every part must be a String");
+#ifdef __EMSCRIPTEN__
     parts[index * 2] = (uint32_t)(uintptr_t)RSTRING_PTR(part);
     parts[index * 2 + 1] = (uint32_t)RSTRING_LEN(part);
+#elif defined(MOCHI_NATIVE_STANDALONE)
+    parts[index] = (const uint8_t *)RSTRING_PTR(part);
+    lengths[index] = (size_t)RSTRING_LEN(part);
+#endif
   }
+#ifdef __EMSCRIPTEN__
   format_u64_decimal(owner, sizeof(owner), (uint64_t)goose_vm_current_self());
   if (mochi_download_js(owner, RSTRING_PTR(filename), (int)RSTRING_LEN(filename),
       RSTRING_PTR(mime), (int)RSTRING_LEN(mime), parts, (int)count,
       g_host_error, (int)sizeof(g_host_error)) != 0) {
     return mochi_host_failure(mrb, g_host_error);
   }
+#elif defined(MOCHI_NATIVE_STANDALONE)
+  if (mochi_desktop_download(RSTRING_PTR(filename), (size_t)RSTRING_LEN(filename),
+      parts, lengths, (size_t)count, g_host_error, sizeof(g_host_error)) != 0) {
+    return mochi_host_failure(mrb, g_host_error);
+  }
+#else
+  return mochi_host_failure(mrb, "download requires an application host");
+#endif
+
   return mrb_true_value();
 }
 
@@ -2359,6 +2389,7 @@ MochiNativeBytes mochi_native_error(void) {
 
 extern void goose_vm_clear_storage(void);
 static int g_native_storage_enabled;
+static int g_native_fetch_enabled;
 
 static int native_effects_supported(int32_t length) {
   static const char *const storage[] = {
@@ -2393,7 +2424,7 @@ static int native_effects_supported(int32_t length) {
 static int native_finish(int status) {
   if (status == 0) {
     int32_t emitted = mochi_emit_outbox_len();
-    if (emitted >= 0 && g_fetch_outbox_len == 0 && native_effects_supported(emitted)) return 0;
+    if (emitted >= 0 && (g_native_fetch_enabled || g_fetch_outbox_len == 0) && native_effects_supported(emitted)) return 0;
     if (emitted >= 0) set_error_text("unsupported native host operation");
   }
   mochi_fetch_outbox_clear();
@@ -2486,6 +2517,24 @@ MochiNativeBytes mochi_native_take_effects(void) {
   MochiNativeBytes pending = {g_emit_outbox, (size_t)g_emit_outbox_len};
   g_emit_outbox_len = 0;
   return pending;
+}
+
+void mochi_native_enable_fetch(void) { g_native_fetch_enabled = 1; }
+
+MochiNativeBytes mochi_native_take_fetch(void) {
+  MochiNativeBytes pending = {g_fetch_outbox, (size_t)g_fetch_outbox_len};
+  g_fetch_outbox_len = 0;
+  return pending;
+}
+
+int mochi_native_deliver_fetch(MochiNativeInstance instance, MochiNativeBytes callback,
+                               MochiNativeBytes response) {
+  if (!instance || !native_bytes_valid(callback) || !native_bytes_valid(response) ||
+      response.length > MOCHI_FETCH_CAPACITY)
+    return native_fail("invalid native fetch response");
+  memcpy(g_fetch_inbox, response.data, response.length);
+  return native_finish(mochi_deliver_fetch(instance, callback.data, (int32_t)callback.length,
+                                          (int32_t)response.length));
 }
 
 int mochi_native_reset_storage(void) {

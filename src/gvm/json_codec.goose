@@ -2,6 +2,7 @@
 namespace vm;
 
 import.builtins;
+import.capacity_config;
 import.json_args;
 import.scratch_alloc;
 import.signals;
@@ -11,7 +12,7 @@ import.vm_errors;
 import.vm_methods;
 import.vm_num;
 
-let JSON_DOCUMENT_BYTES = 48000;
+let JSON_DOCUMENT_BYTES = SCRATCH_CAPACITY_BYTES * 48000 / 131072;
 
 fn json_valid_utf8(text: u8[:]) -> bool {
     var at = 0;

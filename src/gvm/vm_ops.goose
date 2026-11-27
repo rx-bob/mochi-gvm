@@ -446,8 +446,14 @@ fn vm_op_tdef(
     if !ops.valid {
         return vm_fail(machine, VmError.BadOperand, pc);
     }
+    return vm_register_fused_definition(machine, frame, record, ops, pc + 3, op);
+}
+
+fn vm_register_fused_definition(
+    machine: Vm&, frame: CallFrame, record: IrepRecord, ops: Operands, next_pc: i64, op: u8
+) -> Step {
     if ops.a > record.nregs || (op == OP_SDEF && ops.a >= record.nregs) {
-        return vm_fail(machine, VmError.BadOperand, pc + 3);
+        return vm_fail(machine, VmError.BadOperand, next_pc);
     }
     let symbol, symbol_ok = vm_record_symbol(machine.file, record, ops.b);
     let child = vm_child_record(machine.file, frame.record_index, ops.c);
@@ -455,19 +461,19 @@ fn vm_op_tdef(
     if op == OP_SDEF {
         let explicit, explicit_ok = vm_read_register(machine, record, frame.base, ops.a);
         if !explicit_ok {
-            return vm_fail(machine, VmError.BadOperand, pc + 3);
+            return vm_fail(machine, VmError.BadOperand, next_pc);
         }
         target = explicit;
     }
     if !symbol_ok || child < 0 || !mrb_is_class(target) {
-        return vm_fail(machine, VmError.TypeMismatch, pc + 3);
+        return vm_fail(machine, VmError.TypeMismatch, next_pc);
     }
     vm_define_method(machine, mrb_class_id(target), symbol, child, frame.lexical_owner);
     // mrbc's fused definition can name its ignored expression-result register
     // one past nregs in a class body. Definitions in statement position do
     // not consume that value; all other invalid register references still fail.
     if ops.a < record.nregs && !vm_write_register(machine, record, frame.base, ops.a, mrb_symbol(symbol)) {
-        return vm_fail(machine, VmError.BadOperand, pc + 3);
+        return vm_fail(machine, VmError.BadOperand, next_pc);
     }
-    return vm_step_continue(pc + 3);
+    return vm_step_continue(next_pc);
 }

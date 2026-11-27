@@ -47,6 +47,12 @@ int mochi_native_set_props(MochiNativeInstance instance, MochiNativeBytes json_p
 /* Drain newline-delimited child events and enabled storage commands. Bytes
  * are borrowed through the next mutating call. Failed entries discard effects. */
 MochiNativeBytes mochi_native_take_effects(void);
+/* Opt in to the fetch outbox. Drain after each successful mounted entry.
+ * The returned newline-delimited records are borrowed like other effects. */
+void mochi_native_enable_fetch(void);
+MochiNativeBytes mochi_native_take_fetch(void);
+int mochi_native_deliver_fetch(MochiNativeInstance instance, MochiNativeBytes callback,
+                               MochiNativeBytes response);
 /* Enable storage and clear the optimistic VM mirror before reseeding the
  * durable snapshot. Empty value slices are valid. Reset/seed only between
  * Ruby entries. The host restores the mirror after a failed entry. */
