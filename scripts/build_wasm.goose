@@ -61,8 +61,14 @@ fn generate_goose_c() {
     var generated: u8[>..] = [];
     var lowered: u8[>..] = [];
     var wasm_lowered: u8[>..] = [];
-    if !read_file(GOOSE_C, generated)
-        || static_storage::lower(generated, lowered) != 12
+    if !read_file(GOOSE_C, generated) {
+        print("build_wasm failed: cannot read generated C");
+        exit(1);
+    }
+    let lowered_count = static_storage::lower(generated, lowered);
+    // The binding pool disappears when a small custom capacity profile lets
+    // Goose initialize it without the temporary block this pass replaces.
+    if (lowered_count != 11 && lowered_count != 12)
         || !static_storage::lower_wasm_runtime(lowered, wasm_lowered)
         || !write_file(GOOSE_C, wasm_lowered) {
         print("build_wasm failed: persistent storage initialization layout changed");
